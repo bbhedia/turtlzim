@@ -1,0 +1,15 @@
+# Rust
+/target/
+**/target/
+Cargo.lock
+
+# Node (web/desktop/mobile shells, sync server — added later)
+node_modules/
+dist/
+build/
+
+# Claude Code session-local state
+.claude/
+
+# OS
+.DS_Store

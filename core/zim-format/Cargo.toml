@@ -1,0 +1,10 @@
+[package]
+name = "zim-format"
+version = "0.1.0"
+edition = "2021"
+description = "Parser and serializer for the Zim wiki text format (reimplemented from documented syntax, no Zim source copied)."
+license = "GPL-3.0-or-later"
+
+[dependencies]
+
+[dev-dependencies]
