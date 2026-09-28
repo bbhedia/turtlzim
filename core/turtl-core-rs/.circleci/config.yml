@@ -1,0 +1,103 @@
+aliases:
+  - &defaults
+    working_directory: /tmp/turtl/core
+
+version: 2
+jobs:
+  test:
+    <<: *defaults
+
+    docker:
+      - image: circleci/node:8.11.3
+      - image: circleci/postgres:9.6.2-alpine
+        environment:
+          - POSTGRES_USER=turtl
+          - POSTGRES_DB=turtl
+
+    steps:
+      - checkout
+
+      # set up/run server
+      - run: git clone https://github.com/turtl/server ../server
+      - run: chmod 755 ../server/scripts/*
+      - run: cp ../server/config/config.yaml.ci ../server/config/config.yaml
+      - run: sleep 5
+      - restore_cache:
+          key: server-npm-v1-{{ checksum "../server/package.json" }}
+          key: server-npm-v1-
+      - run: cd ../server && npm install
+      - save_cache:
+          key: server-npm-v1-{{ checksum "../server/package.json" }}
+          paths:
+            - ../server/node_modules
+      - run: mkdir -p ../server/plugins
+      - run: mkdir -p ../server/public/uploads
+      - run: cd ../server && ./scripts/init-db.sh
+      - run: node ../server/tools/populate-test-data.js
+      - run:
+          command: node ../server/server.js
+          background: true
+
+      # update lib type
+      - run: sed -i 's|crate-type = .*|crate-type = ["cdylib"]|' Cargo.toml
+
+      # set up config
+      - run: bash ./.circleci/prepare-config.sh
+
+      # install our apt deps
+      - run: sudo apt-get update
+      - run: sudo apt-get install --fix-missing gpgv2
+
+      # install libsodium
+      - run: wget 'https://github.com/jedisct1/libsodium/releases/download/1.0.16/libsodium-1.0.16.tar.gz' -O /tmp/libsodium.tar.gz
+      # verify sodium
+      - run: gpg --import build-tools/libsodium.gpg.pub
+      - run: gpg --verify build-tools/libsodium-1.0.16.tar.gz.sig /tmp/libsodium.tar.gz
+      - restore_cache:
+          key: sodium-v4-{{ checksum "/tmp/libsodium.tar.gz" }}
+      - run: |
+          cd /tmp
+          tar -xvf ./libsodium.tar.gz
+          cd libsodium-1.0.16
+          CFLAGS="-fPIC -O2" ./configure --disable-shared --enable-static
+          make CFLAGS="-fPIC -O2"
+      - save_cache:
+          key: sodium-v4-{{ checksum "/tmp/libsodium.tar.gz" }}
+          paths:
+            - /tmp/libsodium-1.0.16
+      - run: cd /tmp/libsodium-1.0.16 && sudo make install
+
+      # install rust
+      - run: gpg --import build-tools/rust.gpg.pub
+      - run: wget https://static.rust-lang.org/rustup.sh -O /tmp/rustup.sh && chmod 0750 /tmp/rustup.sh
+      - run: sudo /tmp/rustup.sh --revision=1.27.1
+
+      # build the release
+      - restore_cache:
+          key: core-build-v4-{{ checksum "Cargo.lock" }}
+      - run: make SODIUM_STATIC=static RUST_BACKTRACE=1 CARGO_BUILD_ARGS="--release -p carrier -p jedi -p dumpy -p turtl_core" test
+      - run: make SODIUM_STATIC=static release
+      - run: |
+          cd integration-tests
+          make \
+            RUST_BACKTRACE=1 \
+            TURTL_LOGLEVEL=info \
+            LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:../target/release" \
+            test
+      - save_cache:
+          key: core-build-v4-{{ checksum "Cargo.lock" }}
+          paths:
+            - /home/circleci/.cargo
+            - target/
+
+workflows:
+  version: 2
+  test:
+    jobs:
+      - test:
+          filters:
+            branches:
+              only: master
+            tags:
+              only: /.*/
+

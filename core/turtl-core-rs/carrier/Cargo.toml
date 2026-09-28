@@ -1,0 +1,14 @@
+[package]
+name = "carrier"
+version = "0.1.0"
+authors = ["Andrew Danger Lyon <orthecreedence@gmail.com>"]
+
+[lib]
+name = "carrier"
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+crossbeam = "0.2.10"
+lazy_static = "1.4.0"
+quick-error = "1.2.3"
+

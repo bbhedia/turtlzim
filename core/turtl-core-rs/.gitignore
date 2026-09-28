@@ -1,0 +1,10 @@
+vars.mk
+vars.ios.mk
+target
+config.yaml
+*sess.vim
+*.exe
+*.stackdump
+*.un~
+/scripts/cross/
+
