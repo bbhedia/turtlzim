@@ -207,12 +207,14 @@ mod tests {
 
     #[test]
     fn runs_queries() {
+        // `&[]` no longer type-infers as a param list, and `Row::get_checked`
+        // was renamed to `get` in the rusqlite version this now resolves to.
         let storage = pretest();
-        storage.conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name VARCHAR(16))", &[]).unwrap();
+        storage.conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name VARCHAR(16))", rusqlite::NO_PARAMS).unwrap();
         storage.conn.execute("INSERT INTO test (name) VALUES ($1)", &[&String::from("bartholomew")]).unwrap();
         let then = "SELECT * FROM test LIMIT 1";
-        let res = storage.conn.query_row_and_then(then, &[], |row| -> TResult<String> {
-            let name_sql: SqlValue = row.get_checked("name").unwrap();
+        let res = storage.conn.query_row_and_then(then, rusqlite::NO_PARAMS, |row| -> TResult<String> {
+            let name_sql: SqlValue = row.get("name").unwrap();
             match name_sql {
                 SqlValue::Text(ref x) => Ok(x.clone()),
                 _ => panic!("bad dates (name field was not a string)"),

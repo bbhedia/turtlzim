@@ -1,7 +1,6 @@
 # Rust
 /target/
 **/target/
-Cargo.lock
 
 # Node (web/desktop/mobile shells, sync server — added later)
 node_modules/

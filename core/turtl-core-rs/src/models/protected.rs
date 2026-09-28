@@ -389,8 +389,12 @@ macro_rules! protected {
         }
     ) => {
         model! {
-            $(#[$struct_meta])*
+            // #[derive(Protected)] must precede $struct_meta (which carries
+            // #[protected_modeltype(...)]) so the helper attribute is never
+            // used before its introducing derive in the expanded token
+            // stream -- modern rustc hard-errors on that (legacy_derive_helpers).
             #[derive(Protected)]
+            $(#[$struct_meta])*
             pub struct $name {
                 #[serde(skip)]
                 _key: Option<::crypto::Key>,

@@ -3,3 +3,10 @@ resolver = "2"
 members = [
     "core/zim-format",
 ]
+# turtl-core-rs is vendored (git subtree) from https://github.com/turtl/core-rs
+# and is its OWN Cargo workspace (it declares [workspace] in its own root
+# Cargo.toml, with several path-dependency member crates of its own). It must
+# stay excluded here rather than becoming a member of this workspace.
+exclude = [
+    "core/turtl-core-rs",
+]
