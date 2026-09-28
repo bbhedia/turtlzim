@@ -259,8 +259,16 @@ Networking and concurrency are unified on async/await across both native and web
 ## Status
 
 - [x] Toolchain: `wasm32-unknown-unknown` target + `wasm-pack` 0.15.0 installed.
-- [ ] Step 2: crypto PoC (libsodium.js JS bridge, `chacha20poly1305_ietf` seal/open +
-      randombytes, golden-vector parity vs. native `sodiumoxide`) — in progress.
+- [x] Step 2: crypto PoC (libsodium.js JS bridge, `chacha20poly1305_ietf` seal/open +
+      randombytes, golden-vector parity vs. native `sodiumoxide`) — **done**. New crate
+      `core/wasm-crypto-poc` (`wasm-pack build --target nodejs`) reproduces `turtl_core`'s
+      exact envelope format (`[version][desc_len][desc][nonce_len][nonce][ciphertext]`,
+      header-as-AAD) via a wasm-bindgen JS bridge to real `libsodium-wrappers`. 11 golden
+      vectors generated from the real native `crypto::encrypt()` path (empty/short/long-KB/
+      binary/non-ASCII plaintexts) all pass byte-exact parity in both directions
+      (`wasm_encrypt` output == native envelope bytes; `wasm_decrypt(native envelope)` ==
+      original plaintext), confirmed on a from-scratch rebuild. See
+      `core/wasm-crypto-poc/{src/lib.rs,js/sodium_bridge.js,test/run_test.js}`.
 - [ ] Step 3: feature-gate `turtl_core` for wasm32 (threads, blocking reqwest, rusqlite).
 - [ ] Step 4: `wasm-pack build --target web` producing a loadable module end to end.
 - [ ] Step 5: full parity pass before calling the port done.

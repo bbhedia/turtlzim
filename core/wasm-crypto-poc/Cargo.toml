@@ -1,0 +1,16 @@
+[package]
+name = "wasm-crypto-poc"
+version = "0.1.0"
+edition = "2021"
+description = "Proof-of-concept: reproduce turtl_core's exact ciphertext envelope format in a wasm32 build using REAL libsodium (libsodium-wrappers via a wasm-bindgen JS bridge), not a reimplementation. See docs/wasm-port-plan.md, step 2."
+license = "GPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+[dev-dependencies]

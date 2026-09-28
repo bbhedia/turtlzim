@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "core/zim-format",
+    "core/wasm-crypto-poc",
 ]
 # turtl-core-rs is vendored (git subtree) from https://github.com/turtl/core-rs
 # and is its OWN Cargo workspace (it declares [workspace] in its own root

@@ -454,5 +454,96 @@ mod tests {
         let res = asym::decrypt(&her_pk, &her_sk, encrypted);
         assert!(res.is_err());
     }
+
+    #[test]
+    /// Golden-vector generator for the WASM crypto proof-of-concept
+    /// (see docs/wasm-port-plan.md, "step 2: crypto PoC").
+    ///
+    /// This is NOT a correctness assertion against fixed expected output --
+    /// it drives the real, native `crypto::encrypt()` path (the same one
+    /// every note/board/space/keychain-key encryption in this crate goes
+    /// through) over a spread of (key, plaintext) pairs and dumps
+    /// `{key_hex, plaintext_hex, envelope_hex}` triples as JSON to
+    /// `core/wasm-crypto-poc/test/golden_vectors.json`, so a wasm-bindgen +
+    /// libsodium.js reimplementation of the envelope format can be checked
+    /// for byte-exact parity against real native output (see
+    /// `core/wasm-crypto-poc/test/run_test.js`, which parses each envelope
+    /// to pull out the nonce libsodium/`encrypt()` chose at random here,
+    /// then feeds `(key, nonce, plaintext)` into the wasm build's
+    /// `wasm_encrypt` and diffs the raw bytes against `envelope_hex`).
+    fn generate_wasm_golden_vectors() {
+        use ::std::fs;
+        use ::std::path::Path;
+
+        fn make_vector(name: &'static str, key: Key, plaintext: Vec<u8>) -> ::serde_json::Value {
+            let op = CryptoOp::new("chacha20poly1305").unwrap();
+            let envelope = encrypt(&key, plaintext.clone(), op).unwrap();
+            let key_hex = to_hex(key.data()).unwrap();
+            let plaintext_hex = to_hex(&plaintext).unwrap();
+            let envelope_hex = to_hex(&envelope).unwrap();
+            println!(
+                "[{}] key={} plaintext_len={} envelope_len={}\n  plaintext={}\n  envelope ={}",
+                name, key_hex, plaintext.len(), envelope.len(), plaintext_hex, envelope_hex
+            );
+            json!({
+                "name": name,
+                "key_hex": key_hex,
+                "plaintext_hex": plaintext_hex,
+                "envelope_hex": envelope_hex,
+            })
+        }
+
+        // a fixed (non-random) key, reused for a couple of vectors so we
+        // also cover "same key, different plaintext"
+        let fixed_key = Key::new(from_base64(&String::from("2gtrzmvEQkfK9Lq+0eGqLjDrmlKBabp7T212Zdv35T0=")).unwrap());
+
+        // 256 bytes covering every possible byte value once
+        let byte_ramp_256: Vec<u8> = (0..=255u8).collect();
+
+        // deterministic 4KB "long plaintext" ramp pattern
+        let long_4kb: Vec<u8> = (0..4096usize).map(|i| (i % 256) as u8).collect();
+
+        // 8KB of repeated realistic text
+        let paragraph = "The quick brown fox jumps over the lazy dog. Zim wiki notes, encrypted end-to-end. ";
+        let mut long_8kb: Vec<u8> = Vec::new();
+        while long_8kb.len() < 8192 {
+            long_8kb.extend_from_slice(paragraph.as_bytes());
+        }
+        long_8kb.truncate(8192);
+
+        // bytes with embedded NUL and 0xFF bytes mixed with ASCII
+        let embedded_nulls: Vec<u8> = vec![0x00, 0x41, 0x00, 0xFF, 0xFE, 0x42, 0x00, 0x00, 0xFF, 0x43];
+
+        // non-ASCII UTF-8 (accented latin, CJK, emoji)
+        let non_ascii = String::from("caf\u{00e9} \u{4f60}\u{597d} \u{1f512}\u{1f5dd}\u{fe0f} \u{00fc}\u{00f6}\u{00e4}");
+
+        // real random data, several KB
+        let long_random_16kb = low::rand_bytes(16384).unwrap();
+        let binary_random_1kb = low::rand_bytes(1024).unwrap();
+
+        // a realistic small note JSON body
+        let short_json_note = String::from(r#"{"title":"grocery list","body":"- eggs\n- milk\n[ ] buy stamps","tags":["home"],"mod":1735000000,"created":1735000000.0,"keys":[]}"#);
+
+        let mut vectors: Vec<::serde_json::Value> = Vec::new();
+        vectors.push(make_vector("empty", Key::random().unwrap(), Vec::new()));
+        vectors.push(make_vector("single_byte", Key::random().unwrap(), vec![0x41]));
+        vectors.push(make_vector("short_ascii", fixed_key.clone(), Vec::from("The quick brown fox jumps over the lazy dog".as_bytes())));
+        vectors.push(make_vector("short_json_note", Key::random().unwrap(), Vec::from(short_json_note.as_bytes())));
+        vectors.push(make_vector("byte_ramp_256", Key::random().unwrap(), byte_ramp_256));
+        vectors.push(make_vector("non_ascii_utf8", Key::random().unwrap(), Vec::from(non_ascii.as_bytes())));
+        vectors.push(make_vector("embedded_nulls", Key::random().unwrap(), embedded_nulls));
+        vectors.push(make_vector("long_4kb", Key::random().unwrap(), long_4kb));
+        vectors.push(make_vector("long_8kb_text", fixed_key.clone(), long_8kb));
+        vectors.push(make_vector("long_random_16kb", Key::random().unwrap(), long_random_16kb));
+        vectors.push(make_vector("binary_random_1kb", Key::random().unwrap(), binary_random_1kb));
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let out_dir = Path::new(manifest_dir).join("..").join("wasm-crypto-poc").join("test");
+        fs::create_dir_all(&out_dir).expect("failed to create wasm-crypto-poc/test output dir");
+        let out_path = out_dir.join("golden_vectors.json");
+        let json_str = ::serde_json::to_string_pretty(&vectors).unwrap();
+        fs::write(&out_path, json_str).expect("failed to write golden_vectors.json");
+        println!("wrote {} golden vectors to {}", vectors.len(), out_path.display());
+    }
 }
 
