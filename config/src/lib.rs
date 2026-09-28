@@ -1,0 +1,109 @@
+extern crate jedi;
+#[macro_use]
+extern crate lazy_static;
+#[macro_use]
+extern crate serde_json;
+
+use ::std::fs::File;
+use ::std::path::Path;
+use ::std::io::prelude::*;
+use ::std::env;
+use ::std::sync::RwLock;
+
+use ::jedi::{JSONError, Value, Serialize, DeserializeOwned};
+
+pub type TResult<T> = Result<T, JSONError>;
+
+lazy_static! {
+    /// create a static/global CONFIG var, and load it with our config data
+    static ref CONFIG: RwLock<Value> = RwLock::new(Value::Null);
+}
+
+/// load/parse our config file, and return the parsed JSON value
+pub fn load_config(location: Option<String>) -> TResult<()> {
+    let path_env = location
+        .unwrap_or(env::var("TURTL_CONFIG_FILE").unwrap_or(String::from("config.yaml")));
+    if path_env == ":null:" {
+        let mut config_guard = (*CONFIG).write().expect("config::load_config() -- failed to grab config write lock");
+        *config_guard = json!({});
+        drop(config_guard);
+        return Ok(());
+    }
+    let path = Path::new(&path_env[..]);
+    let mut file = File::open(&path)
+        .map_err(|e| {
+            println!("config::load_config() -- error opening config file: {}: {}", path_env, e);
+            e
+        })?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(|e| {
+            println!("config::load_config() -- error reading config file: {}: {}", path_env, e);
+            e
+        })?;
+    let data: Value = jedi::parse_yaml(&contents)
+        .map_err(|e| {
+            println!("config::load_config() -- error parsing config yaml: {}: {}", path_env, e);
+            e
+        })?;
+    let mut config_guard = (*CONFIG).write().expect("config::load_config() -- failed to grab config write lock 2");
+    *config_guard = data;
+    drop(config_guard);
+    Ok(())
+}
+
+/// get a string value from our config
+pub fn get<T: DeserializeOwned>(keys: &[&str]) -> TResult<T> {
+    let guard = (*CONFIG).read().expect("config::get() -- failed to get read lock");
+    jedi::get(keys, &guard)
+        .map_err(|e| From::from(e))
+}
+
+/// Set a value into our heroic config
+pub fn set<T: Serialize>(keys: &[&str], val: &T) -> TResult<()> {
+    let mut guard = (*CONFIG).write().expect("config::set() -- failed to get write lock");
+    jedi::set(keys, &mut guard, val)
+        .map_err(|e| From::from(e))
+}
+
+fn deep_merge(val1: &mut Value, val2: &Value) -> TResult<Value> {
+    if !val1.is_object() || !val2.is_object() {
+        return Err(JSONError::InvalidKey(String::from("deep_merge() -- bad objects passed")));
+    }
+
+    {
+        let obj1 = val1.as_object_mut().expect("config::deep_merge() -- failed to get mut object from val");
+        let obj2 = val2.as_object().expect("config::deep_merge() -- failed to get object from val");
+        for (key, val) in obj2 {
+            if val.is_object() {
+                let merged_val = {
+                    let mut obj1_val = obj1.entry(key.clone()).or_insert(json!({}));
+                    if !obj1_val.is_null() && !obj1_val.is_object() {
+                        return Err(JSONError::InvalidKey(String::from("deep_merge() -- trying to merge an object into a non-object")));
+                    }
+                    deep_merge(&mut obj1_val, &val)?
+                };
+                obj1.insert(key.clone(), merged_val);
+            } else {
+                obj1.insert(key.clone(), val.clone());
+            }
+        }
+    }
+    Ok(val1.clone())
+}
+
+/// Merge a serializable object into the config object
+pub fn merge<T: Serialize>(obj: &T) -> TResult<()> {
+    let mut config_mut = (*CONFIG).write().expect("config::merge() -- failed to grab write lock");
+    let val = jedi::to_val(obj)?;
+    deep_merge(&mut config_mut, &val)?;
+    Ok(())
+}
+
+/// Send the entire config back as a val
+pub fn dump() -> TResult<Value> {
+    let config = (*CONFIG).read().expect("config::dump() -- failed to grab read lock");
+    let json = config.clone();
+    Ok(json)
+}
+

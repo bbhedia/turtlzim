@@ -1,0 +1,9 @@
+[package]
+name = "clouseau"
+version = "0.1.0"
+authors = ["Andrew Danger Lyon <orthecreedence@gmail.com>"]
+
+[dependencies]
+quick-error = "1.2.3"
+rusqlite = "0.20.0"
+

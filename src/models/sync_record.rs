@@ -1,0 +1,243 @@
+use ::jedi::{self, Value};
+use ::error::{TResult, TError};
+use ::models::model::Model;
+use ::models::protected::{Protected, Keyfinder};
+use ::storage::Storage;
+use ::turtl::Turtl;
+use ::sync::sync_model::SyncModel;
+use ::std::fmt::Display;
+
+/// How many times a sync record can fail before it's "frozen"
+static MAX_ALLOWED_FAILURES: u32 = 3;
+
+/// Makes sure we only accept certain actions for syncing
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum SyncAction {
+    #[serde(rename = "add")]
+    Add,
+    #[serde(rename = "edit")]
+    Edit,
+    #[serde(rename = "delete")]
+    Delete,
+    #[serde(rename = "move-space")]
+    MoveSpace,
+    #[serde(rename = "change-password")]
+    ChangePassword,
+}
+
+impl Default for SyncAction {
+    // edit, right?
+    fn default() -> Self { SyncAction::Edit }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum SyncType {
+    #[serde(rename = "user")]
+    User,
+    #[serde(rename = "keychain")]
+    Keychain,
+    #[serde(rename = "space")]
+    Space,
+    #[serde(rename = "board")]
+    Board,
+    #[serde(rename = "note")]
+    Note,
+    #[serde(rename = "file")]
+    File,
+    #[serde(rename = "file:incoming")]
+    FileIncoming,
+    #[serde(rename = "file:outgoing")]
+    FileOutgoing,
+    #[serde(rename = "invite")]
+    Invite,
+}
+
+impl SyncType {
+    pub fn from_string(s: String) -> TResult<Self> {
+        let val = Value::String(s);
+        Ok(jedi::from_val(val)?)
+    }
+}
+
+impl Default for SyncType {
+    // user? doesn't matter
+    fn default() -> Self { SyncType::User }
+}
+
+/// A helpful struct for dealing with sync errors
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SyncError {
+    #[serde(with = "::util::ser::int_converter")]
+    pub code: String,
+    pub msg: String,
+}
+
+protected! {
+    /// Define a container for our sync records
+    #[derive(Serialize, Deserialize)]
+    pub struct SyncRecord {
+        #[protected_field(public)]
+        pub action: SyncAction,
+        #[serde(deserialize_with = "::util::ser::int_converter::deserialize")]
+        #[protected_field(public)]
+        pub item_id: String,
+        #[serde(with = "::util::ser::int_converter")]
+        #[protected_field(public)]
+        pub user_id: String,
+        #[serde(rename = "type")]
+        #[protected_field(public)]
+        pub ty: SyncType,
+
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[protected_field(public)]
+        #[serde(with = "::util::ser::opt_vec_str_i64_converter")]
+        pub sync_ids: Option<Vec<i64>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[protected_field(public)]
+        pub missing: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[protected_field(public)]
+        pub data: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[protected_field(public)]
+        pub error: Option<SyncError>,
+        #[serde(default)]
+        #[protected_field(public)]
+        pub errcount: u32,
+        #[serde(default)]
+        #[protected_field(public)]
+        pub frozen: bool,
+        #[serde(default)]
+        #[protected_field(public)]
+        pub blocked: bool,
+    }
+}
+make_storable!(SyncRecord, "sync");
+impl SyncModel for SyncRecord {}
+impl Keyfinder for SyncRecord {}
+
+impl SyncRecord {
+    /// Clone the non-data, mostly-important bits of a sync record.
+    pub fn clone_shallow(&self) -> Self {
+        let mut new: SyncRecord = Default::default();
+        new.action = self.action.clone();
+        new.item_id = self.item_id.clone();
+        new.user_id = self.user_id.clone();
+        new.ty = self.ty.clone();
+        new
+    }
+
+    /// Set a local error into this sync item
+    pub fn set_error<T: Display>(&mut self, err: &T) {
+        self.error = Some(SyncError {
+            code: String::from("7471"),
+            msg: format!("{}", err),
+        });
+    }
+
+    /// Given a DB and some params, grab all matching sync records
+    pub fn find(db: &mut Storage, ty: Option<SyncType>) -> TResult<Vec<SyncRecord>> {
+        let mut args = vec![];
+        if let Some(x) = ty {
+            let ty_string: String = jedi::parse(&jedi::stringify(&x)?)?;
+            args.push(ty_string+"|");
+        }
+        db.find("sync", "sync", &args)
+    }
+
+    /// Grab the next sync item that's ready to go out.
+    pub fn next(db: &mut Storage) -> TResult<Option<SyncRecord>> {
+        let mut rec = db.all_limit("sync", Some(1))?;
+        if rec.len() >= 1 {
+            Ok(Some(rec.swap_remove(0)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Given a DB, find all sync records not matching `not_ty`.
+    pub fn allbut(db: &mut Storage, not_ty: &Vec<SyncType>) -> TResult<Vec<SyncRecord>> {
+        let syncs = SyncRecord::find(db, None)?
+            .into_iter()
+            .filter(|x| !not_ty.contains(&x.ty))
+            .collect::<Vec<SyncRecord>>();
+        Ok(syncs)
+    }
+
+    /// Static method for grabbing pending sync items. Mainly for the UI's
+    /// own personal amusement (but allows enumerating an interface for
+    /// unfreezing or deleting bad sync records).
+    pub fn get_all_pending(turtl: &Turtl) -> TResult<Vec<SyncRecord>> {
+        let mut db_guard = lock!(turtl.db);
+        let db = match db_guard.as_mut() {
+            Some(x) => x,
+            None => return TErr!(TError::MissingField(String::from("Turtl.db"))),
+        };
+        let mut pending = SyncRecord::find(db, None)?;
+        let mut blocked = false;
+        for sync in &mut pending {
+            sync.blocked = blocked;
+            if sync.frozen { blocked = true; }
+        }
+        Ok(pending)
+    }
+
+    /// Increment this SyncRecord's errcount. If it's above a magic number, we
+    /// mark the sync as failed, which excludes it from further outgoing syncs
+    /// until it gets manually shaken/removed.
+    pub fn handle_failed_sync(db: &mut Storage, failure: &SyncRecord) -> TResult<()> {
+        debug!("SyncRecord::handle_failed_sync() -- handle failure: {:?}", failure);
+        let sync_id = failure.id_or_else()?;
+        let sync_record: Option<SyncRecord> = db.get("sync", &sync_id)?;
+        match sync_record {
+            Some(mut rec) => {
+                if rec.errcount > MAX_ALLOWED_FAILURES {
+                    rec.frozen = true;
+                } else {
+                    rec.errcount += 1;
+                }
+                rec.error = failure.error.clone();
+                // save our heroic sync record with our mods (errcount/frozen)
+                db.save(&rec)?;
+            }
+            // already deleted? who knows
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Static method that tells the sync system to unfreeze a sync item so it
+    /// gets queued to be included in the next outgoing sync.
+    pub fn kick_frozen_sync(turtl: &Turtl, sync_id: &String) -> TResult<()> {
+        let mut db_guard = lock!(turtl.db);
+        let db = match db_guard.as_mut() {
+            Some(x) => x,
+            None => return TErr!(TError::MissingField(String::from("Turtl.db"))),
+        };
+        let sync: Option<SyncRecord> = db.get("sync", sync_id)?;
+        match sync {
+            Some(mut rec) => {
+                rec.frozen = false;
+                db.save(&rec)?;
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    /// Public/static method for deleting a sync record (probably initiated from
+    /// the UI).
+    pub fn delete_sync_item(turtl: &Turtl, sync_id: &String) -> TResult<()> {
+        let mut db_guard = lock!(turtl.db);
+        let db = match db_guard.as_mut() {
+            Some(x) => x,
+            None => return TErr!(TError::MissingField(String::from("Turtl.db"))),
+        };
+        let mut sync_record: SyncRecord = Default::default();
+        sync_record.id = Some(sync_id.clone());
+        db.delete(&sync_record)?;
+        Ok(())
+    }
+}
+

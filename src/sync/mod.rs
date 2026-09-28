@@ -1,0 +1,399 @@
+//! The sync system is responsible for syncing the data we have stored in our
+//! local db with the Turtl server we're talking to.
+//!
+//! The idea is that all changes to data happen locally, and in fact Turtl is
+//! capable of working entirely offline, but once we connect to a server we sync
+//! all the outstanding changes to/from the server such that every piece of data
+//! is synced.
+//!
+//! That's the goal, anyway.
+//!
+//! Keep in mind that ALL data that goes through the sync system needs to be
+//! either a) public or b) encrypted. The sync system shall not ever touch
+//! plaintext private data. Keeping this in mind, the Sync object should always
+//! be in a separate thread from the main Turtl object.
+
+#[macro_use]
+mod macros;
+pub mod incoming;
+pub mod outgoing;
+pub mod files;
+#[macro_use]
+pub mod sync_model;
+
+use ::std::thread;
+use ::std::sync::{Arc, RwLock, Mutex, mpsc};
+use ::config;
+use ::sync::outgoing::SyncOutgoing;
+use ::sync::incoming::SyncIncoming;
+use ::sync::files::outgoing::FileSyncOutgoing;
+use ::sync::files::incoming::FileSyncIncoming;
+use ::models::sync_record::SyncRecord;
+use ::util;
+use ::error::{TResult, TError};
+use ::storage::Storage;
+use ::api::Api;
+use ::messaging;
+use ::crossbeam::sync::MsQueue;
+
+/// This holds the configuration for the sync system (whether it's enabled, the
+/// current user id/api endpoint, and any other information we need to make
+/// informed decisions about syncing).
+///
+/// Note that this is a separate struct so that it can be shared by *both the
+/// sync system and the main thread* without having the sync system live in the
+/// main thread itself. This allows the main thread to update the config without
+/// having direct access to the sync thread (and conversely, without sync having
+/// access to our precious data in the `Turtl` object that lives in the main
+/// thread).
+pub struct SyncConfig {
+    /// Whether or not to quit the sync thread
+    pub quit: bool,
+    /// Whether or not to run syncing
+    pub enabled: bool,
+    /// The current logged in user_id
+    pub user_id: Option<String>,
+    /// Whether or not to skip calling out to the API on init (useful for
+    /// testing)
+    pub skip_api_init: bool,
+    /// Tracks which sync run we're on. If a sync thread (for SOME reason)
+    /// doesn't get killed when it should, it can at least check its run version
+    /// and if it doesn't match this value, it will end itself.
+    pub run_version: i64,
+    /// A channel we send/recv incoming sync data on. Normally we'd do this via
+    /// an app event (and we DO use this to trigger processing an incoming sync),
+    /// but we want to run our sync items *in-order* which means using a queue.
+    /// We could use the DB, but that's cumbersome, and we don't need the
+    /// persistence guarantees it gives us, so instead a channel should work
+    /// swimmingly.
+    ///
+    /// The SyncIncoming thread pushes incoming syncs on here, and our main
+    /// Turtl/dispatch thread(s) run them (and apply state using their MemSaver
+    /// impls).
+    ///
+    /// NOTE: This probably shouldn't be in the config object, much less one
+    /// that's a general config for all sync threads since it really only
+    /// applies to the incoming thread, however it was WAY easier to trojan
+    /// horse this here as opposed to finding a way to pass it in JUST to the
+    /// SyncIncoming thread (since the sync threads are all generalized). Deal
+    /// with it.
+    pub incoming_sync: Arc<MsQueue<SyncRecord>>,
+}
+
+impl SyncConfig {
+    /// Create a new SyncConfig instance.
+    pub fn new() -> SyncConfig {
+        SyncConfig {
+            quit: false,
+            enabled: false,
+            user_id: None,
+            skip_api_init: false,
+            run_version: 0,
+            incoming_sync: Arc::new(MsQueue::new()),
+        }
+    }
+}
+
+/// A structure that tracks some state for a running sync system.
+pub struct SyncState {
+    pub join_handles: Vec<thread::JoinHandle<()>>,
+    pub shutdown: Box<dyn Fn() + 'static + Sync + Send>,
+    pub pause: Box<dyn Fn() + 'static + Sync + Send>,
+    pub resume: Box<dyn Fn() + 'static + Sync + Send>,
+    pub enabled: Box<dyn Fn() -> bool + 'static + Sync + Send>,
+}
+
+/// Defines some common functions for our incoming/outgoing sync objects
+pub trait Syncer {
+    /// Get this syncer's name
+    fn get_name(&self) -> &'static str;
+
+    /// Get a copy of the current sync config
+    fn get_config(&self) -> Arc<RwLock<SyncConfig>>;
+
+    /// Set this sync thread's run version
+    fn set_run_version(&mut self, i64);
+
+    /// Get this sync thread's run version
+    fn get_run_version(&self) -> i64;
+
+    /// Run the sync operation for this syncer.
+    ///
+    /// Essentially, this is the meat of the syncer. This is the entry point for
+    /// the custom work this syncer does.
+    fn run_sync(&mut self) -> TResult<()>;
+
+    /// Run any initialization this Syncer needs.
+    fn init(&mut self) -> TResult<()> {
+        Ok(())
+    }
+
+    /// Get the delay (in ms) between called to run_sync() for this Syncer
+    fn get_delay(&self) -> u64 {
+        1000
+    }
+
+    /// Check to see if we should quit the thread
+    fn should_quit(&self) -> bool {
+        let local_config = self.get_config();
+        let guard = lockr!(local_config);
+        let quit = guard.quit.clone();
+        let run_version = self.get_run_version();
+        let run_mismatch = guard.run_version != run_version;
+        run_mismatch || quit
+    }
+
+    /// Check to see if we're enabled
+    fn is_enabled(&self) -> bool {
+        let config_enabled_key = match self.get_name().as_ref() {
+            "outgoing" => "enable_outgoing",
+            "incoming" => "enable_incoming",
+            "files:outgoing" => "enable_files_outgoing",
+            "files:incoming" => "enable_files_incoming",
+            _ => "<unknown>",
+        };
+        let config_enabled: bool = match config::get(&["sync", config_enabled_key]) {
+            Ok(x) => x,
+            Err(_) => false,
+        };
+        let local_config = self.get_config();
+        let guard = lockr!(local_config);
+        let run_version = self.get_run_version();
+        let run_mismatch = guard.run_version != run_version;
+        guard.enabled.clone() && config_enabled && !run_mismatch
+    }
+
+    /// Get our sync_id key (for our k/v store)
+    fn sync_key(&self) -> TResult<String> {
+        let local_config = self.get_config();
+        let guard = lockr!(local_config);
+        let api_endpoint = config::get::<String>(&["api", "endpoint"])?;
+        let user_id = match guard.user_id.as_ref() {
+            Some(x) => x,
+            None => return TErr!(TError::MissingField(String::from("SyncConfig.user_id"))),
+        };
+        Ok(format!("{}:{}", user_id, api_endpoint))
+    }
+
+    /// Runs our syncer, with some quick checks on run status.
+    fn runner(&mut self, init_tx: mpsc::Sender<TResult<()>>) {
+        // pull our run version from the config
+        {
+            let local_config = self.get_config();
+            let guard = lockr!(local_config);
+            self.set_run_version(guard.run_version);
+        }
+
+        info!("sync::runner() -- {} init (run {})", self.get_name(), self.get_run_version());
+
+        let init_res = self.init();
+        macro_rules! send_or_return {
+            ($sendex:expr) => {
+                match $sendex {
+                    Err(e) => error!("sync::runner() -- {}: problem sending init signal: {}", self.get_name(), e),
+                    _ => (),
+                }
+            }
+        }
+        match init_res {
+            Ok(_) => {
+                send_or_return!(init_tx.send(Ok(())));
+            },
+            Err(e) => {
+                error!("sync::runner() -- {}: init: {}", self.get_name(), e);
+                send_or_return!(init_tx.send(Err(e)));
+                return;
+            },
+        }
+        match init_tx.send(init_res) {
+            Err(e) => warn!("sync::runner() -- {}: problem sending init signal: {}", self.get_name(), e),
+            _ => (),
+        }
+
+        info!("sync::runner() -- {} main loop", self.get_name());
+        while !self.should_quit() {
+            let delay = self.get_delay();
+            if self.is_enabled() {
+                match self.run_sync() {
+                    Err(e) => error!("sync::runner() -- {}: main loop: {}", self.get_name(), e),
+                    _ => (),
+                }
+                util::sleep(delay);
+            } else {
+                util::sleep(delay);
+            }
+        }
+    }
+
+    /// Let the main thread know that we've (dis)connected to the API. Useful
+    /// for updating the UI on our connection state
+    fn connected(&mut self, yesno: bool) {
+        messaging::app_event("sync:connected", &yesno)
+            .unwrap_or_else(|e| error!("Syncer::connected() -- error sending connected app event: {}", e));
+    }
+}
+
+/// Start our syncing system!
+///
+/// Note that we have separate db objects for in/out. This is because each
+/// thread needs its own connection. We don't have the ability to create the
+/// connections in this scope (no access to Turtl by design) so we need to
+/// just have them passed in.
+pub fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Option<Storage>>>) -> TResult<SyncState> {
+    // enable syncing (set phasers to stun)
+    {
+        let mut config_guard = lockw!(config);
+        (*config_guard).enabled = true;
+        (*config_guard).quit = false;
+    }
+
+    // some holders for our thread handles and init receivers
+    let mut join_handles = Vec::with_capacity(4);
+    let mut rx_vec = Vec::with_capacity(4);
+
+    /// Starts a sync class.
+    macro_rules! sync_starter {
+        ($synctype:expr) => {
+            {
+                // create the channel we'll use to send messages from the sync
+                // thread back to here (mainly, a "yes init succeeded" or "no,
+                // init failed")
+                let (tx, rx) = mpsc::channel::<TResult<()>>();
+                rx_vec.push(rx);
+                let config_c = config.clone();
+                let api_c = api.clone();
+                let db_c = db.clone();
+                let mut sync = $synctype(config_c, api_c, db_c);
+                let handle = thread::Builder::new().name(format!("sync:{}", sync.get_name())).spawn(move || {
+                    sync.runner(tx);
+                    info!("sync::start() -- {} shut down (run {})", sync.get_name(), sync.get_run_version());
+                })?;
+                // push our handle/rx onto their respective holder vecs
+                join_handles.push(handle);
+            }
+        }
+    }
+
+    // i try to use the type without the ::new but drew *destroy the value* of
+    // the macro!
+    sync_starter!(SyncOutgoing::new);
+    sync_starter!(SyncIncoming::new);
+    sync_starter!(FileSyncOutgoing::new);
+    sync_starter!(FileSyncIncoming::new);
+
+    // seems to make the sync "ready!!" channels not bitch as much. if we don't
+    // have this here, we get a lot of:
+    //
+    //   sync::runner() -- incoming: problem sending init signal: sending on a closed channel
+    // 
+    // this isn't harmful, and the sync system seems to plow forward regardless,
+    // but i'd rather not have stupid errors crop up.
+    //
+    // it's important to note: i do not know WHY this fixes the above warning.
+    // given the nature of rust's mpsc channels, i would think there should be
+    // no need to synchronize/coordinate between the threads.
+    util::sleep(100);
+
+    // define some callbacks Turtl can use to control the sync processes. turtl
+    // could manage this junk itself, but it's nicer to have a single object
+    // that handles the state for us via functions.
+    let config1 = config.clone();
+    let shutdown = move || {
+        let mut guard = lockw!(config1);
+        guard.enabled = false;
+        guard.quit = true;
+    };
+    let config2 = config.clone();
+    let pause = move || {
+        let mut guard = lockw!(config2);
+        guard.enabled = false;
+    };
+    let config3 = config.clone();
+    let resume = move || {
+        let mut guard = lockw!(config3);
+        guard.enabled = true;
+    };
+    let config4 = config.clone();
+    let enabled = move || -> bool {
+        let guard = lockr!(config4);
+        guard.enabled
+    };
+
+    // Wait on an "OK! A++++" Ok(()) signal from the sync thread (sent after it
+    // inits successfully) or a "SHITFUCK!" Err() if there was a problem.
+    //
+    // note that if we hit ANY snags, we stop ALL the sync threads.
+    for rx in rx_vec {
+        match rx.recv() {
+            Ok(x) => {
+                match x {
+                    Err(e) => {
+                        shutdown();
+                        return Err(toterr!(e));
+                    }
+                    _ => (),
+                }
+            },
+            Err(e) => {
+                shutdown();
+                return Err(toterr!(e));
+            }
+        }
+    }
+    info!("sync::start() -- all sync threads started");
+
+    // uhhh, you have a ph... call. thank you. uhh, hand the phone to me, please.
+    // yes, here you go.
+    Ok(SyncState {
+        join_handles: join_handles,
+        shutdown: Box::new(shutdown),
+        pause: Box::new(pause),
+        resume: Box::new(resume),
+        enabled: Box::new(enabled),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ::std::sync::{Arc, RwLock, Mutex};
+
+    use ::jedi::{self, Value};
+    use ::storage::Storage;
+    use ::api::Api;
+    use ::models::sync_record::{SyncAction, SyncType, SyncRecord};
+
+    #[test]
+    fn serializes_sync_record() {
+        let sync: SyncRecord = jedi::parse(&String::from(r#"{"id":1234,"user_id":1,"item_id":6969,"action":"add","type":"note","data":{"id":"6969"}}"#)).unwrap();
+        assert_eq!(sync.id, Some(String::from("1234")));
+        assert_eq!(sync.action, SyncAction::Add);
+        assert_eq!(sync.sync_ids, None);
+        assert_eq!(sync.ty, SyncType::Note);
+        let data: Value = jedi::to_val(&sync.data).unwrap();
+        assert_eq!(jedi::get::<String>(&["id"], &data).unwrap(), String::from(r#"6969"#));
+
+        let syncstr: String = jedi::stringify(&sync).unwrap();
+        assert_eq!(syncstr, String::from(r#"{"id":"1234","body":null,"action":"add","item_id":"6969","user_id":1,"type":"note","data":{"id":"6969"},"errcount":0,"frozen":false,"blocked":false}"#));
+    }
+
+    #[test]
+    fn starts_and_quits() {
+        let mut sync_config = SyncConfig::new();
+        sync_config.skip_api_init = true;
+        let sync_config = Arc::new(RwLock::new(sync_config));
+        let api = Arc::new(Api::new());
+        let db = Arc::new(Mutex::new(Some(Storage::new(&String::from(":memory:"), json!({})).unwrap())));
+        let mut state = start(sync_config, api, db).unwrap();
+        (state.shutdown)();
+        loop {
+            let hn = state.join_handles.pop();
+            match hn {
+                Some(x) => x.join().unwrap(),
+                None => break,
+            }
+        }
+    }
+}
+
