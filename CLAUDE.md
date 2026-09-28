@@ -46,7 +46,9 @@ the Zim editor once (CodeMirror 6) and reuse it in Tauri (desktop), a Capacitor/
 | Piece | Choice |
 |---|---|
 | Shared core | Rust (`core-rs`), libsodium, storage abstraction |
-| Web crypto/storage/net | libsodium-wasm, IndexedDB, `fetch` (the WASM port swaps out native libsodium / SQLite / blocking reqwest) |
+| Web crypto | `libsodium.js` (real libsodium C source, Emscripten-built) loaded as its own wasm module, called from the core's `wasm32-unknown-unknown` build via a wasm-bindgen JS-import bridge — byte-identical to native by construction, not a separate implementation. See `docs/wasm-port-plan.md`. |
+| Web storage | `sqlite-wasm-rs` (real `libsqlite3` compiled straight to `wasm32-unknown-unknown`, linked directly into the core's own wasm binary, `sahpool`/OPFS-SAHPool feature for persistence) — **not** IndexedDB; core-rs's storage/search layer is real SQL + SQLite FTS4, which IndexedDB can't represent without rebuilding full-text search from scratch. See `docs/wasm-port-plan.md`. |
+| Web networking | `reqwest` upgraded to its async API (already wasm32-native via `fetch` under the hood) — applies to both native and web so the core's public interface stays identical across targets. |
 | Editor / UI | CodeMirror 6 with live Zim-syntax formatting (shared web UI) |
 | Desktop shell | Tauri (Rust host → links the core as a crate) |
 | Mobile shell | Capacitor/webview; core via JNI (Android) + FFI (iOS) |
@@ -139,9 +141,13 @@ docker compose up                   # Postgres + server (define compose file)
 1. **OPEN DECISION — shared web UI vs. native UIs.** Brief assumes shared web UI. Native UIs
    per platform ~triple the editor work and change the mobile/desktop stack. Confirm before
    building the editor.
-2. **WASM port of `core-rs`** is the central effort: replace native libsodium → libsodium-wasm,
-   SQLite (`rusqlite`) → IndexedDB, blocking `reqwest` → `fetch`. Prove ciphertext parity
-   between native and WASM.
+2. **WASM port of `core-rs`** is the central effort. Approach decided (see
+   `docs/wasm-port-plan.md` for the full research/rationale): real `libsodium.js` via a JS
+   bridge for crypto (byte-identical by construction), `sqlite-wasm-rs` (real SQLite, one wasm
+   binary) for storage/search rather than IndexedDB, async `reqwest`/`fetch` for networking,
+   and single-threaded async (`wasm_bindgen_futures`, one dedicated Web Worker) rather than
+   real multithreading for concurrency. Prove ciphertext parity between native and WASM with a
+   golden-vector test suite before trusting the crypto bridge.
 3. **Turtl is dormant / old deps** (libsodium 1.0.16, old crates, Node 8 server). Budget time
    just to get everything building on current toolchains before adding features.
 4. **iOS FFI build does not exist yet** in upstream (only Android JNI). Needs to be created.
@@ -159,6 +165,9 @@ docker compose up                   # Postgres + server (define compose file)
 
 ## References
 
-- Architecture + roadmap: `zim-turtl-architecture-and-plan.md`
-- Feasibility rationale: `zim-turtl-feasibility-study.md`
+- Architecture + roadmap: `docs/zim-turtl-architecture-and-plan.md`
+- Feasibility rationale: `docs/zim-turtl-feasibility-study.md`
+- Zim wiki text format spec (implementation spec for `core/zim-format`): `docs/zim-wiki-format-spec.md`
+- `core-rs` revival notes (getting it building/testing on current toolchains): `docs/core-rs-revival-notes.md`
+- WASM port plan (crypto/storage/networking/concurrency approach + research): `docs/wasm-port-plan.md`
 - Claude Code docs: https://docs.claude.com/en/docs/claude-code/overview
