@@ -1,0 +1,8 @@
+{
+  "name": "turtl-core-rs-wasm-crypto",
+  "private": true,
+  "description": "npm deps for the wasm32 real-libsodium.js crypto bridge (src/crypto/low.rs's wasm_bridge, js/sodium_bridge.js) and its wasm-bindgen-test suite. See docs/wasm-port-plan.md decision 2.1.",
+  "dependencies": {
+    "libsodium-wrappers": "^0.7.15"
+  }
+}

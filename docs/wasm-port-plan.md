@@ -333,10 +333,91 @@ Networking and concurrency are unified on async/await across both native and web
       **Changed:** `Cargo.toml`, `src/lib.rs`, `src/error.rs`, `src/crypto/low.rs`,
       `src/dispatch.rs`, `src/turtl.rs`, `src/models/user.rs`, `src/sync/mod.rs`,
       `src/util/thredder.rs`.
-- [ ] Step 4: `wasm-pack build --target web` producing a loadable module end to end. Blocked on
-      the real integrations step 3 deliberately deferred: wiring `core/wasm-crypto-poc`'s
-      libsodium.js bridge into `crypto/low.rs`, `sqlite-wasm-rs` into `storage.rs`/`search.rs`,
-      and async `reqwest`/`fetch` into `api.rs` (each its own milestone per decisions 2.1/2.2/2.3),
-      plus the real single-threaded-async concurrency rewrite (2.4) to replace `Thredder`'s
-      current synchronous-inline placeholder.
+- [x] Step 4a (crypto hot path only): wired `core/wasm-crypto-poc`'s real-libsodium.js bridge
+      into the ACTUAL `turtl_core::crypto` module -- **done**. `crypto/low.rs`'s wasm32 stubs for
+      `rand_bytes()` and `chacha20poly1305::{encrypt, decrypt}` (the only primitives
+      `crypto::encrypt`/`crypto::decrypt` in `mod.rs` -- the crate's real note/board/keychain
+      encryption API -- actually calls) are now real, calling through a wasm-bindgen JS bridge
+      (`crypto/low.rs`'s private `wasm_bridge` module, module path `/js/sodium_bridge.js`) to real
+      `libsodium-wrappers`, reproducing `core/wasm-crypto-poc`'s exact bridge mechanism and
+      envelope/AAD handling (which needed no changes -- it already lived in `mod.rs`).
+      `sha256`/`sha512`/`hmac`/`secure_compare`/`gen_key`(pwhash)/`random_salt`/`asym::*`
+      (sealedbox) remain untouched `NotImplemented` stubs (incidental to note encryption; each
+      needs its own future milestone per the crypto audit in §1).
+
+      **The async-init problem, and why it's solved without bumping the crate's edition:**
+      `libsodium-wrappers` needs an async `sodium.ready` before any `crypto_*`/`randombytes_*`
+      call works, but `wasm32-unknown-unknown` in a browser is single-threaded (a sync fn can't
+      block on a JS Promise without deadlocking). The natural fix -- one new `async fn
+      init_wasm_crypto()` that callers await once, leaving `rand_bytes()`/`chacha20poly1305::
+      {encrypt,decrypt}` themselves synchronous -- ran into a real, previously-unknown-to-this-
+      plan constraint: **`turtl_core` is an (implicit, unspecified) Rust 2015-edition crate, and
+      `async fn`/`.await` syntax is rejected outright there** (`error[E0670]: async fn is not
+      permitted in Rust 2015`). Bumping `edition = "2018"` was tried and reverted: it broke
+      ~600 unrelated call sites crate-wide (this crate leans on 2015-specific macro/path
+      resolution pervasively -- e.g. glob-imported `macro_rules!` names colliding with module
+      items, was one concrete failure seen). That is very much *not* a safe, narrow change, so
+      the crate stays on (implicit) edition 2015.
+
+      Instead, `crypto::init_wasm_crypto()` is a **plain synchronous fn returning `js_sys::
+      Promise`**, built from a hand-written `Future` impl (`low.rs`'s `InitCryptoFuture` --
+      implementing the `Future` *trait* has no edition restriction; only the `async`/`.await`
+      *syntax* does) wrapping `wasm_bindgen_futures::JsFuture`, driven to a `Promise` via
+      `wasm_bindgen_futures::future_to_promise`. A JS embedder calls `await
+      wasm.initWasmCrypto()` exactly as originally planned -- the edition constraint is invisible
+      from JS. A `static AtomicBool` (`CRYPTO_READY`) marks readiness; `rand_bytes()`/
+      `chacha20poly1305::{encrypt,decrypt}` check it up front and fail with
+      `CryptoError::OperationFailed` (a clear, honest error, not a silent no-op) if called first.
+
+      **New files:** `core/turtl-core-rs/js/sodium_bridge.js` (adapted from
+      `core/wasm-crypto-poc/js/sodium_bridge.js`, plus a `randomBytes` export for
+      `rand_bytes()`), `core/turtl-core-rs/package.json` (`libsodium-wrappers` dependency, `npm
+      install`ed locally in that directory).
+      **Changed:** `Cargo.toml` (wasm32-only `wasm-bindgen`/`wasm-bindgen-futures`/`js-sys`
+      deps, wasm32-only `wasm-bindgen-test` dev-dependency; `[lib]`/edition left untouched),
+      `src/lib.rs` (matching `extern crate` declarations), `src/crypto/low.rs` (the bridge +
+      `init_wasm_crypto`/`InitCryptoFuture`/`CRYPTO_READY`/`require_wasm_crypto_ready`, and the
+      real `rand_bytes`/`chacha20poly1305::{encrypt,decrypt}` bodies), `src/crypto/mod.rs`
+      (wasm32-gated `pub use` of `init_wasm_crypto`, plus a `wasm_parity_tests` module -- see
+      below).
+
+      **Verification -- real wasm32 execution, not just `cargo check`:** `wasm-pack test --node`
+      (needs `NODE_PATH="$(pwd)/node_modules"` set first -- `wasm-bindgen-test-runner` copies JS
+      snippets to an OS temp dir, which breaks plain Node module resolution of the locally
+      `npm install`ed `libsodium-wrappers`; `NODE_PATH` fixes that without touching the snippet
+      mechanism) runs three `#[wasm_bindgen_test(async)]` tests in `crypto/mod.rs`'s
+      `wasm_parity_tests` module, all passing:
+      - `wasm_matches_native_golden_vectors`: for three real native-generated golden vectors
+        (hardcoded `(key_hex, plaintext_hex, envelope_hex)` triples, captured from a real run of
+        `crypto::tests::generate_wasm_golden_vectors`, covering empty plaintext, plain ASCII, and
+        embedded-NUL/0xFF-byte plaintext), forces wasm32 `crypto::encrypt()` to reuse the exact
+        nonce native picked at random (extracted via the real `crypto::deserialize()`) and
+        asserts the resulting envelope is **byte-for-byte identical** to the real native
+        envelope, then asserts real wasm32 `crypto::decrypt()` recovers the exact original
+        plaintext bytes from that real native envelope.
+      - `wasm_round_trip_with_random_nonce`: a full encrypt-then-decrypt cycle using wasm32's
+        own `rand_bytes()` (i.e. real libsodium.js randomness, not an extracted/forced nonce).
+      - `wasm_rejects_tampered_envelope`: flipping a byte in the AAD-covered header, or the
+        last ciphertext/tag byte, of a real envelope makes real wasm32 `crypto::decrypt()` fail
+        with `CryptoError::Authentication` -- both directly (mirrors the tamper check in
+        `core/wasm-crypto-poc/test/run_test.js`).
+
+      Because `async fn`/`.await` are unavailable (see above), these are written as plain `fn`s
+      returning a small hand-written `Future` (`wasm_parity_tests::ThenReady`, wrapping a
+      `JsFuture` over the real `crypto::init_wasm_crypto()` Promise plus a synchronous assertion
+      closure) and annotated `#[wasm_bindgen_test(async)]` (the explicit meta-attribute form,
+      which `wasm-bindgen-test`'s macro accepts without requiring literal `async fn` syntax on
+      the attributed item -- confirmed by reading `wasm-bindgen-test-macro`'s source, since this
+      isn't documented prominently).
+
+      **Native regression check:** `cargo test --features sqlite-static` -- still 63/63,
+      unchanged (same count as the step-3 milestone). `cargo check --target wasm32-unknown-unknown`
+      still succeeds, now compiling real crypto for the hot path instead of stubs.
+- [ ] Step 4b: `sqlite-wasm-rs` into `storage.rs`/`search.rs`, and async `reqwest`/`fetch` into
+      `api.rs` (decisions 2.2/2.3), plus the real single-threaded-async concurrency rewrite
+      (2.4) to replace `Thredder`'s current synchronous-inline placeholder. Also still open:
+      `wasm-pack build --target web` producing a loadable module end to end (this milestone only
+      ran `wasm-pack test --node`, a `--target nodejs`-style build for tests; a real
+      `--target web` build/load hasn't been attempted yet), and the remaining incidental crypto
+      stubs (`sha256`/`sha512`/`hmac`/`secure_compare`/`gen_key`(pwhash)/`asym::*`).
 - [ ] Step 5: full parity pass before calling the port done.

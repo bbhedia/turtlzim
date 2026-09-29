@@ -1,16 +1,28 @@
 //! Low-level crypto primitives/modules.
 //!
-//! TODO(wasm): the functions in this file that call directly into
+//! TODO(wasm): sha256/sha512/hmac/secure_compare/gen_key(pwhash)/random_salt
+//! and the `asym` (sealedbox) functions in this file call directly into
 //! `sodiumoxide` (native libsodium C bindings, which have no
-//! `wasm32-unknown-unknown` build story -- see docs/wasm-port-plan.md §1) are
-//! stubbed out for `target_arch = "wasm32"`, returning
-//! `CryptoError::NotImplemented`. Per docs/wasm-port-plan.md decision 2.1, the
-//! real wasm crypto path is a wasm-bindgen JS bridge to real `libsodium.js`,
-//! already proven out in the sibling `core/wasm-crypto-poc` crate (byte-exact
-//! golden-vector parity vs. this file's native `chacha20poly1305` seal/open).
-//! Wiring that bridge in as this file's wasm32 implementation (instead of
-//! these placeholder stubs) is a follow-up milestone, not part of this
-//! compile-only pass.
+//! `wasm32-unknown-unknown` build story -- see docs/wasm-port-plan.md §1) and
+//! remain stubbed out for `target_arch = "wasm32"`, returning
+//! `CryptoError::NotImplemented`. They're incidental to the note-encryption
+//! hot path (account login/invites) and each need their own libsodium.js
+//! wiring + compatibility verification -- separate future milestones, not
+//! this one.
+//!
+//! `rand_bytes()` and `chacha20poly1305::{encrypt, decrypt}` -- the actual hot
+//! path `crypto::encrypt`/`crypto::decrypt` (mod.rs) depend on -- ARE wired up
+//! for real on wasm32, per docs/wasm-port-plan.md decision 2.1: a
+//! wasm-bindgen JS bridge (`wasm_bridge`, below) to real `libsodium.js` (npm
+//! `libsodium-wrappers`, via `js/sodium_bridge.js`), the exact mechanism
+//! already proven byte-exact against this file's native `chacha20poly1305`
+//! seal/open in the sibling `core/wasm-crypto-poc` crate. Because
+//! libsodium-wrappers needs an async `sodium.ready` before any of its
+//! `crypto_*`/`randombytes_*` calls work, and wasm32-unknown-unknown in a
+//! browser is single-threaded (a sync fn can't block on a JS Promise without
+//! deadlocking), callers MUST call and await `init_wasm_crypto()` exactly
+//! once before using any crypto:: function on wasm32 -- see that function's
+//! doc comment.
 
 use ::hex;
 use ::base64;
@@ -22,7 +34,133 @@ use ::sodiumoxide::crypto::hash;
 use ::sodiumoxide::crypto::auth as sodium_auth;
 #[cfg(not(target_arch = "wasm32"))]
 use ::sodiumoxide::crypto::pwhash;
+#[cfg(target_arch = "wasm32")]
+use ::wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use ::std::sync::atomic::{AtomicBool, Ordering};
 use ::crypto::error::{CResult, CryptoError};
+
+/// wasm32 real-crypto bridge to `libsodium-wrappers` (real libsodium.js), per
+/// docs/wasm-port-plan.md decision 2.1. See `../../js/sodium_bridge.js` for
+/// the JS glue this binds to -- this is the same bridge mechanism already
+/// proven byte-exact against native `sodiumoxide` in the standalone
+/// `core/wasm-crypto-poc` crate.
+#[cfg(target_arch = "wasm32")]
+mod wasm_bridge {
+    use ::wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen(module = "/js/sodium_bridge.js")]
+    extern "C" {
+        /// Resolves once libsodium-wrappers' underlying wasm module has
+        /// finished loading. Must be awaited (via `init_wasm_crypto()`,
+        /// below) before any other function in this module is called.
+        #[wasm_bindgen(js_name = sodiumReady)]
+        pub fn sodium_ready() -> ::js_sys::Promise;
+
+        /// Real chacha20poly1305_ietf AEAD seal via libsodium-wrappers.
+        #[wasm_bindgen(js_name = aeadEncrypt, catch)]
+        pub fn aead_encrypt(key: &[u8], nonce: &[u8], ad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsValue>;
+
+        /// Real chacha20poly1305_ietf AEAD open via libsodium-wrappers.
+        #[wasm_bindgen(js_name = aeadDecrypt, catch)]
+        pub fn aead_decrypt(key: &[u8], nonce: &[u8], ad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, JsValue>;
+
+        /// Real CSPRNG bytes via libsodium-wrappers' randombytes_buf.
+        #[wasm_bindgen(js_name = randomBytes, catch)]
+        pub fn random_bytes(len: u32) -> Result<Vec<u8>, JsValue>;
+    }
+}
+
+/// Tracks whether `init_wasm_crypto()` has resolved yet. wasm32-unknown-unknown
+/// in a browser is single-threaded, so a plain atomic flag is enough here --
+/// no real synchronization primitive (e.g. a `Mutex`) is needed.
+#[cfg(target_arch = "wasm32")]
+static CRYPTO_READY: AtomicBool = AtomicBool::new(false);
+
+/// A manual (non-`async fn`) `Future` that awaits `sodium.ready` and then
+/// marks `CRYPTO_READY`. Written by hand rather than as `async fn .. { ..
+/// .await .. }` because `turtl_core` is (and, per docs/wasm-port-plan.md,
+/// stays) a Rust 2015-edition crate -- `async`/`.await` syntax is rejected
+/// outright there (`error[E0670]: async fn is not permitted in Rust 2015`),
+/// and bumping the crate's edition to get the sugar is NOT a safe, narrow
+/// change: it was tried and reverted during this milestone (edition 2018
+/// broke ~600 unrelated call sites crate-wide, from this crate's pervasive
+/// 2015-style macro/path resolution). Implementing the `Future` trait by
+/// hand has no such restriction -- only the `async`/`.await` *syntax* is
+/// edition-gated, not the trait itself.
+#[cfg(target_arch = "wasm32")]
+struct InitCryptoFuture {
+    ready: ::wasm_bindgen_futures::JsFuture,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl ::std::future::Future for InitCryptoFuture {
+    type Output = Result<JsValue, JsValue>;
+
+    fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context) -> ::std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        match ::std::pin::Pin::new(&mut this.ready).poll(cx) {
+            ::std::task::Poll::Ready(Ok(_)) => {
+                CRYPTO_READY.store(true, Ordering::Relaxed);
+                ::std::task::Poll::Ready(Ok(JsValue::UNDEFINED))
+            }
+            ::std::task::Poll::Ready(Err(e)) => ::std::task::Poll::Ready(Err(e)),
+            ::std::task::Poll::Pending => ::std::task::Poll::Pending,
+        }
+    }
+}
+
+/// Must be called and awaited (from JS: `await wasm.initWasmCrypto()`)
+/// exactly once, before any other `crypto::` function is used on wasm32 --
+/// `rand_bytes()`, `chacha20poly1305::{encrypt, decrypt}`, and everything
+/// built on top of them (`crypto::encrypt()`/`crypto::decrypt()` in
+/// `mod.rs`, and everything in `models/` that goes through those, e.g.
+/// `models/protected.rs`, `models/file.rs`, `models/user.rs`).
+///
+/// This one entry point exists (and is the *only* async-flavored crypto fn)
+/// because `libsodium-wrappers` needs an async `sodium.ready` before any of
+/// its `crypto_*`/`randombytes_*` calls work (the underlying Emscripten wasm
+/// module has to finish loading first), but `wasm32-unknown-unknown` in a
+/// browser is single-threaded: a synchronous Rust fn cannot block on a JS
+/// Promise without deadlocking (nothing could run the microtask queue that
+/// would resolve it). Making `rand_bytes()`/`chacha20poly1305::{encrypt,
+/// decrypt}` themselves async instead would force `crypto::encrypt()`/
+/// `decrypt()` and everything that calls them to become async too -- a much
+/// bigger, separate "make the whole crate async" refactor, not part of this
+/// milestone. So instead: await this once (via the returned `Promise`), then
+/// every other crypto function stays a plain, synchronous fn with the exact
+/// same signature as native, calling into the (by-then-ready) synchronous JS
+/// bridge functions above.
+///
+/// Returns a `js_sys::Promise` (rather than being an `async fn`, which this
+/// Rust-2015-edition crate cannot use -- see `InitCryptoFuture`'s doc comment)
+/// so a JS embedder can `await wasm.initWasmCrypto()` directly, and so
+/// in-crate Rust callers (e.g. this file's own wasm-bindgen-test tests, in
+/// `crypto/mod.rs`) can drive it via `wasm_bindgen_futures::JsFuture`.
+/// Calling `rand_bytes()`/`chacha20poly1305::{encrypt, decrypt}` before this
+/// has resolved is a programming error on the embedder's part: the JS bridge
+/// throws (surfaced here as `CryptoError::OperationFailed`), not a silent
+/// no-op or fallback.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = initWasmCrypto)]
+pub fn init_wasm_crypto() -> ::js_sys::Promise {
+    let fut = InitCryptoFuture { ready: ::wasm_bindgen_futures::JsFuture::from(wasm_bridge::sodium_ready()) };
+    ::wasm_bindgen_futures::future_to_promise(fut)
+}
+
+/// Returns an error unless `init_wasm_crypto()` has already resolved. Called
+/// at the top of every real wasm32 crypto primitive below.
+#[cfg(target_arch = "wasm32")]
+fn require_wasm_crypto_ready(fn_name: &str) -> CResult<()> {
+    if CRYPTO_READY.load(Ordering::Relaxed) {
+        Ok(())
+    } else {
+        Err(CryptoError::OperationFailed(format!(
+            "crypto::low::{}() -- wasm crypto bridge not initialized; call and await crypto::low::init_wasm_crypto() once before any crypto:: call (see docs/wasm-port-plan.md)",
+            fn_name
+        )))
+    }
+}
 
 /// Abstract the size of hmac keys
 #[allow(dead_code)]
@@ -151,13 +289,15 @@ pub fn rand_bytes(len: usize) -> CResult<Vec<u8>> {
     Ok(sodiumoxide::randombytes::randombytes(len))
 }
 /// Generate N number of CS random bytes.
-// TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md. Random-byte generation is
-// security-sensitive, so this is intentionally NOT reimplemented with a second RNG crate here --
-// it should go through the same real-libsodium.js bridge as everything else in this file
-// (core/wasm-crypto-poc already proves that bridge works for randombytes).
+///
+/// Real implementation via the libsodium.js JS bridge (docs/wasm-port-plan.md
+/// decision 2.1) -- NOT a second RNG crate/implementation. Requires
+/// `init_wasm_crypto()` to have been awaited first.
 #[cfg(target_arch = "wasm32")]
-pub fn rand_bytes(_len: usize) -> CResult<Vec<u8>> {
-    Err(CryptoError::NotImplemented(String::from("crypto::low::rand_bytes() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+pub fn rand_bytes(len: usize) -> CResult<Vec<u8>> {
+    require_wasm_crypto_ready("rand_bytes")?;
+    wasm_bridge::random_bytes(len as u32)
+        .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::rand_bytes() -- js bridge error: {:?}", e)))
 }
 
 /// Generate a random u64. Uses rand_bytes() and bit shifting to build a u64.
@@ -271,13 +411,17 @@ pub mod chacha20poly1305 {
         Ok(aead::seal(plaintext, Some(auth), &nonce_wrap, &key_wrap))
     }
     /// Encrypt data using chacha20poly1305
-    // TODO(wasm): not yet ported to wasm -- see docs/wasm-port-plan.md decision 2.1. The real
-    // wasm implementation is a wasm-bindgen JS bridge to real libsodium.js (byte-identical to
-    // native by construction), already proven out in core/wasm-crypto-poc; wiring it in here is
-    // a follow-up milestone, not this compile-only pass.
+    ///
+    /// Real implementation via the libsodium.js JS bridge (docs/wasm-port-plan.md
+    /// decision 2.1) -- byte-identical to native by construction (same
+    /// underlying C implementation, just Emscripten-built), already proven
+    /// out in `core/wasm-crypto-poc`. Requires `init_wasm_crypto()` to have
+    /// been awaited first.
     #[cfg(target_arch = "wasm32")]
-    pub fn encrypt(_key: &[u8], _nonce: &[u8], _auth: &[u8], _plaintext: &[u8]) -> CResult<Vec<u8>> {
-        Err(CryptoError::NotImplemented(String::from("crypto::low::chacha20poly1305::encrypt() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+    pub fn encrypt(key: &[u8], nonce: &[u8], auth: &[u8], plaintext: &[u8]) -> CResult<Vec<u8>> {
+        super::require_wasm_crypto_ready("chacha20poly1305::encrypt")?;
+        super::wasm_bridge::aead_encrypt(key, nonce, auth, plaintext)
+            .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::chacha20poly1305::encrypt() -- js bridge error: {:?}", e)))
     }
 
     /// Decrypt data using chacha20poly1305
@@ -297,10 +441,18 @@ pub mod chacha20poly1305 {
         }
     }
     /// Decrypt data using chacha20poly1305
-    // TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md (same follow-up as encrypt() above)
+    ///
+    /// Real implementation via the libsodium.js JS bridge (docs/wasm-port-plan.md
+    /// decision 2.1), same rationale/provenance as encrypt() above. Requires
+    /// `init_wasm_crypto()` to have been awaited first. Once that's true, any
+    /// error from the bridge here (bad key/nonce, or -- the common case --
+    /// tampered/mismatched additional-authenticated-data or ciphertext) means
+    /// authentication failed, mirroring native's `aead::open` error mapping.
     #[cfg(target_arch = "wasm32")]
-    pub fn decrypt(_key: &[u8], _nonce: &[u8], _auth: &[u8], _ciphertext: &[u8]) -> CResult<Vec<u8>> {
-        Err(CryptoError::NotImplemented(String::from("crypto::low::chacha20poly1305::decrypt() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+    pub fn decrypt(key: &[u8], nonce: &[u8], auth: &[u8], ciphertext: &[u8]) -> CResult<Vec<u8>> {
+        super::require_wasm_crypto_ready("chacha20poly1305::decrypt")?;
+        super::wasm_bridge::aead_decrypt(key, nonce, auth, ciphertext)
+            .map_err(|_| CryptoError::Authentication(format!("crypto::low::chacha20poly1305::decrypt() -- authentication failed while decrypting")))
     }
 }
 

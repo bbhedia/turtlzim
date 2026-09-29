@@ -24,6 +24,10 @@ pub use ::crypto::low::{
 };
 pub use ::crypto::low::chacha20poly1305::{random_nonce, random_key, noncelen, keylen};
 pub use ::crypto::key::Key;
+// Must be called and awaited exactly once before any other crypto:: function
+// is used on wasm32 -- see `low::init_wasm_crypto`'s doc comment.
+#[cfg(target_arch = "wasm32")]
+pub use ::crypto::low::init_wasm_crypto;
 
 /// Stores our current crypto version. This gets encoded into a header in the
 /// ciphertext and lets the crypto module know how to handle the message.
@@ -544,6 +548,198 @@ mod tests {
         let json_str = ::serde_json::to_string_pretty(&vectors).unwrap();
         fs::write(&out_path, json_str).expect("failed to write golden_vectors.json");
         println!("wrote {} golden vectors to {}", vectors.len(), out_path.display());
+    }
+}
+
+/// Real-wasm-execution parity tests: proves `crypto::encrypt()`/
+/// `crypto::decrypt()` -- this file's actual public encryption API, used
+/// throughout the whole crate for real notes/boards/keychain, NOT a
+/// reimplementation of it -- produce byte-identical ciphertext to native
+/// `sodiumoxide` when run for real on `wasm32-unknown-unknown`, via the real
+/// `libsodium-wrappers` JS bridge (`crypto::low`'s `wasm_bridge`/
+/// `init_wasm_crypto()`, see low.rs). Run with:
+///
+///   cd core/turtl-core-rs && wasm-pack test --node
+///
+/// The golden vectors below are literal (key_hex, plaintext_hex,
+/// envelope_hex) triples captured from a real run of the native
+/// `crypto::tests::generate_wasm_golden_vectors()` test above (see that test,
+/// and `core/wasm-crypto-poc/test/golden_vectors.json`, for how these are
+/// produced/regenerated). They're hardcoded here rather than regenerated at
+/// test time: native `sodiumoxide` doesn't exist on this target (see
+/// `#[cfg(not(target_arch = "wasm32"))]` on `sodiumoxide` throughout low.rs),
+/// and wasm32 has no filesystem to read a JSON file from in a real browser
+/// context anyway.
+///
+/// NOTE on why these tests look the way they do: `turtl_core` is a Rust
+/// 2015-edition crate (see `crypto::low::InitCryptoFuture`'s doc comment for
+/// why bumping the edition to get `async fn`/`.await` sugar isn't a safe,
+/// narrow change here), so plain `#[wasm_bindgen_test] async fn ...` tests
+/// (which need that syntax) aren't available. `wasm-bindgen-test` also
+/// supports `#[wasm_bindgen_test(async)]` on an ordinary (non-`async`) `fn`
+/// that *returns* a `Future`-implementing value -- its runtime awaits that
+/// value itself (inside `wasm-bindgen-test`'s own, differently-edition'd
+/// crate), so no `async`/`.await` syntax is needed on our side at all. Each
+/// test below returns a `ThenReady` (below), a tiny hand-written `Future`
+/// that awaits the real `crypto::init_wasm_crypto()` (this file's actual
+/// public wasm32 init entry point, not a reimplementation) and then runs a
+/// plain synchronous assertion closure -- since every crypto:: call after
+/// init is itself synchronous, that's the only `Future` needed anywhere in
+/// this module.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_parity_tests {
+    use super::*;
+    use ::wasm_bindgen_test::*;
+
+    // No `wasm_bindgen_test_configure!` call needed: Node (this suite runs via
+    // `wasm-pack test --node`) is the default target when neither
+    // `run_in_browser` nor `run_in_worker`/`run_in_dedicated_worker` is set.
+
+    /// Awaits the real `crypto::init_wasm_crypto()` Promise, then runs a
+    /// synchronous closure. See the module doc comment above for why this
+    /// hand-written `Future` exists instead of `async fn`/`.await`.
+    struct ThenReady {
+        ready: ::wasm_bindgen_futures::JsFuture,
+        body: Option<Box<dyn FnOnce()>>,
+    }
+
+    impl ThenReady {
+        fn new<F: FnOnce() + 'static>(body: F) -> ThenReady {
+            ThenReady {
+                ready: ::wasm_bindgen_futures::JsFuture::from(init_wasm_crypto()),
+                body: Some(Box::new(body)),
+            }
+        }
+    }
+
+    impl ::std::future::Future for ThenReady {
+        type Output = ();
+
+        fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context) -> ::std::task::Poll<()> {
+            let this = self.get_mut();
+            match ::std::pin::Pin::new(&mut this.ready).poll(cx) {
+                ::std::task::Poll::Ready(result) => {
+                    result.expect("init_wasm_crypto() promise rejected");
+                    let body = this.body.take().expect("ThenReady polled after completion");
+                    body();
+                    ::std::task::Poll::Ready(())
+                }
+                ::std::task::Poll::Pending => ::std::task::Poll::Pending,
+            }
+        }
+    }
+
+    /// (name, key_hex, plaintext_hex, envelope_hex). Covers an empty
+    /// plaintext (edge case: zero-length AEAD input), a plain ASCII short
+    /// note body, and one with embedded NUL/0xFF bytes.
+    const GOLDEN_VECTORS: &[(&str, &str, &str, &str)] = &[
+        (
+            "empty",
+            "b24815ffa0541d545398b9040604bb0cef1b9a9bbb76475f6d5839ed94ff19ed",
+            "",
+            "000601000c64c4fc4ed801389768d21af52aa6afb1ad2c637dc90c16b9f03ab6c1",
+        ),
+        (
+            "short_ascii",
+            "da0b6bce6bc44247caf4babed1e1aa2e30eb9a528169ba7b4f6d7665dbf7e53d",
+            "54686520717569636b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920646f67",
+            "000601000c884dedbb92466605629e022bc32b20a9b02a85d14e00d575c69a4fbb89c51893b99c5b88770c3470e24e8265ec26108d9e4f40240092471564065e80fae1cd6edc974447c72a1f",
+        ),
+        (
+            "embedded_nulls",
+            "6279d53ef447d8c56df9bc4952a7c1ab55b0d9b31d016838526bf4672fadb9e7",
+            "004100fffe420000ff43",
+            "000601000c9cbbe076ac15697cbcbe43d7885f1fcdfd18aa83f44ee94e4cf80e8d1bbb925a64fb2fc4ee0e",
+        ),
+    ];
+
+    /// Byte-exact parity, both directions, for every golden vector:
+    ///   1. `crypto::encrypt()` on wasm32, forced to reuse the exact nonce
+    ///      native picked at random (extracted via `crypto::deserialize()`
+    ///      -- the same trick `core/wasm-crypto-poc` used), produces the
+    ///      EXACT SAME envelope bytes as real native `crypto::encrypt()` did.
+    ///   2. `crypto::decrypt()` on wasm32 recovers the exact original
+    ///      plaintext bytes from that real native envelope.
+    #[wasm_bindgen_test(async)]
+    fn wasm_matches_native_golden_vectors() -> ThenReady {
+        ThenReady::new(|| {
+            for &(name, key_hex, plaintext_hex, envelope_hex) in GOLDEN_VECTORS {
+                let key = Key::new(from_hex(&String::from(key_hex)).unwrap());
+                let plaintext = from_hex(&String::from(plaintext_hex)).unwrap();
+                let native_envelope = from_hex(&String::from(envelope_hex)).unwrap();
+
+                // pull the nonce native encrypt() picked at random back out of
+                // its own envelope, so we can force wasm's encrypt() to reuse
+                // it for a fair byte-for-byte comparison.
+                let parsed = deserialize(native_envelope.clone())
+                    .unwrap_or_else(|e| panic!("[{}] failed to parse native envelope: {}", name, e));
+                let nonce = parsed.nonce.clone();
+
+                let op = CryptoOp::new_with_nonce("chacha20poly1305", nonce)
+                    .unwrap_or_else(|e| panic!("[{}] CryptoOp::new_with_nonce failed: {}", name, e));
+                let wasm_envelope = encrypt(&key, plaintext.clone(), op)
+                    .unwrap_or_else(|e| panic!("[{}] wasm crypto::encrypt() failed: {}", name, e));
+                assert_eq!(
+                    wasm_envelope, native_envelope,
+                    "[{}] wasm-produced envelope does not byte-match the real native envelope", name
+                );
+
+                let wasm_plaintext = decrypt(&key, native_envelope.clone())
+                    .unwrap_or_else(|e| panic!("[{}] wasm crypto::decrypt() of native envelope failed: {}", name, e));
+                assert_eq!(
+                    wasm_plaintext, plaintext,
+                    "[{}] wasm-decrypted plaintext does not byte-match the original", name
+                );
+            }
+        })
+    }
+
+    /// Full round trip using wasm32's own random nonce (i.e. `rand_bytes()`
+    /// via the real libsodium.js bridge, not a forced/extracted one):
+    /// encrypt-then-decrypt recovers the original plaintext exactly.
+    #[wasm_bindgen_test(async)]
+    fn wasm_round_trip_with_random_nonce() -> ThenReady {
+        ThenReady::new(|| {
+            let key = Key::random().expect("Key::random() failed");
+            let plaintext = Vec::from("Zim wiki notes, encrypted end-to-end, on wasm32.".as_bytes());
+
+            let op = CryptoOp::new("chacha20poly1305").unwrap();
+            let envelope = encrypt(&key, plaintext.clone(), op).expect("wasm crypto::encrypt() failed");
+            let decrypted = decrypt(&key, envelope).expect("wasm crypto::decrypt() failed");
+            assert_eq!(decrypted, plaintext);
+        })
+    }
+
+    /// Tamper check (mirrors `core/wasm-crypto-poc/test/run_test.js`'s tamper
+    /// check): flipping a byte inside the AAD-covered header, or the last
+    /// ciphertext/tag byte, must make `crypto::decrypt()` fail authentication
+    /// -- proving the AAD binding is genuinely enforced by the real wasm
+    /// bridge, not just "decryption happens to work on well-formed input."
+    #[wasm_bindgen_test(async)]
+    fn wasm_rejects_tampered_envelope() -> ThenReady {
+        ThenReady::new(|| {
+            let (_, key_hex, _, envelope_hex) = GOLDEN_VECTORS[1]; // short_ascii: non-empty ciphertext
+            let key = Key::new(from_hex(&String::from(key_hex)).unwrap());
+            let envelope = from_hex(&String::from(envelope_hex)).unwrap();
+
+            // sanity: the untampered envelope must still decrypt fine.
+            decrypt(&key, envelope.clone()).expect("untampered envelope failed to decrypt");
+
+            let mut tampered_header = envelope.clone();
+            tampered_header[0] ^= 0xff; // flip a byte inside the AAD-covered header
+            match decrypt(&key, tampered_header) {
+                Err(CryptoError::Authentication(..)) => {}
+                other => panic!("tampered header was not rejected as an authentication failure: {:?}", other),
+            }
+
+            let mut tampered_ciphertext = envelope.clone();
+            let last = tampered_ciphertext.len() - 1;
+            tampered_ciphertext[last] ^= 0xff; // flip the last ciphertext/tag byte
+            match decrypt(&key, tampered_ciphertext) {
+                Err(CryptoError::Authentication(..)) => {}
+                other => panic!("tampered ciphertext was not rejected as an authentication failure: {:?}", other),
+            }
+        })
     }
 }
 

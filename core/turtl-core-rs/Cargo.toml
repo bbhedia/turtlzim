@@ -72,6 +72,18 @@ sodiumoxide = "0.0.16"
 # (`pub use http::{Method, StatusCode}` in reqwest 0.10.x) -- depending on it
 # directly for wasm32 keeps api.rs's wasm32 stub using the *same* types as the
 # native reqwest-backed code, not a look-alike duplicate. Pure Rust, no C deps.
+#
+# wasm-bindgen/js-sys/wasm-bindgen-futures back the real-libsodium.js crypto
+# bridge in src/crypto/low.rs (docs/wasm-port-plan.md decision 2.1), the same
+# mechanism already proven in the standalone core/wasm-crypto-poc crate.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 http = "0.2.12"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+# wasm-bindgen-test drives real wasm32 execution (via `wasm-pack test --node`)
+# for the crypto bridge's golden-vector parity tests in src/crypto/mod.rs.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 

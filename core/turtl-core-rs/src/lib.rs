@@ -46,6 +46,15 @@ extern crate reqwest;
 // to async reqwest/fetch everywhere is docs/wasm-port-plan.md decision 2.3, a separate milestone.
 #[cfg(target_arch = "wasm32")]
 extern crate http;
+// Real-libsodium.js JS bridge deps for crypto/low.rs (docs/wasm-port-plan.md decision 2.1).
+#[cfg(target_arch = "wasm32")]
+extern crate wasm_bindgen;
+#[cfg(target_arch = "wasm32")]
+extern crate wasm_bindgen_futures;
+#[cfg(target_arch = "wasm32")]
+extern crate js_sys;
+#[cfg(all(test, target_arch = "wasm32"))]
+extern crate wasm_bindgen_test;
 #[cfg(not(target_arch = "wasm32"))]
 #[macro_use]
 extern crate rusqlite;
