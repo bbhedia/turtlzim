@@ -5,7 +5,9 @@
 use ::std::sync::{Arc, RwLock, Mutex};
 use ::std::ops::Drop;
 use ::std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use ::regex::Regex;
+#[cfg(not(target_arch = "wasm32"))]
 use ::num_cpus;
 use ::jedi::{self, Value};
 use ::config;
@@ -31,8 +33,22 @@ use ::sync::{self, SyncConfig, SyncState};
 use ::sync::sync_model::MemorySaver;
 use ::search::Search;
 use ::schema;
+#[cfg(not(target_arch = "wasm32"))]
 use ::migrate::{self, MigrateResult};
 use ::std::collections::HashMap;
+
+// TODO(wasm): the `migrate` crate (legacy Turtl-v1 account import) isn't a wasm32 dependency --
+// see docs/wasm-port-plan.md ("migrate is a red herring for this work") and Cargo.toml's
+// native-only dependency table. This is a same-shape stand-in for
+// `migrate::MigrateResult` so `Turtl::do_join()`/`User::post_join()` (which only ever see
+// `None` for `migrate_data` on wasm32, since `join_migrate()` itself is native-only below)
+// compile unchanged across both targets.
+#[cfg(target_arch = "wasm32")]
+#[derive(Default, Debug)]
+pub struct MigrateResult {
+    pub boards: Vec<::jedi::Value>,
+    pub notes: Vec<::jedi::Value>,
+}
 
 pub fn data_folder() -> TResult<String> {
     let integration = config::get::<String>(&["integration_tests", "data_folder"])?;
@@ -100,7 +116,13 @@ pub struct Turtl {
 impl Turtl {
     /// Create a new Turtl app
     pub fn new() -> TResult<Turtl> {
+        #[cfg(not(target_arch = "wasm32"))]
         let num_workers = num_cpus::get() - 1;
+        // TODO(wasm): no real OS-thread parallelism on wasm32 (docs/wasm-port-plan.md decision
+        // 2.4) -- Thredder runs synchronously there regardless of this value, see
+        // src/util/thredder.rs.
+        #[cfg(target_arch = "wasm32")]
+        let num_workers = 1;
 
         let api = Arc::new(Api::new());
         let kv = Arc::new(RwLock::new(Turtl::open_kv()?));
@@ -258,6 +280,7 @@ impl Turtl {
     }
 
     /// Create a new user account by migrating from a v0.6 server.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn join_migrate(&self, old_username: String, old_password: String, new_username: String, new_password: String) -> TResult<()> {
         let login = migrate::check_login(&old_username, &old_password)?;
         if login.is_none() {
@@ -272,6 +295,12 @@ impl Turtl {
             }
         })?;
         self.do_join(new_username, new_password, Some(migrate_data))
+    }
+    /// Create a new user account by migrating from a v0.6 server.
+    // TODO(wasm): the `migrate` crate isn't ported to wasm32, see docs/wasm-port-plan.md.
+    #[cfg(target_arch = "wasm32")]
+    pub fn join_migrate(&self, _old_username: String, _old_password: String, _new_username: String, _new_password: String) -> TResult<()> {
+        TErr!(TError::NotImplemented)
     }
 
     /// Log a user out
@@ -485,12 +514,30 @@ impl Turtl {
 
     /// Get the physical location of the per-user database file we will use for
     /// the current logged-in user.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get_user_db_location(&self, user_id: &String) -> TResult<String> {
         lazy_static! {
             static ref RE_API_FORMAT: Regex = Regex::new(r"(?i)[^a-z0-9]").expect("turtl::Turtl.get_user_db_location() -- failed to compile regex");
         }
         let api_endpoint = config::get::<String>(&["api", "endpoint"])?;
         let server = RE_API_FORMAT.replace_all(&api_endpoint, "");
+        let user_db = format!("turtl-user-{}-srv-{}", user_id, server);
+        storage::db_location(&user_db)
+    }
+    /// Get the physical location of the per-user database file we will use for
+    /// the current logged-in user.
+    // TODO(wasm): the `regex` crate isn't a wasm32 dependency here (it pulls in thread-id/memchr
+    // 0.1, which don't support this target -- see docs/wasm-port-plan.md and Cargo.toml). This
+    // is a plain, non-regex equivalent (filter out non-alphanumeric ASCII, same as
+    // `(?i)[^a-z0-9]` above) rather than a NotImplemented stub, since it's simple, pure string
+    // logic with no crypto/storage/network involved -- feeding into `storage::db_location()`,
+    // which itself is not-yet-ported on wasm32 anyway (see storage_wasm.rs).
+    #[cfg(target_arch = "wasm32")]
+    pub fn get_user_db_location(&self, user_id: &String) -> TResult<String> {
+        let api_endpoint = config::get::<String>(&["api", "endpoint"])?;
+        let server: String = api_endpoint.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
         let user_db = format!("turtl-user-{}-srv-{}", user_id, server);
         storage::db_location(&user_db)
     }

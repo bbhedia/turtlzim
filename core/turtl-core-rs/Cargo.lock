@@ -2213,6 +2213,7 @@ dependencies = [
  "futures-cpupool",
  "glob",
  "hex",
+ "http",
  "jedi",
  "jni",
  "lazy_static",

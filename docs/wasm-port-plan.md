@@ -269,6 +269,74 @@ Networking and concurrency are unified on async/await across both native and web
       (`wasm_encrypt` output == native envelope bytes; `wasm_decrypt(native envelope)` ==
       original plaintext), confirmed on a from-scratch rebuild. See
       `core/wasm-crypto-poc/{src/lib.rs,js/sodium_bridge.js,test/run_test.js}`.
-- [ ] Step 3: feature-gate `turtl_core` for wasm32 (threads, blocking reqwest, rusqlite).
-- [ ] Step 4: `wasm-pack build --target web` producing a loadable module end to end.
+- [x] Step 3: feature-gate `turtl_core` for wasm32 (threads, blocking reqwest, rusqlite) —
+      **done**. `cargo check --target wasm32-unknown-unknown` (no extra features needed; the
+      native-only `sqlite-static` feature is simply irrelevant on this target since `rusqlite`
+      isn't a wasm32 dependency at all) succeeds for the whole `turtl_core` workspace. Native
+      `cargo test --features sqlite-static` still passes all 63 tests, unchanged.
+
+      **Approach:** target-specific Cargo dependency tables
+      (`[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`) gate out every dependency with
+      no real wasm32 story — `rusqlite`/`sqlite-static` (native SQLite), `sodiumoxide` (native
+      libsodium C bindings), `reqwest` (blocking client only), `regex` 0.1.x + `clippo` (pulls in
+      `thread-id`/`memchr` 0.1, neither of which has a wasm32 branch), `migrate` (its `rust-crypto`
+      path dependency has the same native-C-build problem as rusqlite), `num_cpus`,
+      `futures-cpupool`, `fs2` (advisory file locking — no filesystem to lock on this target). A
+      wasm32-only `http = "0.2.12"` dependency was added: reqwest 0.10.x re-exports
+      `http::{Method, StatusCode}` directly, so depending on `http` lets the wasm32 stub reuse the
+      *exact same types* `TError::Api`/`Http` and match arms like `StatusCode::UNAUTHORIZED`
+      already use natively, not a look-alike duplicate.
+
+      For the Rust side, two patterns were used depending on how narrow the surface was:
+      - **Whole-file swap** (via `#[path = "..."]` on the `mod` declaration in lib.rs/sync/mod.rs)
+        for subsystems that are *entirely* native-only-dependency-shaped: `api.rs` →
+        `api_wasm.rs`, `storage.rs` → `storage_wasm.rs`, `search.rs` → `search_wasm.rs`,
+        `sync/incoming.rs` → `sync/incoming_wasm.rs`. Each stub preserves the real file's public
+        struct/function signatures exactly, with every body that would touch the network/a real
+        DB returning `TError::NotImplemented`/`CryptoError::NotImplemented`. `sync/outgoing.rs`
+        and `sync/files/{incoming,outgoing}.rs` have no consumers outside `sync::start()` (itself
+        native-only below), so they're simply excluded from the wasm32 build entirely rather than
+        stubbed.
+      - **In-file `#[cfg]` twins** (same name, mutually-exclusive `#[cfg(not(target_arch =
+        "wasm32"))]` / `#[cfg(target_arch = "wasm32")]`, one item each) for individual
+        functions/consts inside files that are otherwise shared: every direct-`sodiumoxide` call
+        in `crypto/low.rs` (`sha256`, `sha512`, `hmac`, `secure_compare`, `rand_bytes`,
+        `random_salt`, `gen_key`, `chacha20poly1305::{encrypt,decrypt}`, `asym::{keygen,encrypt,
+        decrypt}`); `sync::start()`; `turtl.rs`'s `join_migrate()`/`get_user_db_location()`;
+        `dispatch.rs`'s `"clip"`/`"user:can-migrate"`/`"user:migrate-auth-debug"` command arms;
+        `util/thredder.rs`'s `Thredder` (see below).
+
+      **Two deliberate exceptions to "stub returns NotImplemented":**
+      - `Thredder` (`util/thredder.rs`) runs its closure **synchronously, inline** on wasm32
+        instead of erroring — it's genuinely correct (not a lie or a no-op), just not
+        backgrounded, which is an honest placeholder for decision 2.4's real single-threaded-async
+        rewrite. This keeps every real caller (`sync_model::save_model`, `models/file.rs`,
+        `models/protected.rs`) working unchanged since they only care about the result.
+      - `turtl.rs`'s `get_user_db_location()` does plain non-regex ASCII-alphanumeric filtering
+        instead of erroring, since it's pure string logic with no crypto/network/storage
+        involved (and feeds into `storage::db_location()`, which is itself not-yet-ported).
+      - `chacha20poly1305::{keylen, noncelen}` return hardcoded literals (32, 12) matching
+        sodiumoxide's real constants — public algorithm-dimension numbers, not secrets, so
+        mirroring them directly is safe and lets `Key::random()`/nonce generation keep their
+        real shapes even though the actual RNG/AEAD calls beneath them are stubbed.
+      - `sync/incoming_wasm.rs`'s `process_incoming_sync()`/`ignore_syncs_maybe()` are copied
+        **verbatim** (not stubbed) from the real file: they only ever drain an in-process
+        `MsQueue` that nothing on wasm32 currently populates (since `sync::start()` is stubbed),
+        so the real logic is both correct and side-effect-free today, and will "just work" the
+        moment a wasm32 sync producer exists.
+
+      **Every stub is marked** with a `// TODO(wasm): ... see docs/wasm-port-plan.md` comment,
+      grep with `grep -rn "TODO(wasm)" core/turtl-core-rs/src`.
+
+      **New files:** `src/api_wasm.rs`, `src/storage_wasm.rs`, `src/search_wasm.rs`,
+      `src/sync/incoming_wasm.rs`.
+      **Changed:** `Cargo.toml`, `src/lib.rs`, `src/error.rs`, `src/crypto/low.rs`,
+      `src/dispatch.rs`, `src/turtl.rs`, `src/models/user.rs`, `src/sync/mod.rs`,
+      `src/util/thredder.rs`.
+- [ ] Step 4: `wasm-pack build --target web` producing a loadable module end to end. Blocked on
+      the real integrations step 3 deliberately deferred: wiring `core/wasm-crypto-poc`'s
+      libsodium.js bridge into `crypto/low.rs`, `sqlite-wasm-rs` into `storage.rs`/`search.rs`,
+      and async `reqwest`/`fetch` into `api.rs` (each its own milestone per decisions 2.1/2.2/2.3),
+      plus the real single-threaded-async concurrency rewrite (2.4) to replace `Thredder`'s
+      current synchronous-inline placeholder.
 - [ ] Step 5: full parity pass before calling the port done.

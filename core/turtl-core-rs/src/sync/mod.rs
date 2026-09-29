@@ -15,18 +15,35 @@
 
 #[macro_use]
 mod macros;
+// TODO(wasm): `incoming` provides `SyncIncoming::ignore_on_next()`, which models/user.rs calls
+// regardless of target, so it gets a same-shape wasm32 stub (sync/incoming_wasm.rs) rather than
+// being cfg'd out entirely. `outgoing`/`files` have no consumers outside this module's own
+// (native-only, see below) `start()`, so they're simply native-only. All three real
+// implementations depend on blocking reqwest (via ::api::Api) and real OS threads/rusqlite --
+// see docs/wasm-port-plan.md decisions 2.2/2.3/2.4 (storage/networking/concurrency), each its
+// own future milestone.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod incoming;
+#[cfg(target_arch = "wasm32")]
+#[path = "incoming_wasm.rs"]
+pub mod incoming;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod outgoing;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod files;
 #[macro_use]
 pub mod sync_model;
 
-use ::std::thread;
 use ::std::sync::{Arc, RwLock, Mutex, mpsc};
+use ::std::thread;
 use ::config;
+#[cfg(not(target_arch = "wasm32"))]
 use ::sync::outgoing::SyncOutgoing;
+#[cfg(not(target_arch = "wasm32"))]
 use ::sync::incoming::SyncIncoming;
+#[cfg(not(target_arch = "wasm32"))]
 use ::sync::files::outgoing::FileSyncOutgoing;
+#[cfg(not(target_arch = "wasm32"))]
 use ::sync::files::incoming::FileSyncIncoming;
 use ::models::sync_record::SyncRecord;
 use ::util;
@@ -239,6 +256,7 @@ pub trait Syncer {
 /// thread needs its own connection. We don't have the ability to create the
 /// connections in this scope (no access to Turtl by design) so we need to
 /// just have them passed in.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Option<Storage>>>) -> TResult<SyncState> {
     // enable syncing (set phasers to stun)
     {
@@ -351,6 +369,17 @@ pub fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Optio
         resume: Box::new(resume),
         enabled: Box::new(enabled),
     })
+}
+
+/// Start our syncing system!
+// TODO(wasm): the real sync engine spawns 4 OS threads (`std::thread::Builder::spawn`) that each
+// make blocking HTTP calls via `::api::Api` -- neither real OS-thread parallelism nor blocking
+// reqwest exist on wasm32 (see docs/wasm-port-plan.md decisions 2.3 networking and 2.4
+// concurrency, both separate future milestones: async reqwest/fetch + a single-threaded
+// spawn_local/Worker-based scheduler). Not yet ported.
+#[cfg(target_arch = "wasm32")]
+pub fn start(_config: Arc<RwLock<SyncConfig>>, _api: Arc<Api>, _db: Arc<Mutex<Option<Storage>>>) -> TResult<SyncState> {
+    TErr!(TError::NotImplemented)
 }
 
 #[cfg(test)]

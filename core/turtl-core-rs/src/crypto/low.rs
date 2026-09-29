@@ -1,32 +1,81 @@
 //! Low-level crypto primitives/modules.
+//!
+//! TODO(wasm): the functions in this file that call directly into
+//! `sodiumoxide` (native libsodium C bindings, which have no
+//! `wasm32-unknown-unknown` build story -- see docs/wasm-port-plan.md §1) are
+//! stubbed out for `target_arch = "wasm32"`, returning
+//! `CryptoError::NotImplemented`. Per docs/wasm-port-plan.md decision 2.1, the
+//! real wasm crypto path is a wasm-bindgen JS bridge to real `libsodium.js`,
+//! already proven out in the sibling `core/wasm-crypto-poc` crate (byte-exact
+//! golden-vector parity vs. this file's native `chacha20poly1305` seal/open).
+//! Wiring that bridge in as this file's wasm32 implementation (instead of
+//! these placeholder stubs) is a follow-up milestone, not part of this
+//! compile-only pass.
 
 use ::hex;
 use ::base64;
+#[cfg(not(target_arch = "wasm32"))]
 use ::sodiumoxide;
+#[cfg(not(target_arch = "wasm32"))]
 use ::sodiumoxide::crypto::hash;
+#[cfg(not(target_arch = "wasm32"))]
 use ::sodiumoxide::crypto::auth as sodium_auth;
+#[cfg(not(target_arch = "wasm32"))]
 use ::sodiumoxide::crypto::pwhash;
 use ::crypto::error::{CResult, CryptoError};
 
 /// Abstract the size of hmac keys
 #[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
 pub const HMAC_KEYLEN: usize = sodium_auth::KEYBYTES;
+/// Abstract the size of hmac keys
+// TODO(wasm): matches sodiumoxide::crypto::auth::KEYBYTES on native (HMAC-SHA512256); hmac() is
+// unimplemented on wasm32 below, so this constant isn't actually exercised there yet.
+#[allow(dead_code)]
+#[cfg(target_arch = "wasm32")]
+pub const HMAC_KEYLEN: usize = 32;
+
 /// Abstract the size of salts in our KDF
 pub const KEYGEN_SALT_LEN: usize = 32;
+
 /// Abstract the ops limit for key generation (524288)
+#[cfg(not(target_arch = "wasm32"))]
 pub const KEYGEN_OPS_DEFAULT: usize = pwhash::OPSLIMIT_INTERACTIVE.0;
 /// Abstract the mem limit for key generation (16777216)
+#[cfg(not(target_arch = "wasm32"))]
 pub const KEYGEN_MEM_DEFAULT: usize = pwhash::MEMLIMIT_INTERACTIVE.0;
+// TODO(wasm): literal values matching sodiumoxide's pwhash::OPSLIMIT_INTERACTIVE /
+// MEMLIMIT_INTERACTIVE on native; gen_key() is unimplemented on wasm32 below, so these aren't
+// exercised there yet.
+#[cfg(target_arch = "wasm32")]
+pub const KEYGEN_OPS_DEFAULT: usize = 524288;
+#[cfg(target_arch = "wasm32")]
+pub const KEYGEN_MEM_DEFAULT: usize = 16777216;
 
 /// Run a sha256 hash on some data
 #[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn sha256(data: &[u8]) -> CResult<Vec<u8>> {
     Ok(hash::sha256::hash(data).0.to_vec())
 }
+/// Run a sha256 hash on some data
+// TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md
+#[allow(dead_code)]
+#[cfg(target_arch = "wasm32")]
+pub fn sha256(_data: &[u8]) -> CResult<Vec<u8>> {
+    Err(CryptoError::NotImplemented(String::from("crypto::low::sha256() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+}
 
 /// Run a sha512 hash on some data
+#[cfg(not(target_arch = "wasm32"))]
 pub fn sha512(data: &[u8]) -> CResult<Vec<u8>> {
     Ok(hash::sha512::hash(data).0.to_vec())
+}
+/// Run a sha512 hash on some data
+// TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md
+#[cfg(target_arch = "wasm32")]
+pub fn sha512(_data: &[u8]) -> CResult<Vec<u8>> {
+    Err(CryptoError::NotImplemented(String::from("crypto::low::sha512() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
 }
 
 /// Convert a byte array into a hex string
@@ -53,6 +102,7 @@ pub fn from_base64(data: &String) -> CResult<Vec<u8>> {
 /// Given a key (password/secret) and a set of data, run an HMAC-SHA512256 and
 /// return the binary result as a u8 vec.
 #[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn hmac(key: &[u8], data: &[u8]) -> CResult<Vec<u8>> {
     let key = match sodium_auth::Key::from_slice(key) {
         Some(x) => x,
@@ -60,6 +110,14 @@ pub fn hmac(key: &[u8], data: &[u8]) -> CResult<Vec<u8>> {
     };
     let tag = sodium_auth::authenticate(data, &key);
     Ok(tag.0.to_vec())
+}
+/// Given a key (password/secret) and a set of data, run an HMAC-SHA512256 and
+/// return the binary result as a u8 vec.
+// TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md
+#[allow(dead_code)]
+#[cfg(target_arch = "wasm32")]
+pub fn hmac(_key: &[u8], _data: &[u8]) -> CResult<Vec<u8>> {
+    Err(CryptoError::NotImplemented(String::from("crypto::low::hmac() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
 }
 
 /// Do a secure comparison of two byte arrays.
@@ -71,16 +129,35 @@ pub fn hmac(key: &[u8], data: &[u8]) -> CResult<Vec<u8>> {
 /// This takes a bit more legwork, but is able to securely compare two values
 /// without leaking information about either.
 #[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn secure_compare(arr1: &[u8], arr2: &[u8]) -> CResult<bool> {
     let key = sodium_auth::gen_key().0.to_vec();
     let hash1 = hmac(key.as_slice(), arr1)?;
     let hash2 = hmac(key.as_slice(), arr2)?;
     Ok(hash1 == hash2)
 }
+/// Do a secure comparison of two byte arrays.
+// TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md (hmac()/gen_key() below it are
+// themselves unimplemented on wasm32)
+#[allow(dead_code)]
+#[cfg(target_arch = "wasm32")]
+pub fn secure_compare(_arr1: &[u8], _arr2: &[u8]) -> CResult<bool> {
+    Err(CryptoError::NotImplemented(String::from("crypto::low::secure_compare() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+}
 
 /// Generate N number of CS random bytes.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn rand_bytes(len: usize) -> CResult<Vec<u8>> {
     Ok(sodiumoxide::randombytes::randombytes(len))
+}
+/// Generate N number of CS random bytes.
+// TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md. Random-byte generation is
+// security-sensitive, so this is intentionally NOT reimplemented with a second RNG crate here --
+// it should go through the same real-libsodium.js bridge as everything else in this file
+// (core/wasm-crypto-poc already proves that bridge works for randombytes).
+#[cfg(target_arch = "wasm32")]
+pub fn rand_bytes(_len: usize) -> CResult<Vec<u8>> {
+    Err(CryptoError::NotImplemented(String::from("crypto::low::rand_bytes() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
 }
 
 /// Generate a random u64. Uses rand_bytes() and bit shifting to build a u64.
@@ -103,11 +180,20 @@ pub fn rand_float() -> CResult<f64> {
 
 /// Generate a random salt for use with the key deriver (gen_key())
 #[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn random_salt() -> CResult<Vec<u8>> {
     Ok(pwhash::gen_salt().0.to_vec())
 }
+/// Generate a random salt for use with the key deriver (gen_key())
+// TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md
+#[allow(dead_code)]
+#[cfg(target_arch = "wasm32")]
+pub fn random_salt() -> CResult<Vec<u8>> {
+    Err(CryptoError::NotImplemented(String::from("crypto::low::random_salt() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+}
 
 /// Generate a key given a password and a salt
+#[cfg(not(target_arch = "wasm32"))]
 pub fn gen_key(password: &[u8], salt: &[u8], cpu: usize, mem: usize) -> CResult<Vec<u8>> {
     let len = chacha20poly1305::keylen();
     let mut key: Vec<u8> = vec![0; len];
@@ -120,21 +206,45 @@ pub fn gen_key(password: &[u8], salt: &[u8], cpu: usize, mem: usize) -> CResult<
         Err(()) => Err(CryptoError::OperationFailed(format!("crypto::low::gen_key() -- could not generate key (OOM?)"))),
     }
 }
+/// Generate a key given a password and a salt
+// TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md
+#[cfg(target_arch = "wasm32")]
+pub fn gen_key(_password: &[u8], _salt: &[u8], _cpu: usize, _mem: usize) -> CResult<Vec<u8>> {
+    Err(CryptoError::NotImplemented(String::from("crypto::low::gen_key() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+}
 
 pub mod chacha20poly1305 {
     //! Our chacha20poly1305 wrapper.
 
+    #[cfg(not(target_arch = "wasm32"))]
     use ::sodiumoxide::crypto::aead::chacha20poly1305_ietf as aead;
     use ::crypto::{CResult, CryptoError};
 
     /// Get the key length for chacha20poly1305
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn keylen() -> usize {
         aead::KEYBYTES
     }
+    /// Get the key length for chacha20poly1305
+    // TODO(wasm): hardcoded to match sodiumoxide's chacha20poly1305_ietf::KEYBYTES (32) --
+    // this is a public algorithm-dimension constant, not a secret, so it's safe to mirror
+    // directly rather than stub as NotImplemented. See docs/wasm-port-plan.md.
+    #[cfg(target_arch = "wasm32")]
+    pub fn keylen() -> usize {
+        32
+    }
 
     /// Get the nonce length for chacha20poly1305
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn noncelen() -> usize {
         aead::NONCEBYTES
+    }
+    /// Get the nonce length for chacha20poly1305
+    // TODO(wasm): hardcoded to match sodiumoxide's chacha20poly1305_ietf::NONCEBYTES (12), same
+    // rationale as keylen() above. See docs/wasm-port-plan.md.
+    #[cfg(target_arch = "wasm32")]
+    pub fn noncelen() -> usize {
+        12
     }
 
     /// Generate a key specifically for use with chacha20poly1305
@@ -148,6 +258,7 @@ pub mod chacha20poly1305 {
     }
 
     /// Encrypt data using chacha20poly1305
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn encrypt(key: &[u8], nonce: &[u8], auth: &[u8], plaintext: &[u8]) -> CResult<Vec<u8>> {
         let key_wrap = match aead::Key::from_slice(key) {
             Some(x) => x,
@@ -159,8 +270,18 @@ pub mod chacha20poly1305 {
         };
         Ok(aead::seal(plaintext, Some(auth), &nonce_wrap, &key_wrap))
     }
+    /// Encrypt data using chacha20poly1305
+    // TODO(wasm): not yet ported to wasm -- see docs/wasm-port-plan.md decision 2.1. The real
+    // wasm implementation is a wasm-bindgen JS bridge to real libsodium.js (byte-identical to
+    // native by construction), already proven out in core/wasm-crypto-poc; wiring it in here is
+    // a follow-up milestone, not this compile-only pass.
+    #[cfg(target_arch = "wasm32")]
+    pub fn encrypt(_key: &[u8], _nonce: &[u8], _auth: &[u8], _plaintext: &[u8]) -> CResult<Vec<u8>> {
+        Err(CryptoError::NotImplemented(String::from("crypto::low::chacha20poly1305::encrypt() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+    }
 
     /// Decrypt data using chacha20poly1305
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn decrypt(key: &[u8], nonce: &[u8], auth: &[u8], ciphertext: &[u8]) -> CResult<Vec<u8>> {
         let key_wrap = match aead::Key::from_slice(key) {
             Some(x) => x,
@@ -175,20 +296,36 @@ pub mod chacha20poly1305 {
             Err(_) => Err(CryptoError::Authentication(format!("crypto::low::decrypt() -- authentication failed while decrypting"))),
         }
     }
+    /// Decrypt data using chacha20poly1305
+    // TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md (same follow-up as encrypt() above)
+    #[cfg(target_arch = "wasm32")]
+    pub fn decrypt(_key: &[u8], _nonce: &[u8], _auth: &[u8], _ciphertext: &[u8]) -> CResult<Vec<u8>> {
+        Err(CryptoError::NotImplemented(String::from("crypto::low::chacha20poly1305::decrypt() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+    }
 }
 
 pub mod asym {
     use ::crypto::error::{CryptoError, CResult};
+    #[cfg(not(target_arch = "wasm32"))]
     use ::sodiumoxide::crypto::box_ as crypto_box;
+    #[cfg(not(target_arch = "wasm32"))]
     use ::sodiumoxide::crypto::sealedbox;
 
     /// Generate a public/private keypair for use with the crypto::box lib
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn keygen() -> CResult<(Vec<u8>, Vec<u8>)> {
         let (pk, sk) = crypto_box::gen_keypair();
         Ok((pk.0.to_vec(), sk.0.to_vec()))
     }
+    /// Generate a public/private keypair for use with the crypto::box lib
+    // TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md
+    #[cfg(target_arch = "wasm32")]
+    pub fn keygen() -> CResult<(Vec<u8>, Vec<u8>)> {
+        Err(CryptoError::NotImplemented(String::from("crypto::low::asym::keygen() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+    }
 
     /// Encrypt data using crypto_box (asym)
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn encrypt(their_pubkey: &[u8], plaintext: &[u8]) -> CResult<Vec<u8>> {
         let pubkey = match crypto_box::PublicKey::from_slice(their_pubkey) {
             Some(x) => x,
@@ -196,8 +333,15 @@ pub mod asym {
         };
         Ok(sealedbox::seal(plaintext, &pubkey))
     }
+    /// Encrypt data using crypto_box (asym)
+    // TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md
+    #[cfg(target_arch = "wasm32")]
+    pub fn encrypt(_their_pubkey: &[u8], _plaintext: &[u8]) -> CResult<Vec<u8>> {
+        Err(CryptoError::NotImplemented(String::from("crypto::low::asym::encrypt() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
+    }
 
     /// Decrypt data using crypto_box (asym)
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn decrypt(our_pubkey: &[u8], our_privkey: &[u8], ciphertext: &[u8]) -> CResult<Vec<u8>> {
         let pubkey = match crypto_box::PublicKey::from_slice(our_pubkey) {
             Some(x) => x,
@@ -211,6 +355,12 @@ pub mod asym {
             Ok(x) => Ok(x),
             Err(_) => Err(CryptoError::OperationFailed(String::from("crypto::low::async::decrypt() -- decrypt failed"))),
         }
+    }
+    /// Decrypt data using crypto_box (asym)
+    // TODO(wasm): not yet ported to wasm, see docs/wasm-port-plan.md
+    #[cfg(target_arch = "wasm32")]
+    pub fn decrypt(_our_pubkey: &[u8], _our_privkey: &[u8], _ciphertext: &[u8]) -> CResult<Vec<u8>> {
+        Err(CryptoError::NotImplemented(String::from("crypto::low::asym::decrypt() -- not yet ported to wasm, see docs/wasm-port-plan.md")))
     }
 }
 

@@ -25,10 +25,12 @@ use ::models::invite::{Invite, InviteRequest};
 use ::models::file::FileData;
 use ::models::sync_record::{SyncAction, SyncType, SyncRecord};
 use ::models::feedback::Feedback;
+#[cfg(not(target_arch = "wasm32"))]
 use ::clippo::{self, CustomParser};
 use ::sync::sync_model;
 use ::sync;
 use ::messaging::{self, Event};
+#[cfg(not(target_arch = "wasm32"))]
 use ::migrate;
 use ::crypto::{self, Key};
 use ::std::panic;
@@ -64,6 +66,7 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             let user_guard = lockr!(turtl.user);
             user_guard.data()
         }
+        #[cfg(not(target_arch = "wasm32"))]
         "user:can-migrate" => {
             let old_username: String = jedi::get(&["2"], &data)?;
             let old_password: String = jedi::get(&["3"], &data)?;
@@ -77,6 +80,11 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
                 Err(_) => Ok(json!(false)),
             }
         }
+        // TODO(wasm): the legacy Turtl-v1 account importer (`migrate` crate) isn't ported to
+        // wasm32 -- see docs/wasm-port-plan.md ("migrate is a red herring for this work") and
+        // Cargo.toml's native-only dependency table.
+        #[cfg(target_arch = "wasm32")]
+        "user:can-migrate" => Ok(json!(false)),
         "user:join-migrate" => {
             let old_username: String = jedi::get(&["2"], &data)?;
             let old_password: String = jedi::get(&["3"], &data)?;
@@ -86,6 +94,7 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             let user_guard = lockr!(turtl.user);
             user_guard.data()
         }
+        #[cfg(not(target_arch = "wasm32"))]
         "user:migrate-auth-debug" => {
             let old_username: String = jedi::get(&["2"], &data)?;
             let old_password: String = jedi::get(&["3"], &data)?;
@@ -95,6 +104,11 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
                 "v0": result_v0.1,
                 "v1": result_v1.1,
             }))
+        }
+        // TODO(wasm): see "user:can-migrate" above -- migrate crate not ported to wasm32.
+        #[cfg(target_arch = "wasm32")]
+        "user:migrate-auth-debug" => {
+            TErr!(TError::NotImplemented)
         }
         "user:logout" => {
             let clear_cookie: bool = match jedi::get(&["2"], &data) {
@@ -394,6 +408,7 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             feedback.send(turtl)?;
             Ok(json!({}))
         }
+        #[cfg(not(target_arch = "wasm32"))]
         "clip" => {
             let url: String = jedi::get(&["2"], &data)?;
             let custom_parsers: Vec<CustomParser> = jedi::get(&["3"], &data)?;
@@ -401,6 +416,13 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
                 .unwrap_or(None);
             let res = clippo::clip(&url, &custom_parsers, proxy_cfg)?;
             Ok(jedi::to_val(&res)?)
+        }
+        // TODO(wasm): clippo (web-clipping via blocking reqwest + regex + html5ever/scraper) is
+        // not ported to wasm32 -- see docs/wasm-port-plan.md and Cargo.toml's native-only
+        // dependency table.
+        #[cfg(target_arch = "wasm32")]
+        "clip" => {
+            TErr!(TError::NotImplemented)
         }
         "ping" => {
             info!("ping!");

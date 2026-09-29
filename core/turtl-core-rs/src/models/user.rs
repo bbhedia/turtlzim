@@ -14,7 +14,12 @@ use ::util;
 use ::sync::sync_model::{self, SyncModel, MemorySaver};
 use ::sync::incoming::SyncIncoming;
 use ::messaging;
+#[cfg(not(target_arch = "wasm32"))]
 use ::migrate::MigrateResult;
+// TODO(wasm): see turtl.rs's `MigrateResult` stub -- same rationale (the `migrate` crate isn't
+// a wasm32 dependency; docs/wasm-port-plan.md).
+#[cfg(target_arch = "wasm32")]
+use ::turtl::MigrateResult;
 use ::std::path::PathBuf;
 use ::std::io::prelude::*;
 use ::std::fs;

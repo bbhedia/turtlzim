@@ -2,15 +2,23 @@
 
 extern crate base64;
 extern crate carrier;
+#[cfg(not(target_arch = "wasm32"))]
 extern crate clippo;
+#[cfg(not(target_arch = "wasm32"))]
 extern crate clouseau;
 extern crate config;
 extern crate crossbeam;
+#[cfg(not(target_arch = "wasm32"))]
 extern crate dumpy;
 extern crate encoding_rs;
 extern crate fern;
+// TODO(wasm): fs2 (advisory file locking for the data-dir lockfile) has no wasm32 build --
+// there's no real filesystem to lock on wasm32-unknown-unknown anyway. See lib.rs's
+// `acquire_lockfile()`.
+#[cfg(not(target_arch = "wasm32"))]
 extern crate fs2;
 extern crate futures;
+#[cfg(not(target_arch = "wasm32"))]
 extern crate futures_cpupool;
 extern crate glob;
 extern crate hex;
@@ -21,14 +29,24 @@ extern crate lib_permissions;
 #[macro_use]
 extern crate log;
 extern crate log_panics;
+#[cfg(not(target_arch = "wasm32"))]
 extern crate migrate;
+#[cfg(not(target_arch = "wasm32"))]
 extern crate num_cpus;
 #[macro_use]
 extern crate protected_derive;
 #[macro_use]
 extern crate quick_error;
+#[cfg(not(target_arch = "wasm32"))]
 extern crate regex;
+#[cfg(not(target_arch = "wasm32"))]
 extern crate reqwest;
+// TODO(wasm): reqwest's non-blocking API does resolve for wasm32 (it swaps to a fetch-backed
+// client there), but this crate only uses the `blocking` API today (see src/api.rs) -- porting
+// to async reqwest/fetch everywhere is docs/wasm-port-plan.md decision 2.3, a separate milestone.
+#[cfg(target_arch = "wasm32")]
+extern crate http;
+#[cfg(not(target_arch = "wasm32"))]
 #[macro_use]
 extern crate rusqlite;
 extern crate serde;
@@ -36,6 +54,7 @@ extern crate serde;
 extern crate serde_derive;
 #[macro_use]
 extern crate serde_json;
+#[cfg(not(target_arch = "wasm32"))]
 extern crate sodiumoxide;
 extern crate time;
 extern crate url;
@@ -46,13 +65,34 @@ pub mod error;
 mod util;
 mod crypto;
 mod messaging;
+// TODO(wasm): api.rs is built entirely on reqwest's *blocking* client, which has no wasm32
+// build story (needs a tokio runtime + real OS threads) -- see docs/wasm-port-plan.md decision
+// 2.3 (async reqwest/fetch everywhere), a separate future milestone. Swapped for a same-public-
+// API stub on wasm32 (src/api_wasm.rs) so callers (turtl.rs, models/user.rs, error.rs) keep
+// compiling unchanged.
+#[cfg(not(target_arch = "wasm32"))]
+mod api;
+#[cfg(target_arch = "wasm32")]
+#[path = "api_wasm.rs"]
 mod api;
 #[macro_use]
 mod sync;
 #[macro_use]
 mod models;
 mod profile;
+// TODO(wasm): storage.rs/search.rs are real-SQLite-backed (rusqlite/dumpy, clouseau) with no
+// wasm32 build story yet (docs/wasm-port-plan.md decision 2.2, a future `sqlite-wasm-rs`
+// milestone) -- swapped for same-public-API stub files on wasm32 so everything downstream
+// (sync_model.rs, profile.rs, most of models/) keeps compiling unchanged.
+#[cfg(not(target_arch = "wasm32"))]
 mod storage;
+#[cfg(target_arch = "wasm32")]
+#[path = "storage_wasm.rs"]
+mod storage;
+#[cfg(not(target_arch = "wasm32"))]
+mod search;
+#[cfg(target_arch = "wasm32")]
+#[path = "search_wasm.rs"]
 mod search;
 mod dispatch;
 mod schema;
@@ -64,6 +104,7 @@ use ::std::env;
 use ::std::fs;
 use ::jedi::Value;
 use ::error::TResult;
+#[cfg(not(target_arch = "wasm32"))]
 use ::fs2::FileExt;
 
 /// Init any state/logging/etc the app needs
@@ -118,6 +159,39 @@ pub fn init(config_str: String) -> TResult<()> {
     Ok(())
 }
 
+/// Acquire an exclusive advisory lock on the data folder (so two instances of turtl don't run
+/// against the same data dir at once).
+#[cfg(not(target_arch = "wasm32"))]
+fn acquire_lockfile(data_folder: &String) -> TResult<Option<fs::File>> {
+    if data_folder != ":memory:" {
+        let lockfile_path = format!("{}/run.lock", data_folder);
+        info!("main::start() -- locking data dir: {}", lockfile_path);
+        let lockfile = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lockfile_path.as_str())?;
+        match lockfile.try_lock_exclusive() {
+            Ok(_) => {}
+            Err(e) => {
+                error!("main::start() -- cannot lock {} ...another instance of turtl is likely running", lockfile_path);
+                return Err(toterr!(e));
+            }
+        }
+        Ok(Some(lockfile))
+    } else {
+        Ok(None)
+    }
+}
+/// TODO(wasm): no real filesystem (let alone advisory file locking) on wasm32-unknown-unknown --
+/// the single-instance-per-data-dir guard the native lockfile provides doesn't apply there (no
+/// shared on-disk data dir to race over between processes in a browser tab/worker anyway).
+#[cfg(target_arch = "wasm32")]
+fn acquire_lockfile(_data_folder: &String) -> TResult<Option<fs::File>> {
+    Ok(None)
+}
+
 /// Start our app...spawns all our worker/helper threads, including our comm
 /// system that listens for external messages.
 ///
@@ -135,26 +209,7 @@ pub fn start() -> thread::JoinHandle<()> {
         let runner = move || -> TResult<()> {
             // acquire our datadir lock
             let data_folder = config::get::<String>(&["data_folder"])?;
-            let lockfile = if data_folder != ":memory:" {
-                let lockfile_path = format!("{}/run.lock", data_folder);
-                info!("main::start() -- locking data dir: {}", lockfile_path);
-                let lockfile = fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(false)
-                    .open(lockfile_path.as_str())?;
-                match lockfile.try_lock_exclusive() {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("main::start() -- cannot lock {} ...another instance of turtl is likely running", lockfile_path);
-                        return Err(toterr!(e));
-                    }
-                }
-                Some(lockfile)
-            } else {
-                None
-            };
+            let lockfile = acquire_lockfile(&data_folder)?;
 
             // create our turtl object
             let turtl = Arc::new(turtl::Turtl::new()?);
