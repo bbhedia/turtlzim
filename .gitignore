@@ -9,6 +9,9 @@ build/
 
 # Claude Code session-local state
 .claude/
+# Session exports from scripts/export-claude-session.sh hold full conversation
+# transcripts -- transfer them out of band, never commit them.
+turtlzim-claude-session-*.tar.gz
 
 # OS
 .DS_Store

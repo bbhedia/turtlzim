@@ -112,10 +112,14 @@ echo
 echo "   System packages needing sudo (run yourself, adjust for your"
 echo "   package manager if not Debian/Ubuntu-based):"
 echo
-echo "     sudo apt-get install -y pkg-config libssl-dev libsodium-dev"
+echo "     sudo apt-get install -y build-essential pkg-config libssl-dev libsodium-dev clang llvm"
 echo
-echo "   (SQLite dev headers are NOT needed -- the crate builds its own via"
-echo "   the 'sqlite-static' cargo feature.)"
+echo "   (build-essential = C compiler/linker/make: every native build needs it,"
+echo "   even 'cargo check' for wasm32, because proc-macros and build scripts link"
+echo "   natively. clang + llvm = the wasm32 C toolchain for the web build's bundled"
+echo "   SQLite -- see docs/wasm-port-plan.md section 2.2.1. SQLite dev headers are"
+echo "   NOT needed -- the native crate builds its own via the 'sqlite-static'"
+echo "   cargo feature.)"
 echo
 echo "3. Sanity-check the native core still builds/tests clean here:"
 echo "     cd '$DEST_ABS/core/turtl-core-rs'"
