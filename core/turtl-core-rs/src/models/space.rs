@@ -8,6 +8,7 @@ use crate::models::space_member::SpaceMember;
 use crate::models::sync_record::{SyncRecord, SyncAction};
 use crate::models::validate::{self, Validate};
 use crate::models::keychain;
+use crate::profile::Profile;
 use crate::sync::sync_model::{self, SyncModel, MemorySaver};
 use crate::turtl::Turtl;
 use ::lib_permissions::{Role, Permission};
@@ -254,89 +255,138 @@ impl Space {
             .next()
     }
 
+    /// Run `f` on the space `space_id` of our profile, under the profile's write lock. The lock is
+    /// released as soon as `f` returns, so `f` is for the synchronous parts of an operation only:
+    /// the request itself goes between two of these (see the note on locks in util/exec.rs).
+    fn with_space<T, F>(turtl: &Turtl, space_id: &String, f: F) -> TResult<T>
+        where F: FnOnce(&mut Space) -> TResult<T>
+    {
+        let mut profile_guard = lockw!(turtl.profile);
+        match Profile::finder(&mut profile_guard.spaces, space_id) {
+            Some(space) => f(space),
+            None => TErr!(TError::MissingData(format!("couldn't find space {}", space_id))),
+        }
+    }
+
+    /// The data of the space `space_id`, or None if our profile doesn't have it (anymore).
+    fn data_if_present(turtl: &Turtl, space_id: &String) -> TResult<Option<Value>> {
+        let profile_guard = lockr!(turtl.profile);
+        match profile_guard.spaces.iter().find(|x| x.id() == Some(space_id)) {
+            Some(space) => Ok(Some(space.data()?)),
+            None => Ok(None),
+        }
+    }
+
+    // The operations below all talk to the API, so they follow one pattern: check what we may do
+    // while the space is locked, make the request with nothing locked, then lock the space again to
+    // apply the answer. Each hands back the space's data as the UI should see it afterwards.
+
     /// The high council has spoken. This space will have a new owner.
-    pub fn set_owner(&mut self, turtl: &Turtl, member_user_id: &String) -> TResult<()> {
+    pub async fn set_owner(turtl: &Turtl, space_id: &String, member_user_id: &String) -> TResult<Value> {
         turtl.assert_connected()?;
-        // make sure SHE exists
-        self.find_member_by_user_id_or_else(member_user_id)?;
-        model_getter!(get_field, "Space.set_owner()");
-        let space_id = get_field!(self, id);
-        let user_id = turtl.user_id()?;
-        self.can_i_or_else(&user_id, &Permission::SetSpaceOwner)?;
-        let url = format!("/spaces/{}/owner/{}", space_id, member_user_id);
-        let space_data: Value = turtl.api.put(url.as_str())?.call()?;
-        self.merge_fields(&space_data)?;
-        Ok(())
+        let url = Space::with_space(turtl, space_id, |space| {
+            // make sure SHE exists
+            space.find_member_by_user_id_or_else(member_user_id)?;
+            let user_id = turtl.user_id()?;
+            space.can_i_or_else(&user_id, &Permission::SetSpaceOwner)?;
+            Ok(format!("/spaces/{}/owner/{}", space_id, member_user_id))
+        })?;
+        let space_data: Value = turtl.api.put(url.as_str())?.call().await?;
+        Space::with_space(turtl, space_id, |space| {
+            space.merge_fields(&space_data)?;
+            space.data()
+        })
     }
 
     /// Edit a space member
-    pub fn edit_member(&mut self, turtl: &Turtl, member: &mut SpaceMember) -> TResult<()> {
+    pub async fn edit_member(turtl: &Turtl, member: &SpaceMember) -> TResult<Value> {
         turtl.assert_connected()?;
-        let user_id = turtl.user_id()?;
-        self.can_i_or_else(&user_id, &Permission::EditSpaceMember)?;
-
-        let mut existing_member = self.find_member_by_user_id_or_else(&member.user_id)?;
-        member.edit(turtl, Some(&mut existing_member))?;
-        Ok(())
+        let space_id = &member.space_id;
+        Space::with_space(turtl, space_id, |space| {
+            let user_id = turtl.user_id()?;
+            space.can_i_or_else(&user_id, &Permission::EditSpaceMember)?;
+            space.find_member_by_user_id_or_else(&member.user_id)?;
+            Ok(())
+        })?;
+        let saved_member = member.edit(turtl).await?;
+        Space::with_space(turtl, space_id, |space| {
+            let existing_member = space.find_member_by_user_id_or_else(&member.user_id)?;
+            *existing_member = saved_member;
+            space.data()
+        })
     }
 
     /// Delete a space member
-    pub fn delete_member(&mut self, turtl: &Turtl, member_user_id: &String) -> TResult<()> {
+    pub async fn delete_member(turtl: &Turtl, space_id: &String, member_user_id: &String) -> TResult<Value> {
         turtl.assert_connected()?;
-        let user_id = turtl.user_id()?;
-        self.can_i_or_else(&user_id, &Permission::DeleteSpaceMember)?;
-
-        {
-            let existing_member = self.find_member_by_user_id_or_else(member_user_id)?;
-            existing_member.delete(turtl)?;
-        }
-        self.members.retain(|x| &x.user_id != member_user_id);
-        Ok(())
+        let member_space_id = Space::with_space(turtl, space_id, |space| {
+            let user_id = turtl.user_id()?;
+            space.can_i_or_else(&user_id, &Permission::DeleteSpaceMember)?;
+            let existing_member = space.find_member_by_user_id_or_else(member_user_id)?;
+            Ok(existing_member.space_id.clone())
+        })?;
+        SpaceMember::delete(turtl, &member_space_id, member_user_id).await?;
+        Space::with_space(turtl, space_id, |space| {
+            space.members.retain(|x| &x.user_id != member_user_id);
+            space.data()
+        })
     }
 
     /// Leave the space (as the current user). Like delete, but without a
     /// permission check.
-    pub fn leave(&mut self, turtl: &Turtl) -> TResult<()> {
+    pub async fn leave(turtl: &Turtl, space_id: &String) -> TResult<Value> {
         turtl.assert_connected()?;
-        model_getter!(get_field, "Space.leave()");
-        let space_id = get_field!(self, id);
         let user_id = turtl.user_id()?;
-        let existing_member = self.find_member_by_user_id_or_else(&user_id)?;
-        existing_member.delete(turtl)?;
-        // do the delete async because space deletion requires a profile lock,
-        // but it's already locked here.
-        messaging::app_event("space:delete", &json!([&space_id, true]))?;
-        Ok(())
+        let (member_space_id, member_user_id) = Space::with_space(turtl, space_id, |space| {
+            let existing_member = space.find_member_by_user_id_or_else(&user_id)?;
+            Ok((existing_member.space_id.clone(), existing_member.user_id.clone()))
+        })?;
+        SpaceMember::delete(turtl, &member_space_id, &member_user_id).await?;
+        // we're out, so the space is as good as gone. (if it already vanished from our profile
+        // while the request was out, there is nothing left to hand back or to delete.)
+        match Space::data_if_present(turtl, space_id)? {
+            Some(data) => {
+                // do the delete as an event: it runs after we have returned our answer
+                messaging::app_event("space:delete", &json!([space_id, true]))?;
+                Ok(data)
+            }
+            None => Ok(Value::Null),
+        }
     }
 
     /// Send an invite for this space to an unsuspecting
-    pub fn send_invite(&mut self, turtl: &Turtl, invite_request: InviteRequest) -> TResult<()> {
+    pub async fn send_invite(turtl: &Turtl, invite_request: InviteRequest) -> TResult<Value> {
         turtl.assert_connected()?;
+        let space_id = invite_request.space_id.clone();
         let (user_id, username) = {
             let user_guard = lockr!(turtl.user);
             let user_id = user_guard.id_or_else()?;
             (user_id, user_guard.username.clone())
         };
-        let space_key = self.key_or_else()?;
-        self.can_i_or_else(&user_id, &Permission::AddSpaceInvite)?;
+        let invite = Space::with_space(turtl, &space_id, |space| {
+            let space_key = space.key_or_else()?;
+            space.can_i_or_else(&user_id, &Permission::AddSpaceInvite)?;
 
-        // if we have an existing member, bail
-        if self.find_member_by_email(&invite_request.to_user).is_some() {
-            return TErr!(TError::BadValue(format!("{} is already a member of this space", invite_request.to_user)));
-        }
-        // if we have an existing invite, bail
-        if self.find_invite_by_email(&invite_request.to_user).is_some() {
-            return TErr!(TError::BadValue(format!("{} is already invited to this space", invite_request.to_user)));
-        }
+            // if we have an existing member, bail
+            if space.find_member_by_email(&invite_request.to_user).is_some() {
+                return TErr!(TError::BadValue(format!("{} is already a member of this space", invite_request.to_user)));
+            }
+            // if we have an existing invite, bail
+            if space.find_invite_by_email(&invite_request.to_user).is_some() {
+                return TErr!(TError::BadValue(format!("{} is already invited to this space", invite_request.to_user)));
+            }
 
-        let invite = Invite::from_invite_request(&user_id, &username, &space_key, invite_request)?;
-        invite.send(turtl)?;
-        self.invites.push(invite);
-        Ok(())
+            Invite::from_invite_request(&user_id, &username, &space_key, invite_request)
+        })?;
+        invite.send(turtl).await?;
+        Space::with_space(turtl, &space_id, |space| {
+            space.invites.push(invite);
+            space.data()
+        })
     }
 
     /// Accept an invite (static)
-    pub fn accept_invite(turtl: &Turtl, invite: &mut Invite, passphrase: Option<String>) -> TResult<Space> {
+    pub async fn accept_invite(turtl: &Turtl, invite: &mut Invite, passphrase: Option<String>) -> TResult<Space> {
         turtl.assert_connected()?;
         model_getter!(get_field, "Space.accept_invite()");
         let invite_id = get_field!(invite, id);
@@ -357,7 +407,7 @@ impl Space {
             None => return TErr!(TError::MissingField(String::from("Invite.message"))),
         };
         let key: Key = jedi::get(&["space_key"], &keyjson)?;
-        let spacedata = invite.accept(turtl)?;
+        let spacedata = invite.accept(turtl).await?;
         // save the key directly. i'm nowadays fairly paranoid of keys being
         // lost during handoff periods like this, so we save the key once
         // here and once again when we save the space we just got into our
@@ -379,39 +429,48 @@ impl Space {
     }
 
     /// Edit a space invite
-    pub fn edit_invite(&mut self, turtl: &Turtl, invite: &mut Invite) -> TResult<()> {
+    pub async fn edit_invite(turtl: &Turtl, invite: &Invite) -> TResult<Value> {
         turtl.assert_connected()?;
         model_getter!(get_field, "Space.edit_invite()");
         let user_id = turtl.user_id()?;
         let invite_id = get_field!(invite, id);
-        self.can_i_or_else(&user_id, &Permission::EditSpaceInvite)?;
-
-        let mut existing_invite = self.find_invite_or_else(&invite_id)?;
-        invite.edit(turtl, Some(&mut existing_invite))?;
-        Ok(())
+        let space_id = &invite.space_id;
+        Space::with_space(turtl, space_id, |space| {
+            space.can_i_or_else(&user_id, &Permission::EditSpaceInvite)?;
+            space.find_invite_or_else(&invite_id)?;
+            Ok(())
+        })?;
+        let saved_invite = invite.edit(turtl).await?;
+        Space::with_space(turtl, space_id, |space| {
+            let existing_invite = space.find_invite_or_else(&invite_id)?;
+            *existing_invite = saved_invite;
+            space.data()
+        })
     }
 
     /// Delete a space invite. This is specifically for a space admin deleting
     /// an invite on the space (in other words, the endpoint for deleting an
     /// invite if you are an inviter, not invitee).
-    pub fn delete_invite(&mut self, turtl: &Turtl, invite_id: &String) -> TResult<()> {
+    pub async fn delete_invite(turtl: &Turtl, space_id: &String, invite_id: &String) -> TResult<Value> {
         turtl.assert_connected()?;
         let username = {
             let user_guard = lockr!(turtl.user);
             user_guard.username.clone()
         };
-        {
-            let user_id = turtl.user_id()?;
-            let perm_check = self.can_i_or_else(&user_id, &Permission::DeleteSpaceInvite);
-            let existing_invite = self.find_invite_or_else(invite_id)?;
+        let user_id = turtl.user_id()?;
+        let invite_space_id = Space::with_space(turtl, space_id, |space| {
+            let perm_check = space.can_i_or_else(&user_id, &Permission::DeleteSpaceInvite);
+            let existing_invite = space.find_invite_or_else(invite_id)?;
             // only check permissions if the invite isn't to the current user
             if existing_invite.to_user != username {
                 perm_check?;
             }
-            existing_invite.delete(turtl)?;
-        }
-        self.invites.retain(|x| x.id() != Some(invite_id));
-        Ok(())
+            Ok(existing_invite.space_id.clone())
+        })?;
+        Invite::delete(turtl, &invite_space_id, invite_id).await?;
+        Space::with_space(turtl, space_id, |space| {
+            space.invites.retain(|x| x.id() != Some(invite_id));
+            space.data()
+        })
     }
 }
-

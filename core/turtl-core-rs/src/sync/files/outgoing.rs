@@ -67,7 +67,7 @@ impl FileSyncOutgoing {
 
     /// Given a sync record for an outgoing file, find the corresponding file
     /// in our storage folder and stream it to our heroic API.
-    fn upload_file(&mut self, sync: &mut SyncRecord) -> TResult<()> {
+    async fn upload_file(&mut self, sync: &mut SyncRecord) -> TResult<()> {
         let note_id = sync.item_id.clone();
         let user_id = {
             let local_config = self.get_config();
@@ -85,10 +85,10 @@ impl FileSyncOutgoing {
             sync_ids: Option<Vec<i64>>,
         }
 
-        // define a container function that grabs our file and runs the upload.
-        // if anything in here fails, we mark 
-        let upload = |note_id| -> TResult<UploadRes> {
-            let file = FileData::file_finder(Some(&user_id), Some(note_id))?;
+        // define a container that grabs our file and runs the upload. if
+        // anything in here fails, we mark the sync record as failed below
+        let upload = async {
+            let file = FileData::file_finder(Some(&user_id), Some(&note_id))?;
             info!("FileSyncOutgoing.upload_file() -- syncing file {:?}", file);
             // read our local file. we should test if it's readable/exists
             // before making API calls. The async client wants an owned body, so the file is read
@@ -100,10 +100,11 @@ impl FileSyncOutgoing {
             self.api.put(&url[..])?
                 .header("Content-Type", "application/octet-stream")
                 .body(data)
-                .call_opt(ApiReq::new().timeout(60))
+                .call_opt::<UploadRes>(ApiReq::new().timeout(60)).await
         };
 
-        match upload(&note_id) {
+        let upload_res: TResult<UploadRes> = upload.await;
+        match upload_res {
             Ok(res) => {
                 match res.sync_ids.as_ref() {
                     Some(ids) => {
@@ -174,10 +175,10 @@ impl Syncer for FileSyncOutgoing {
         self.run_version
     }
 
-    fn run_sync(&mut self) -> TResult<()> {
+    async fn run_sync(&mut self) -> TResult<()> {
         let sync_maybe = self.get_next_outgoing_file_sync()?;
         if let Some(mut sync) = sync_maybe {
-            self.upload_file(&mut sync)?;
+            self.upload_file(&mut sync).await?;
         }
         Ok(())
     }

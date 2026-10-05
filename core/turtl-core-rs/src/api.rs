@@ -2,9 +2,8 @@
 //! our user authentication.
 //!
 //! The client is async and the same on every target: reqwest's hyper-backed client natively and its
-//! `fetch` backend on wasm32 (docs/wasm-port-plan.md decision 2.3). Callers `.await` `call_async()`
-//! / `call_opt_async()`. Code that has not been converted to async yet can use the blocking
-//! `call()` / `call_opt()` bridge, which exists on native only (see `util::exec`).
+//! `fetch` backend on wasm32 (docs/wasm-port-plan.md decision 2.3). Callers `.await` `call()` /
+//! `call_opt()`, and are themselves async all the way up to the task that `util::exec` runs.
 
 use ::std::sync::{RwLock, Mutex};
 use ::std::time::Duration;
@@ -13,8 +12,6 @@ use ::config;
 use ::jedi::{self, Value, DeserializeOwned, Serialize};
 use crate::error::{TResult, TError};
 use crate::crypto;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::util::exec;
 use ::reqwest::{Body, Client, Url};
 use ::reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 pub use ::reqwest::Method;
@@ -69,6 +66,17 @@ impl ApiReq {
     pub fn timeout<'a>(mut self, secs: u64) -> Self {
         self.timeout = Duration::new(secs, 0);
         self
+    }
+}
+
+/// Whether `err` is a request that ran out of time (see `ApiReq::timeout`). Pass it an error that
+/// has been `shed()`: that is how the wrapped reqwest error shows up.
+pub fn is_timeout(err: &TError) -> bool {
+    match err {
+        TError::Boxed(inner) => inner.downcast_ref::<::reqwest::Error>()
+            .map(|e| e.is_timeout())
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -168,12 +176,12 @@ impl ApiCaller {
     }
 
     /// Make the call and parse the (JSON) response.
-    pub async fn call_async<T: DeserializeOwned>(self) -> TResult<T> {
+    pub async fn call<T: DeserializeOwned>(self) -> TResult<T> {
         self.call_impl(None).await
     }
 
     /// Make the call with per-request options (a timeout) and parse the (JSON) response.
-    pub async fn call_opt_async<T: DeserializeOwned>(self, apireq: ApiReq) -> TResult<T> {
+    pub async fn call_opt<T: DeserializeOwned>(self, apireq: ApiReq) -> TResult<T> {
         self.call_impl(Some(apireq)).await
     }
 
@@ -221,33 +229,6 @@ impl ApiCaller {
             warn!("api::call() -- JSON parse error: {}", out);
             toterr!(e)
         })
-    }
-
-    /// Blocking `call_async()`, for code that has not been converted to async yet. Native only.
-    /// Must not be called from inside a future that `util::exec::block_on` is driving (tokio forbids
-    /// nested runtimes): convert the caller to async instead.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn call<T: DeserializeOwned>(self) -> TResult<T> {
-        exec::block_on(self.call_async())
-    }
-
-    /// Blocking `call_opt_async()`; see `call()`.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn call_opt<T: DeserializeOwned>(self, apireq: ApiReq) -> TResult<T> {
-        exec::block_on(self.call_opt_async(apireq))
-    }
-
-    /// Until the callers are converted to async, the blocking bridge has nothing to block on on
-    /// wasm32 (there is no thread to park), so it reports the call as not implemented there.
-    #[cfg(target_arch = "wasm32")]
-    pub fn call<T: DeserializeOwned>(self) -> TResult<T> {
-        TErr!(TError::NotImplemented)
-    }
-
-    /// See `call()`.
-    #[cfg(target_arch = "wasm32")]
-    pub fn call_opt<T: DeserializeOwned>(self, _apireq: ApiReq) -> TResult<T> {
-        TErr!(TError::NotImplemented)
     }
 }
 
@@ -374,6 +355,8 @@ mod tests {
     use super::*;
 
     #[cfg(not(target_arch = "wasm32"))]
+    use crate::util::exec;
+    #[cfg(not(target_arch = "wasm32"))]
     use crate::util::mock_server::{MockServer, Request, Response};
     #[cfg(target_arch = "wasm32")]
     use ::wasm_bindgen::prelude::*;
@@ -424,17 +407,17 @@ mod tests {
         api.set_endpoint(Some(base.clone()));
 
         // a plain GET, JSON in the response
-        let v: Value = api.get("/hello").unwrap().call_async().await.unwrap();
+        let v: Value = api.get("/hello").unwrap().call().await.unwrap();
         assert_eq!(jedi::get::<String>(&["hello"], &v).unwrap(), "world");
         assert_eq!(v["auth"], Value::Null);
 
         // set_auth puts a Basic Authorization header on every request until it is cleared
         api.set_auth(String::from("user"), String::from("pass")).unwrap();
-        let v: Value = api.get("/hello").unwrap().call_async().await.unwrap();
+        let v: Value = api.get("/hello").unwrap().call().await.unwrap();
         assert_eq!(v["auth"], json!("Basic dXNlcjpwYXNz"));
         assert_eq!(api.auth_header(), Some(String::from("Basic dXNlcjpwYXNz")));
         api.clear_auth();
-        let v: Value = api.get("/hello").unwrap().call_async().await.unwrap();
+        let v: Value = api.get("/hello").unwrap().call().await.unwrap();
         assert_eq!(v["auth"], Value::Null);
         assert_eq!(api.auth_header(), None);
 
@@ -442,20 +425,20 @@ mod tests {
         let v: Value = api.post("/echo").unwrap()
             .header("X-Custom", "yes")
             .json(&json!({"a": 1, "b": ["x", "y"]}))
-            .call_async().await.unwrap();
+            .call().await.unwrap();
         assert_eq!(v["method"], json!("POST"));
         assert_eq!(v["content_type"], json!("application/json"));
         assert_eq!(v["custom"], json!("yes"));
         assert_eq!(v["body"], json!({"a": 1, "b": ["x", "y"]}));
 
         // a raw body
-        let v: Value = api.put("/echo").unwrap().body(String::from(r#"{"raw":true}"#)).call_async().await.unwrap();
+        let v: Value = api.put("/echo").unwrap().body(String::from(r#"{"raw":true}"#)).call().await.unwrap();
         assert_eq!(v["method"], json!("PUT"));
         assert_eq!(v["body"], json!({"raw": true}));
 
         // a failing status keeps the status and the (JSON) error body (callers `shed()` the wrapper
         // `TErr!` puts around errors before matching on them)
-        match api.get("/missing").unwrap().call_async::<Value>().await.map_err(|e| e.shed()) {
+        match api.get("/missing").unwrap().call::<Value>().await.map_err(|e| e.shed()) {
             Err(TError::Api(status, val)) => {
                 assert_eq!(status, StatusCode::NOT_FOUND);
                 assert_eq!(val, json!({"error": "nope"}));
@@ -464,7 +447,7 @@ mod tests {
         }
 
         // ...and a body that isn't JSON comes through as a string
-        match api.get("/plain-error").unwrap().call_async::<Value>().await.map_err(|e| e.shed()) {
+        match api.get("/plain-error").unwrap().call::<Value>().await.map_err(|e| e.shed()) {
             Err(TError::Api(status, val)) => {
                 assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
                 assert_eq!(val, json!("server on fire"));
@@ -473,11 +456,11 @@ mod tests {
         }
 
         // a successful status with a body that isn't JSON is an error, not a panic
-        assert!(api.get("/not-json").unwrap().call_async::<Value>().await.is_err());
+        assert!(api.get("/not-json").unwrap().call::<Value>().await.is_err());
 
         // a per-request timeout fires
         let err = api.get("/slow").unwrap()
-            .call_opt_async::<Value>(ApiReq::new().timeout(1)).await
+            .call_opt::<Value>(ApiReq::new().timeout(1)).await
             .unwrap_err()
             .shed();
         match err {
@@ -489,11 +472,11 @@ mod tests {
         }
 
         // an unusable header is reported when the call is made, without sending anything
-        assert!(api.get("/hello").unwrap().header("bad header name", "x").call_async::<Value>().await.is_err());
+        assert!(api.get("/hello").unwrap().header("bad header name", "x").call::<Value>().await.is_err());
 
         // a server that isn't there is an error, not a panic or a hang
         api.set_endpoint(Some(String::from("http://127.0.0.1:1")));
-        assert!(api.get("/hello").unwrap().call_async::<Value>().await.is_err());
+        assert!(api.get("/hello").unwrap().call::<Value>().await.is_err());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -518,14 +501,4 @@ mod tests {
         scenarios(format!("http://127.0.0.1:{}", port)).await;
     }
 
-    #[test]
-    fn blocking_bridge_matches_async() {
-        // sanity for the temporary native bridge: no server needed, a bad endpoint is an error
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let api = Api::new();
-            api.set_endpoint(Some(String::from("http://127.0.0.1:1")));
-            assert!(api.get("/hello").unwrap().call::<Value>().is_err());
-        }
-    }
 }

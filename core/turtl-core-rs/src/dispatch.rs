@@ -11,7 +11,8 @@
 use ::jedi::{self, Value};
 use crate::error::{TResult, TError};
 use ::config;
-use crate::util::{self, logger};
+use crate::util::logger;
+use crate::util::exec;
 use crate::turtl::Turtl;
 use crate::search::Query;
 use crate::profile::{Profile, Export, ImportMode};
@@ -33,21 +34,20 @@ use crate::messaging::{self, Event};
 #[cfg(not(target_arch = "wasm32"))]
 use ::migrate;
 use crate::crypto::{self, Key};
-use ::std::panic;
 
 /// Does our actual message dispatching
-fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
+async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
     match cmd.as_ref() {
         "user:login" => {
             let username: String = jedi::get(&["2"], &data)?;
             let password: String = jedi::get(&["3"], &data)?;
-            turtl.login(username, password)?;
+            turtl.login(username, password).await?;
             let user_guard = lockr!(turtl.user);
             user_guard.data()
         }
         "user:login-from-token" => {
             let token: String = jedi::get(&["2"], &data)?;
-            turtl.login_token(token)?;
+            turtl.login_token(token).await?;
             let user_guard = lockr!(turtl.user);
             user_guard.data()
         }
@@ -55,14 +55,14 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             let user_id: String = jedi::get(&["2"], &data)?;
             let key: Key = jedi::get(&["3"], &data)?;
             let token = User::restore_login(user_id, key)?;
-            turtl.login_token(token)?;
+            turtl.login_token(token).await?;
             let user_guard = lockr!(turtl.user);
             user_guard.data()
         }
         "user:join" => {
             let username: String = jedi::get(&["2"], &data)?;
             let password: String = jedi::get(&["3"], &data)?;
-            turtl.join(username, password)?;
+            turtl.join(username, password).await?;
             let user_guard = lockr!(turtl.user);
             user_guard.data()
         }
@@ -90,7 +90,7 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             let old_password: String = jedi::get(&["3"], &data)?;
             let new_username: String = jedi::get(&["4"], &data)?;
             let new_password: String = jedi::get(&["5"], &data)?;
-            turtl.join_migrate(old_username, old_password, new_username, new_password)?;
+            turtl.join_migrate(old_username, old_password, new_username, new_password).await?;
             let user_guard = lockr!(turtl.user);
             user_guard.data()
         }
@@ -120,7 +120,7 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
                     .unwrap_or_else(|e| error!("dispatch::dispatch() -- error sending ui event: {}", e));
             }
             turtl.logout()?;
-            util::sleep(1000);
+            exec::sleep(1000).await;
             Ok(json!({}))
         }
         "user:change-password" => {
@@ -128,17 +128,17 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             let current_password: String = jedi::get(&["3"], &data)?;
             let new_username: String = jedi::get(&["4"], &data)?;
             let new_password: String = jedi::get(&["5"], &data)?;
-            turtl.change_user_password(current_username, current_password, new_username, new_password)?;
+            turtl.change_user_password(current_username, current_password, new_username, new_password).await?;
             Ok(json!({}))
         }
         "user:delete-account" => {
             messaging::ui_event("user:logout:clear-cookie", &Value::Null)
                 .unwrap_or_else(|e| error!("dispatch::dispatch() -- error sending ui event: {}", e));
-            turtl.delete_account()?;
+            turtl.delete_account().await?;
             Ok(json!({}))
         }
         "user:resend-confirmation" => {
-            User::resend_confirmation(turtl)?;
+            User::resend_confirmation(turtl).await?;
             Ok(json!({}))
         }
         "user:get-login-token" => {
@@ -155,7 +155,7 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
         }
         "user:find-by-email" => {
             let email: String = jedi::get(&["2"], &data)?;
-            let user = User::find_by_email(turtl, &email)?;
+            let user = User::find_by_email(turtl, &email).await?;
             Ok(jedi::to_val(&user)?)
         }
         "app:connected" => {
@@ -167,13 +167,13 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
         "app:wipe-user-data" => {
             messaging::ui_event("user:logout:clear-cookie", &Value::Null)
                 .unwrap_or_else(|e| error!("dispatch::dispatch() -- error sending ui event: {}", e));
-            turtl.wipe_user_data()?;
+            turtl.wipe_user_data().await?;
             Ok(json!({}))
         }
         "app:wipe-app-data" => {
             messaging::ui_event("user:logout:clear-cookie", &Value::Null)
                 .unwrap_or_else(|e| error!("dispatch::dispatch() -- error sending ui event: {}", e));
-            turtl.wipe_app_data()?;
+            turtl.wipe_app_data().await?;
             Ok(json!({}))
         }
         "app:api:set-config" => {
@@ -196,12 +196,12 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             Ok(Value::String(contents))
         }
         "app:shutdown" => {
-            turtl.sync_shutdown(false)?;
+            turtl.sync_shutdown(false).await?;
             messaging::stop();
             Ok(json!({}))
         }
         "sync:start" => {
-            turtl.sync_start()?;
+            turtl.sync_start().await?;
             Ok(json!({}))
         }
         "sync:pause" => {
@@ -217,7 +217,7 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
         }
         "sync:shutdown" => {
             let wait: bool = jedi::get_opt(&["2"], &data).unwrap_or(true);
-            turtl.sync_shutdown(wait)?;
+            turtl.sync_shutdown(wait).await?;
             Ok(json!({}))
         }
         "sync:get-pending" => {
@@ -260,87 +260,45 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             sync_model::dispatch(turtl, sync_record)
         }
         "profile:space:set-owner" => {
-            let space_id = jedi::get(&["2"], &data)?;
-            let user_id = jedi::get(&["3"], &data)?;
-            let mut profile_guard = lockw!(turtl.profile);
-            let space = match Profile::finder(&mut profile_guard.spaces, &space_id) {
-                Some(s) => s,
-                None => return TErr!(TError::MissingData(format!("couldn't find space {}", space_id))),
-            };
-            space.set_owner(turtl, &user_id)?;
-            Ok(space.data()?)
+            let space_id: String = jedi::get(&["2"], &data)?;
+            let user_id: String = jedi::get(&["3"], &data)?;
+            Space::set_owner(turtl, &space_id, &user_id).await
         }
         "profile:space:edit-member" => {
-            let mut member: SpaceMember = jedi::get(&["2"], &data)?;
-            let mut profile_guard = lockw!(turtl.profile);
-            let space = match Profile::finder(&mut profile_guard.spaces, &member.space_id) {
-                Some(s) => s,
-                None => return TErr!(TError::MissingData(format!("couldn't find space {}", member.space_id))),
-            };
-            space.edit_member(turtl, &mut member)?;
-            Ok(space.data()?)
+            let member: SpaceMember = jedi::get(&["2"], &data)?;
+            Space::edit_member(turtl, &member).await
         }
         "profile:space:delete-member" => {
             let space_id: String = jedi::get(&["2"], &data)?;
             let user_id: String = jedi::get(&["3"], &data)?;
-            let mut profile_guard = lockw!(turtl.profile);
-            let space = match Profile::finder(&mut profile_guard.spaces, &space_id) {
-                Some(s) => s,
-                None => return TErr!(TError::MissingData(format!("couldn't find space {}", space_id))),
-            };
-            space.delete_member(turtl, &user_id)?;
-            Ok(space.data()?)
+            Space::delete_member(turtl, &space_id, &user_id).await
         }
         "profile:space:leave" => {
             let space_id: String = jedi::get(&["2"], &data)?;
-            let mut profile_guard = lockw!(turtl.profile);
-            let space = match Profile::finder(&mut profile_guard.spaces, &space_id) {
-                Some(s) => s,
-                None => return TErr!(TError::MissingData(format!("couldn't find space {}", space_id))),
-            };
-            space.leave(turtl)?;
-            Ok(space.data()?)
+            Space::leave(turtl, &space_id).await
         }
         "profile:space:send-invite" => {
             let req: InviteRequest = jedi::get(&["2"], &data)?;
-            let mut profile_guard = lockw!(turtl.profile);
-            let space = match Profile::finder(&mut profile_guard.spaces, &req.space_id) {
-                Some(s) => s,
-                None => return TErr!(TError::MissingData(format!("couldn't find space {}", req.space_id))),
-            };
-            space.send_invite(turtl, req)?;
-            Ok(space.data()?)
+            Space::send_invite(turtl, req).await
         }
         "profile:space:edit-invite" => {
-            let mut invite: Invite = jedi::get(&["2"], &data)?;
-            let mut profile_guard = lockw!(turtl.profile);
-            let space = match Profile::finder(&mut profile_guard.spaces, &invite.space_id) {
-                Some(s) => s,
-                None => return TErr!(TError::MissingData(format!("couldn't find space {}", invite.space_id))),
-            };
-            space.edit_invite(turtl, &mut invite)?;
-            Ok(space.data()?)
+            let invite: Invite = jedi::get(&["2"], &data)?;
+            Space::edit_invite(turtl, &invite).await
         }
         "profile:space:delete-invite" => {
             let space_id: String = jedi::get(&["2"], &data)?;
             let invite_id: String = jedi::get(&["3"], &data)?;
-            let mut profile_guard = lockw!(turtl.profile);
-            let space = match Profile::finder(&mut profile_guard.spaces, &space_id) {
-                Some(s) => s,
-                None => return TErr!(TError::MissingData(format!("couldn't find space {}", space_id))),
-            };
-            space.delete_invite(turtl, &invite_id)?;
-            Ok(space.data()?)
+            Space::delete_invite(turtl, &space_id, &invite_id).await
         }
         "profile:accept-invite" => {
             let mut invite: Invite = jedi::get(&["2"], &data)?;
             let passphrase: Option<String> = jedi::get_opt(&["3"], &data);
-            let space = Space::accept_invite(turtl, &mut invite, passphrase)?;
+            let space = Space::accept_invite(turtl, &mut invite, passphrase).await?;
             Ok(space.data()?)
         }
         "profile:delete-invite" => {
             let invite_id: String = jedi::get(&["2"], &data)?;
-            Invite::delete_user_invite(turtl, &invite_id)?;
+            Invite::delete_user_invite(turtl, &invite_id).await?;
             Ok(json!({}))
         }
         "profile:get-notes" => {
@@ -405,7 +363,7 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
         }
         "feedback:send" => {
             let feedback: Feedback = jedi::get(&["2"], &data)?;
-            feedback.send(turtl)?;
+            feedback.send(turtl).await?;
             Ok(json!({}))
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -437,7 +395,7 @@ fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
 
 /// Event dispatching. This acts as a way for parts of the app that don't have
 /// access to the Turtl object to trigger events.
-fn dispatch_event(cmd: &String, turtl: &Turtl, data: Value) -> TResult<()> {
+async fn dispatch_event(cmd: &String, turtl: &Turtl, data: Value) -> TResult<()> {
     info!("dispatch::dispatch_event() -- {}", cmd);
     match cmd.as_ref() {
         "sync:connected" => {
@@ -452,7 +410,7 @@ fn dispatch_event(cmd: &String, turtl: &Turtl, data: Value) -> TResult<()> {
             }
         }
         "sync:incoming" => {
-            sync::incoming::process_incoming_sync(turtl)?;
+            sync::incoming::process_incoming_sync(turtl).await?;
         }
         "user:edit" => {
             let mut user_guard = lockw!(turtl.user);
@@ -460,8 +418,11 @@ fn dispatch_event(cmd: &String, turtl: &Turtl, data: Value) -> TResult<()> {
         }
         "user:change-password:logout" => {
             messaging::ui_event("user:change-password:logout", &json!({}))?;
-            util::sleep(3000);
+            exec::sleep(3000).await;
             turtl.logout()?;
+        }
+        "user:wipe-data" => {
+            turtl.wipe_user_data().await?;
         }
         "space:delete" => {
             let space_id: String = jedi::get(&["0"], &data)?;
@@ -480,11 +441,11 @@ fn dispatch_event(cmd: &String, turtl: &Turtl, data: Value) -> TResult<()> {
 
 /// process a message from the messaging system. this is the main communication
 /// heart of turtl core.
-pub fn process(turtl: &Turtl, msg: &String) -> TResult<()> {
+pub async fn process(turtl: &Turtl, msg: &String) -> TResult<()> {
     if &msg[0..4] == "::ev" {
         let event: Event = jedi::parse(&String::from(&msg[4..]))?;
         let Event {e, d} = event;
-        return dispatch_event(&e, turtl, d);
+        return dispatch_event(&e, turtl, d).await;
     }
 
     let data: Value = jedi::parse(msg)?;
@@ -502,8 +463,8 @@ pub fn process(turtl: &Turtl, msg: &String) -> TResult<()> {
 
     info!("dispatch({}): {}", mid, cmd);
 
-    let res = panic::catch_unwind(|| {
-        match dispatch(&cmd, turtl.clone(), data) {
+    let res = exec::catch_panic(async {
+        match dispatch(&cmd, turtl, data).await {
             Ok(val) => {
                 match turtl.msg_success(&mid, val) {
                     Err(e) => error!("dispatch::process() -- problem sending response (mid {}): {}", mid, e),
@@ -517,11 +478,11 @@ pub fn process(turtl: &Turtl, msg: &String) -> TResult<()> {
                 }
             },
         }
-    });
+    }).await;
     match res {
         Ok(..) => {}
         Err(e) => {
-            let err = e.downcast::<String>().unwrap_or(Box::new(String::from("no information available")));
+            let err = exec::panic_message(&*e);
             error!("dispatch::process() -- panic: {}", err);
             match turtl.msg_error(&mid, &TError::Panic(format!("dispatch panic: {}", err))) {
                 Err(e) => error!("dispatch:process() -- problem sending (panic) response (mod {}): {}", mid, e),

@@ -115,7 +115,7 @@ impl Syncer for SyncOutgoing {
         self.run_version
     }
 
-    fn run_sync(&mut self) -> TResult<()> {
+    async fn run_sync(&mut self) -> TResult<()> {
         // get all our sync records queued to be sent out
         let syncs = self.get_outgoing_syncs()?;
         if syncs.len() == 0 { return Ok(()); }
@@ -125,7 +125,7 @@ impl Syncer for SyncOutgoing {
         info!("SyncOutgoing.run_sync() -- sending {} sync items", syncs.len());
         let sync_result: SyncResponse = self.api.post("/sync")?
             .json(&syncs)
-            .call_opt(ApiReq::new().timeout(120))?;
+            .call_opt(ApiReq::new().timeout(120)).await?;
         info!("SyncOutgoing.run_sync() -- got {} successes, {} failed, {} blocked syncs", sync_result.success.len(), sync_result.failures.len(), sync_result.blocked.len());
 
         // clear out the successful syncs

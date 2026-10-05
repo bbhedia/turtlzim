@@ -30,6 +30,10 @@ dumpy = { path = "dumpy" }
 encoding_rs = "0.8.6"
 fern = "0.5.5"
 futures = "0.1.14"
+# futures 0.3, for the async code (std's `Future`): a oneshot channel for task completion and
+# `catch_unwind` on futures (src/util/exec.rs). Both are already in the build via reqwest/hyper.
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 glob = "0.2.11"
 hex = "0.3.2"
 jedi = { path = "jedi" }
@@ -69,9 +73,8 @@ num_cpus = "1.8.0"
 futures-cpupool = "0.1.5"
 regex = "0.1.77"
 # reqwest 0.13: async HTTP (docs/wasm-port-plan.md decision 2.3). Same API on both targets; this is
-# the hyper-backed client with the OS TLS library. `blocking` stays only until sync/files/* are
-# converted to async (Step 4b-2c), then it goes away.
-reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "blocking"] }
+# the hyper-backed client with the OS TLS library.
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls"] }
 sodiumoxide = "0.0.16"
 # The runtime reqwest's I/O needs, shared by every thread that drives an async fn (util/exec.rs).
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }

@@ -5,7 +5,7 @@ use crate::error::{TResult, TError};
 use crate::sync::{SyncConfig, Syncer};
 use crate::sync::sync_model::{SyncModel, MemorySaver};
 use crate::storage::Storage;
-use crate::api::{Api, ApiReq};
+use crate::api::{self, Api, ApiReq};
 use crate::messaging;
 use crate::models;
 use crate::models::protected::{Protected, Keyfinder};
@@ -22,6 +22,7 @@ use crate::turtl::Turtl;
 use ::std::mem;
 use ::config;
 use crate::util;
+use crate::util::exec;
 
 const SYNC_IGNORE_KEY: &'static str = "sync:incoming:ignore";
 
@@ -174,7 +175,7 @@ impl SyncIncoming {
 
     /// Grab the latest changes from the API (anything after the given sync ID).
     /// Also, if `poll` is true, we long-poll.
-    fn sync_from_api(&mut self, sync_id: &String, reason: SyncReason) -> TResult<()> {
+    async fn sync_from_api(&mut self, sync_id: &String, reason: SyncReason) -> TResult<()> {
         let reason_s = util::enum_to_string(&reason)?;
         let url = format!("/sync?sync_id={}&type={}", sync_id, reason_s);
         let timeout = match &reason {
@@ -184,7 +185,7 @@ impl SyncIncoming {
             _ => 10
         };
         let reqopt = ApiReq::new().timeout(timeout);
-        let syncres: TResult<SyncResponse> = self.api.get(url.as_str())?.call_opt(reqopt);
+        let syncres: TResult<SyncResponse> = self.api.get(url.as_str())?.call_opt(reqopt).await;
 
         // ^ this call can take a while. if sync got disabled while it was
         // taking its sweet time, then bail on the result.
@@ -196,6 +197,8 @@ impl SyncIncoming {
             Ok(x) => x,
             Err(e) => {
                 let e = e.shed();
+                // a poll that times out is just a poll that had nothing for us
+                if api::is_timeout(&e) { return Ok(()); }
                 match e {
                     TError::Io(io) => {
                         match io.kind() {
@@ -227,8 +230,8 @@ impl SyncIncoming {
     /// Load the user's entire profile. The API gives us back a set of sync
     /// objects, which is super handy because we can just treat them like any
     /// other sync
-    fn load_full_profile(&mut self) -> TResult<()> {
-        let syncdata = self.api.get("/sync/full")?.call_opt(ApiReq::new().timeout(120))?;
+    async fn load_full_profile(&mut self) -> TResult<()> {
+        let syncdata = self.api.get("/sync/full")?.call_opt(ApiReq::new().timeout(120)).await?;
         self.set_connected(true);
         self.update_local_db_from_api_sync(syncdata, true)
     }
@@ -364,7 +367,7 @@ impl Syncer for SyncIncoming {
         self.run_version
     }
 
-    fn init(&mut self) -> TResult<()> {
+    async fn init(&mut self) -> TResult<()> {
         let sync_id = with_db!{ db, self.db, db.kv_get("sync_id") }?;
         let skip_init = {
             let config_guard = lockr!(self.config);
@@ -373,9 +376,9 @@ impl Syncer for SyncIncoming {
         let res = if !skip_init {
             match sync_id {
                 // we have a sync id! grab the latest changes from the API
-                Some(ref x) => self.sync_from_api(x, SyncReason::Initial),
+                Some(ref x) => self.sync_from_api(x, SyncReason::Initial).await,
                 // no sync id ='[ ='[ ='[ ...instead grab the full profile
-                None => self.load_full_profile(),
+                None => self.load_full_profile().await,
             }
         } else {
             Ok(())
@@ -383,7 +386,7 @@ impl Syncer for SyncIncoming {
         res
     }
 
-    fn run_sync(&mut self) -> TResult<()> {
+    async fn run_sync(&mut self) -> TResult<()> {
         let sync_id = with_db!{ db, self.db, db.kv_get("sync_id") }?;
         // note that when syncing changes from the server, we only poll if we
         // are currently connected. this way, if we DO get a connection back
@@ -391,7 +394,7 @@ impl Syncer for SyncIncoming {
         // immediately instead of waiting 60s or w/e until the sync goes through
         let reason = if self.connected { SyncReason::Poll } else { SyncReason::Reconnect };
         let res = match sync_id {
-            Some(ref x) => self.sync_from_api(x, reason),
+            Some(ref x) => self.sync_from_api(x, reason).await,
             None => return TErr!(TError::MissingData(String::from("no sync_id present"))),
         };
         res
@@ -405,13 +408,23 @@ impl Syncer for SyncIncoming {
 ///
 /// Essentially, this is what's responsible for running MemorySaver for our
 /// incoming syncs.
-pub fn process_incoming_sync(turtl: &Turtl) -> TResult<()> {
+///
+/// Items are applied one at a time (under `Turtl.incoming_sync_lock`) and never
+/// while `Turtl::sync_start()` is holding incoming syncs back: we wait for it
+/// to be done. (The lock is only ever held while an item is applied, never
+/// while waiting.)
+pub async fn process_incoming_sync(turtl: &Turtl) -> TResult<()> {
     let sync_incoming_queue = {
         let sync_config_guard = lockr!(turtl.sync_config);
         sync_config_guard.incoming_sync.clone()
     };
     loop {
-        let sync_incoming_lock = turtl.incoming_sync_lock.lock();
+        let sync_incoming_lock = loop {
+            let sync_incoming_lock = lock!(turtl.incoming_sync_lock);
+            if !turtl.incoming_sync_held() { break sync_incoming_lock; }
+            drop(sync_incoming_lock);
+            exec::sleep(50).await;
+        };
         let sync_item = match sync_incoming_queue.try_pop() {
             Some(x) => x,
             None => break,

@@ -141,6 +141,7 @@ fn handle<F: Fn(&Request) -> Response>(stream: TcpStream, route: &F) -> ::std::i
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        401 => "Unauthorized",
         404 => "Not Found",
         500 => "Internal Server Error",
         _ => "Status",

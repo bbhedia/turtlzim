@@ -3,6 +3,7 @@
 //! around to various pieces of the app running in the main thread.
 
 use ::std::sync::{Arc, RwLock, Mutex};
+use ::std::sync::atomic::{AtomicBool, Ordering};
 use ::std::ops::Drop;
 use ::std::fs;
 #[cfg(not(target_arch = "wasm32"))]
@@ -14,6 +15,7 @@ use ::config;
 use crate::error::{TResult, TError};
 use crate::crypto::Key;
 use crate::util;
+use crate::util::exec::{self, TaskHandle};
 use crate::util::thredder::Thredder;
 use crate::storage::{self, Storage};
 use crate::api::Api;
@@ -105,10 +107,15 @@ pub struct Turtl {
     pub sync_config: Arc<RwLock<SyncConfig>>,
     /// Holds our sync state data
     sync_state: Arc<RwLock<Option<SyncState>>>,
-    /// A lock that keeps our incoming sync from running when we don't want it
-    /// to (like while sync is initting and wehaven't loaded our profile yet).
-    /// Used alongside Turtl.sync_config.incoming_sync.
+    /// Held by whoever is applying an incoming sync item to our in-memory state,
+    /// so the items get applied one at a time, in order. Used alongside
+    /// Turtl.sync_config.incoming_sync.
     pub incoming_sync_lock: Mutex<()>,
+    /// Set while incoming syncs must not be applied (like while sync is initting
+    /// and we haven't loaded our profile yet). This is a flag and not the lock
+    /// above because the thing that wants incoming syncs held off, sync_start(),
+    /// is async and must not keep a lock across an await.
+    incoming_sync_held: AtomicBool,
     /// Whether or not we're connected to the API
     pub connected: RwLock<bool>,
 }
@@ -144,6 +151,7 @@ impl Turtl {
             sync_state: Arc::new(RwLock::new(None)),
             connected: RwLock::new(false),
             incoming_sync_lock: Mutex::new(()),
+            incoming_sync_held: AtomicBool::new(false),
         };
         Ok(turtl)
     }
@@ -250,20 +258,20 @@ impl Turtl {
     }
 
     /// Log a user in
-    pub fn login(&self, username: String, password: String) -> TResult<()> {
-        User::login(self, username, password, user::CURRENT_AUTH_VERSION)?;
+    pub async fn login(&self, username: String, password: String) -> TResult<()> {
+        User::login(self, username, password, user::CURRENT_AUTH_VERSION).await?;
         self.post_login()
     }
 
     /// Log a user in using a login token
-    pub fn login_token(&self, token: String) -> TResult<()> {
-        User::login_token(self, token)?;
+    pub async fn login_token(&self, token: String) -> TResult<()> {
+        User::login_token(self, token).await?;
         self.post_login()
     }
 
     /// DO Create a new user account
-    fn do_join(&self, username: String, password: String, migrate_data: Option<MigrateResult>) -> TResult<()> {
-        User::join(self, username, password)?;
+    async fn do_join(&self, username: String, password: String, migrate_data: Option<MigrateResult>) -> TResult<()> {
+        User::join(self, username, password).await?;
         self.set_user_id();
         let db = self.create_user_db()?;
         let mut db_guard = lock!(self.db);
@@ -275,13 +283,13 @@ impl Turtl {
     }
 
     /// Create a new user account
-    pub fn join(&self, username: String, password: String) -> TResult<()> {
-        self.do_join(username, password, None)
+    pub async fn join(&self, username: String, password: String) -> TResult<()> {
+        self.do_join(username, password, None).await
     }
 
     /// Create a new user account by migrating from a v0.6 server.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn join_migrate(&self, old_username: String, old_password: String, new_username: String, new_password: String) -> TResult<()> {
+    pub async fn join_migrate(&self, old_username: String, old_password: String, new_username: String, new_password: String) -> TResult<()> {
         let login = migrate::check_login(&old_username, &old_password)?;
         if login.is_none() {
             return TErr!(TError::PermissionDenied(String::from("login on old server failed")));
@@ -294,12 +302,12 @@ impl Turtl {
                 }
             }
         })?;
-        self.do_join(new_username, new_password, Some(migrate_data))
+        self.do_join(new_username, new_password, Some(migrate_data)).await
     }
     /// Create a new user account by migrating from a v0.6 server.
     // TODO(wasm): the `migrate` crate isn't ported to wasm32, see docs/wasm-port-plan.md.
     #[cfg(target_arch = "wasm32")]
-    pub fn join_migrate(&self, _old_username: String, _old_password: String, _new_username: String, _new_password: String) -> TResult<()> {
+    pub async fn join_migrate(&self, _old_username: String, _old_password: String, _new_username: String, _new_password: String) -> TResult<()> {
         TErr!(TError::NotImplemented)
     }
 
@@ -310,7 +318,7 @@ impl Turtl {
             profile_guard.wipe();
             *profile_guard = Profile::new();
         }
-        self.sync_shutdown(false)?;
+        self.sync_stop();
         self.close_user_db()?;
         self.close_search();
         self.clear_user_id();
@@ -328,23 +336,20 @@ impl Turtl {
     }
 
     /// Change the current user's username/password
-    pub fn change_user_password(&self, current_username: String, current_password: String, new_username: String, new_password: String) -> TResult<()> {
+    pub async fn change_user_password(&self, current_username: String, current_password: String, new_username: String, new_password: String) -> TResult<()> {
         self.assert_connected()?;
-        {
-            let mut user_guard = lockw!(self.user);
-            user_guard.change_password(self, current_username, current_password, new_username, new_password)?;
-        }
+        User::change_password(self, current_username, current_password, new_username, new_password).await?;
         // all the local data is WRONG. clear it out, after shutting down sync.
-        self.sync_shutdown(true)?;
-        self.wipe_user_data()?;
+        self.sync_shutdown(true).await?;
+        self.wipe_user_data().await?;
         Ok(())
     }
 
     /// Delete the current user's account (if they are logged in derr)
-    pub fn delete_account(&self) -> TResult<()> {
+    pub async fn delete_account(&self) -> TResult<()> {
         self.assert_connected()?;
-        User::delete_account(self)?;
-        self.wipe_user_data()?;
+        User::delete_account(self).await?;
+        self.wipe_user_data().await?;
         Ok(())
     }
 
@@ -358,7 +363,7 @@ impl Turtl {
     }
 
     /// Poll `turtl.db` until either it exists or a few seconds have passed.
-    fn check_db_exists(&self) -> TResult<()> {
+    async fn check_db_exists(&self) -> TResult<()> {
         let exists = {
             let db_guard = lock!(self.db);
             db_guard.is_some()
@@ -371,7 +376,7 @@ impl Turtl {
                 };
                 if exists { break; }
                 info!("turtl.check_db_exists() -- waiting on `turtl.db`...");
-                util::sleep(1000);
+                exec::sleep(1000).await;
             }
         }
         let exists = {
@@ -386,11 +391,11 @@ impl Turtl {
 
     /// Start our sync system. This should happen after a user is logged in, and
     /// we definitely have a Turtl.db object available.
-    pub fn sync_start(&self) -> TResult<()> {
+    pub async fn sync_start(&self) -> TResult<()> {
         // it's possible that login/join return before the db is initialized. in
         // that case, we wait for it here, up to 5s. if after then we don't have
         // our heroic db, error out ='[
-        self.check_db_exists()?;
+        self.check_db_exists().await?;
 
         // increment our run version to catch rogue sync threads
         {
@@ -400,9 +405,9 @@ impl Turtl {
 
         // lock down incoming syncs so we have a chance to load our profile
         // before dealing with a bunch of sync records
-        let sync_lock = self.incoming_sync_lock.lock();
+        let sync_hold = self.hold_incoming_sync();
         // start the sync, and save the resulting state into Turtl
-        let sync_state = sync::start(self.sync_config.clone(), self.api.clone(), self.db.clone())?;
+        let sync_state = sync::start(self.sync_config.clone(), self.api.clone(), self.db.clone()).await?;
         {
             let mut state_guard = lockw!(self.sync_state);
             *state_guard = Some(sync_state);
@@ -424,38 +429,56 @@ impl Turtl {
             }
         }
         // let your freak flag fly, incoming syncs
-        drop(sync_lock);
+        drop(sync_hold);
 
         Ok(())
     }
 
-    /// Shut down the sync system
-    pub fn sync_shutdown(&self, join: bool) -> TResult<()> {
+    /// Hold incoming syncs back until the returned guard is dropped. An incoming
+    /// sync that is being applied right now is waited out; the ones after it
+    /// wait (see `sync::incoming::process_incoming_sync()`).
+    pub(crate) fn hold_incoming_sync(&self) -> IncomingSyncHold<'_> {
+        self.incoming_sync_held.store(true, Ordering::SeqCst);
+        drop(lock!(self.incoming_sync_lock));
+        IncomingSyncHold { turtl: self }
+    }
+
+    /// Whether incoming syncs are being held back (see `hold_incoming_sync()`).
+    pub fn incoming_sync_held(&self) -> bool {
+        self.incoming_sync_held.load(Ordering::SeqCst)
+    }
+
+    /// Tell the sync system to quit. This only signals it: the tasks it runs are
+    /// handed back (if there was a running sync system at all) for whoever wants
+    /// to wait for them to wind down.
+    fn sync_stop(&self) -> Option<Vec<TaskHandle>> {
         let mut guard = lockw!(self.sync_state);
-        info!("turtl.sync_shutdown() -- has state? {}", guard.is_some());
-        if guard.is_none() { return Ok(()); }
-        {
-            let state = guard.as_mut().expect("turtl::Turtl.sync_shutdown() -- sync_state is None");
-            (state.shutdown)();
-            if join {
-                info!("turtl.sync_shutdown() -- waiting on {} handles", state.join_handles.len());
-                loop {
-                    let hn = state.join_handles.pop();
-                    match hn {
-                        Some(x) => match x.join() {
-                            Ok(_) => (),
-                            Err(e) => error!("turtl::sync_shutdown() -- problem joining thread: {:?}", e),
-                        },
-                        None => break,
-                    }
-                }
-            }
-        }
-        *guard = None;
+        info!("turtl.sync_stop() -- has state? {}", guard.is_some());
+        let state = guard.take()?;
+        (state.shutdown)();
+        drop(guard);
 
         // set connected to false on sync shutdown
         let mut connguard = lockw!(self.connected);
         *connguard = false;
+        Some(state.join_handles)
+    }
+
+    /// Shut down the sync system, and (if `join`) wait for its tasks to finish.
+    pub async fn sync_shutdown(&self, join: bool) -> TResult<()> {
+        let handles = match self.sync_stop() {
+            Some(handles) => handles,
+            None => return Ok(()),
+        };
+        if join {
+            info!("turtl.sync_shutdown() -- waiting on {} handles", handles.len());
+            for handle in handles {
+                match handle.join().await {
+                    Ok(_) => (),
+                    Err(e) => error!("turtl::sync_shutdown() -- problem joining task: {}", e),
+                }
+            }
+        }
         Ok(())
     }
 
@@ -795,9 +818,9 @@ impl Turtl {
 
     /// Log out the current user (if logged in) and wipe ALL local SQL databases
     /// from our data folder.
-    pub fn wipe_app_data(&self) -> TResult<()> {
-        self.sync_shutdown(false)?;
-        util::sleep(5000);
+    pub async fn wipe_app_data(&self) -> TResult<()> {
+        self.sync_stop();
+        exec::sleep(5000).await;
         self.logout()?;
 
         let mut kv_guard = lockw!(self.kv);
@@ -833,10 +856,10 @@ impl Turtl {
     }
 
     /// Wipe any local database(s) for the current user (and log them out)
-    pub fn wipe_user_data(&self) -> TResult<()> {
+    pub async fn wipe_user_data(&self) -> TResult<()> {
         let user_id = self.user_id()?;
-        self.sync_shutdown(false)?;
-        util::sleep(5000);
+        self.sync_stop();
+        exec::sleep(5000).await;
         self.logout()?;
 
         let db_loc = self.get_user_db_location(&user_id)?;
@@ -856,9 +879,20 @@ impl Turtl {
 
     /// Shut down this Turtl instance and all the state/threads it manages
     pub fn shutdown(&mut self) -> TResult<()> {
-        self.sync_shutdown(false)?;
+        self.sync_stop();
         self.logout()?;
         Ok(())
+    }
+}
+
+/// Holds incoming syncs back while it exists (see `Turtl::hold_incoming_sync()`).
+pub(crate) struct IncomingSyncHold<'a> {
+    turtl: &'a Turtl,
+}
+
+impl<'a> Drop for IncomingSyncHold<'a> {
+    fn drop(&mut self) {
+        self.turtl.incoming_sync_held.store(false, Ordering::SeqCst);
     }
 }
 

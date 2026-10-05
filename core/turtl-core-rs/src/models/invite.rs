@@ -166,60 +166,56 @@ impl Invite {
     }
 
     /// Ship it!
-    pub fn send(&self, turtl: &Turtl) -> TResult<()> {
+    pub async fn send(&self, turtl: &Turtl) -> TResult<()> {
         let url = format!("/spaces/{}/invites", self.space_id);
         let data = self.data_for_storage()?;
-        let invite: Value = turtl.api.post(url.as_str())?.json(&data).call()?;
+        let invite: Value = turtl.api.post(url.as_str())?.json(&data).call().await?;
         incoming::ignore_syncs_maybe(turtl, &invite, "Invite.send()");
         Ok(())
     }
 
     /// Accept this invite
-    pub fn accept(&self, turtl: &Turtl) -> TResult<Value> {
+    pub async fn accept(&self, turtl: &Turtl) -> TResult<Value> {
         model_getter!(get_field, "Invite.accept()");
         let invite_id = get_field!(self, id);
         let url = format!("/spaces/{}/invites/accepted/{}", self.space_id, invite_id);
-        let spacedata: Value = turtl.api.post(url.as_str())?.call()?;
+        let spacedata: Value = turtl.api.post(url.as_str())?.call().await?;
         incoming::ignore_syncs_maybe(turtl, &spacedata, "Invite.accept()");
         Ok(spacedata)
     }
 
-    /// Edit this invite
-    pub fn edit(&mut self, turtl: &Turtl, existing_invite: Option<&mut Invite>) -> TResult<()> {
+    /// Save this invite to the API. Returns the invite as the API saved it; applying that to
+    /// whatever copy the caller keeps is the caller's job (so that nothing needs to stay locked
+    /// while the request is out).
+    pub async fn edit(&self, turtl: &Turtl) -> TResult<Invite> {
         let invite_data = self.data_for_storage()?;
         model_getter!(get_field, "Invite.edit()");
         let invite_id = get_field!(self, id);
         let url = format!("/spaces/{}/invites/{}", self.space_id, invite_id);
-        let saved_data: Value = turtl.api.put(url.as_str())?.json(&invite_data).call()?;
+        let saved_data: Value = turtl.api.put(url.as_str())?.json(&invite_data).call().await?;
         incoming::ignore_syncs_maybe(turtl, &saved_data, "Invite.edit()");
-        match existing_invite {
-            Some(x) => { *x = jedi::from_val(saved_data)?; }
-            None => {}
-        }
-        Ok(())
+        Ok(jedi::from_val(saved_data)?)
     }
 
-    /// Delete an invite
-    pub fn delete(&self, turtl: &Turtl) -> TResult<()> {
-        model_getter!(get_field, "Invite.delete()");
-        let invite_id = get_field!(self, id);
-        let url = format!("/spaces/{}/invites/{}", self.space_id, invite_id);
-        let ret: Value = turtl.api.delete(url.as_str())?.call()?;
+    /// Delete an invite (on the API)
+    pub async fn delete(turtl: &Turtl, space_id: &String, invite_id: &String) -> TResult<()> {
+        let url = format!("/spaces/{}/invites/{}", space_id, invite_id);
+        let ret: Value = turtl.api.delete(url.as_str())?.call().await?;
         incoming::ignore_syncs_maybe(turtl, &ret, "Invite.delete()");
         Ok(())
     }
 
     /// Delete an invite. This is specifically for a space invitee to delete an
     /// invite that was sent to them.
-    pub fn delete_user_invite(turtl: &Turtl, invite_id: &String) -> TResult<()> {
-        {
+    pub async fn delete_user_invite(turtl: &Turtl, invite_id: &String) -> TResult<()> {
+        let space_id = {
             let mut profile_guard = lockw!(turtl.profile);
-            let invite = match Profile::finder(&mut profile_guard.invites, invite_id) {
-                Some(i) => i,
+            match Profile::finder(&mut profile_guard.invites, invite_id) {
+                Some(invite) => invite.space_id.clone(),
                 None => return TErr!(TError::MissingData(format!("invite doesn't exist: {}", invite_id))),
-            };
-            invite.delete(turtl)?;
-        }
+            }
+        };
+        Invite::delete(turtl, &space_id, invite_id).await?;
         sync_model::delete_model::<Invite>(turtl, invite_id, true)?;
         Ok(())
     }

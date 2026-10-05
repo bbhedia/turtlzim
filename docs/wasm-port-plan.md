@@ -551,8 +551,8 @@ Networking and concurrency are unified on async/await across both native and web
       which does ship a snippet, still needs the bare-map workaround. (e) Every native `cargo test` of `turtl_core` rewrites the tracked
       `core/wasm-crypto-poc/test/golden_vectors.json` (`generate_wasm_golden_vectors`); `git
       checkout` it before committing.
-- [ ] Step 4b-2: async networking (decision 2.3) -- **design chosen 2026-10-05, in progress.**
-      Decided after research (options were put to the user; all three recommended ones taken):
+- [x] Step 4b-2: async networking (decision 2.3) -- **done (2026-10-05)**, in three commits. The
+      design was chosen the same day, after research (options were put to the user; all three recommended ones taken):
       (1) move `turtl_core` to **edition 2018** and write real `async fn`/`.await`; (2) **native keeps
       its threads**: thread-per-message and the four sync threads stay, each driving its async fn to
       completion with `block_on` on one shared tokio runtime (so futures need not be `Send`), while
@@ -607,8 +607,75 @@ Networking and concurrency are unified on async/await across both native and web
         owned body), and reqwest's `blocking` feature stays enabled for `sync/files/*` until 4b-2c
         converts them. Both reqwest versions are in the native tree until `clippo` and `migrate`
         (native-only, still on 0.10) move.
-      - [ ] 4b-2c: convert the callers (user flows, space/invite/feedback APIs, `Syncer`, the sync
-        engine, dispatch) to `async fn`, with `block_on` only at the thread entry points.
+      - [x] **4b-2c: the callers are async** (done). Everything that touches the network is `async fn`
+        all the way up: the user flows (`User::login/login_token/join/change_password/delete_account/
+        resend_confirmation/find_by_email`, and on `Turtl`: `login`, `join`, `change_user_password`,
+        `delete_account`, `sync_start`, `sync_shutdown`, `wipe_user_data`, `wipe_app_data`), the
+        space/invite/member/feedback calls, `Syncer::{init, run_sync, runner}` with the four syncers,
+        `sync::start()`, `process_incoming_sync`, and `dispatch::{dispatch, dispatch_event, process}`.
+        The blocking `call()` bridge and reqwest's `blocking` feature are gone (`call_async` and
+        `call_opt_async` became `call` and `call_opt`). Top-level tasks start with
+        `exec::spawn_task` -- natively a thread that `block_on`s the future (so futures still need
+        not be `Send`), on wasm32 `spawn_local` -- and hand back a `TaskHandle` whose `join()` is
+        async on both targets (a `futures-channel` oneshot), so `sync_shutdown(join = true)` no
+        longer parks a thread. `lib.rs` starts each message's `dispatch::process` that way, and
+        `exec::catch_panic` (futures-util's `catch_unwind`) keeps `process` answering with a
+        `TError::Panic` when a command panics (`exec::panic_message` reads `&str` payloads too, which
+        the old code reported as "no information available").
+
+        **The rule this adds: never hold a `std` lock guard across an `.await`** (spelled out in
+        `util/exec.rs`). Natively that only ever blocked other threads for a network round trip, but
+        every wasm32 task shares one thread, so a second task wanting the lock can never get in, and
+        std's wasm locks answer with a panic. Following it changed some structure, not just
+        signatures:
+        - The `Space` operations (`set_owner`, `edit_member`, `delete_member`, `leave`,
+          `send_invite`, `edit_invite`, `delete_invite`) are now static `async fn`s that take the
+          space id and follow one pattern: check and prepare under the profile lock, make the request
+          with nothing locked, lock again to apply the answer. They used to run with the profile
+          write lock held for the whole request (a 30 s timeout froze the profile); `SpaceMember::
+          edit`/`Invite::edit` return the saved record instead of writing into a `&mut` into the
+          profile, and the `delete`s take ids. Each hands back the space's data for the UI.
+        - `User::login` is a loop over auth versions (async recursion needs boxing; this doesn't).
+          `User::change_password` is a static function in phases (read the user and keychain under
+          read locks, send, then write the result), and its 3 s pause for the outgoing sync happens
+          after the locks are released. `Feedback::send` drops the user lock before sending.
+        - `Turtl.incoming_sync_lock` used to be held by `sync_start()` across its whole startup to
+          keep incoming syncs from being applied before the profile loaded; now that is the
+          `incoming_sync_held` flag (`hold_incoming_sync()` returns a guard that clears it), and
+          `process_incoming_sync` waits for it to clear, taking the lock only while it applies an item.
+        - `Turtl::sync_shutdown` is `sync_stop()` (synchronous: signal, take the task handles, mark
+          disconnected; also what `logout` and `Drop` use) plus an async join.
+        - `User::mem_update` for a deleted account can't await the wipe (it is synchronous and may
+          run under locks), so like its sibling cases it sends an app event, `user:wipe-data`.
+        - A long poll that times out is an empty poll again: `sync_from_api` matched
+          `TError::Io(TimedOut)`, which a reqwest error never converts to, so every idle minute was
+          logged as an error; it now asks `api::is_timeout`.
+
+        With that, the sync engine is the same code on both targets: the `incoming_wasm.rs` stub is
+        deleted, and `sync::start()` runs on wasm32 (minus the two file syncers, which stay native
+        until 4b-5b).
+
+        **Verified:** eight end-to-end scenarios (`src/flow_tests.rs`) written once and run on both
+        targets by `async_test!`: natively against `util/mock_server.rs`, on wasm32 against a stand-in
+        Turtl server in Node (`startFlowServer` in `js/test_support.js`; the routes are listed at the
+        top of the file and both servers implement them). They cover join and login (including the
+        server's 401 and the encrypted user record round-tripping), the dispatcher (sync, API and
+        failing commands through `process`), outgoing and incoming sync, `sync_start()` through
+        `sync_shutdown(true)` with the real tasks (the outgoing syncer uploads the profile that
+        joining queued), the incoming-sync hold, the space/invite operations (including that bad
+        requests are refused before the server is asked) and a passphrase change. Also
+        `exec`'s task/`join`/`sleep` tests on both targets and its panic tests natively. Native
+        `turtl_core` 77/77, `dumpy` 6, `clouseau` 3, `jedi` 3; wasm32 47/47, `dumpy` 6, `clouseau` 3;
+        `cargo build --release --features sqlite-static`; the production `--target web` build (3.29 MB)
+        and its smoke test.
+
+        **Still open for 4b-3 and later** (found, not fixed here): `lib.rs::start()` is still the
+        native thread plus the blocking `carrier::recv` loop, so wasm has no message entry point yet
+        (4b-3: push messages in, `spawn_local` the `process` call); `Thredder` is still the
+        synchronous-inline placeholder on wasm; `init()` reads a config *file* (the wasm tests set the
+        config by hand with `load_config(":null:")` + `merge`); anything that uses the filesystem
+        (`wipe_*`, `save_login`/`restore_login`, attachments) is native-only until 4b-5b;
+        `util/logger.rs` calls `time::now()`, which panics on wasm32.
 - [ ] Step 4b-3: the real single-threaded-async concurrency rewrite (2.4) replacing `Thredder`'s
       synchronous-inline placeholder.
 - [x] Step 4b-4 (`wasm-pack build --target web`, with libsodium injected) -- **done**

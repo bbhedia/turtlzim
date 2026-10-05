@@ -80,6 +80,8 @@ mod search;
 mod dispatch;
 mod schema;
 mod turtl;
+#[cfg(test)]
+mod flow_tests;
 
 use ::std::thread;
 use ::std::sync::Arc;
@@ -200,17 +202,17 @@ pub fn start() -> thread::JoinHandle<()> {
             // start our messaging thread
             let msg_res = messaging::start(move |msg: String| {
                 let turtl2 = turtl.clone();
-                // spawn a new thread for each message. this lets us process
+                // run each message as a task of its own. this lets us process
                 // multiple messages at once without blocking.
-                let res = thread::Builder::new().name(String::from("dispatch:msg")).spawn(move || {
-                    match dispatch::process(turtl2.as_ref(), &msg) {
+                let res = util::exec::spawn_task("dispatch:msg", move || async move {
+                    match dispatch::process(turtl2.as_ref(), &msg).await {
                         Ok(..) => {},
                         Err(e) => error!("dispatch::process() -- error processing: {}", e),
                     }
                 });
                 match res {
                     Ok(..) => {},
-                    Err(e) => error!("main::start() -- message processor: error spawning thread: {}", e),
+                    Err(e) => error!("main::start() -- message processor: error spawning task: {}", e),
                 }
             });
             match msg_res {

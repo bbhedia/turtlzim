@@ -130,6 +130,10 @@ docker compose up                   # Postgres + server (define compose file)
   parsing. New logic goes in the core unless it is purely presentational.
 - Do not add a second crypto path. Do not weaken or hand-roll crypto.
 - Keep the core's public interface identical across native and WASM builds.
+- Core code that touches the network is `async` all the way up. Never hold a `std` lock guard
+  across an `.await` (a contended std lock panics on wasm32, where all tasks share one thread; see
+  `core/turtl-core-rs/src/util/exec.rs`). Test async code with `async_test!` so one scenario runs
+  natively and on wasm32.
 - Zim `.txt` round-trips must be byte-identical (write a golden-file test against real Zim
   notebooks early).
 - Never copy Zim source into this repo; reimplement the format from its documented syntax.

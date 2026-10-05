@@ -11,6 +11,7 @@ use crate::models::sync_record::{SyncType, SyncAction, SyncRecord};
 use crate::models::validate::{self, Validate};
 use crate::turtl::Turtl;
 use crate::util;
+use crate::util::exec;
 use crate::sync::sync_model::{self, SyncModel, MemorySaver};
 use crate::sync::incoming::SyncIncoming;
 use crate::messaging;
@@ -104,7 +105,7 @@ impl Validate for User {
 }
 
 impl MemorySaver for User {
-    fn mem_update(self, turtl: &Turtl, sync_item: &mut SyncRecord) -> TResult<()> {
+    fn mem_update(self, _turtl: &Turtl, sync_item: &mut SyncRecord) -> TResult<()> {
         let action = sync_item.action.clone();
         match action {
             SyncAction::Add | SyncAction::Edit => {
@@ -120,7 +121,10 @@ impl MemorySaver for User {
                     Ok(_) => (),
                     Err(e) => error!("User.mem_update() -- problem sending `user:delete` event: {}", e),
                 }
-                turtl.wipe_user_data()?;
+                // wiping the user's data has to wait for the sync system to wind down, which this
+                // (synchronous, possibly lock-holding) function can't do. so, like the other cases
+                // here, we leave it to the dispatcher.
+                messaging::app_event("user:wipe-data", &json!({}))?;
             }
             SyncAction::ChangePassword => {
                 messaging::app_event("user:change-password:logout", &json!({}))?;
@@ -164,15 +168,12 @@ pub fn generate_auth(username: &String, password: &String, version: u16) -> TRes
     Ok(key_auth)
 }
 
-/// A function that tries authenticating a username/password against various
-/// versions, starting from latest to earliest until it runs out of versions or
-/// we get a match.
-fn do_login(turtl: &Turtl, username: &String, key: Key, auth: String) -> TResult<()> {
+/// Authenticate with the given key/auth: ask the API who we are, then load our user record.
+async fn do_login(turtl: &Turtl, username: &String, key: Key, auth: String) -> TResult<()> {
     turtl.api.set_auth(username.clone(), auth.clone())?;
     let opt = ApiReq::new().timeout(10);
-    let user_id: Value = turtl.api.post("/auth")?.call_opt(opt)?;
+    let user_id: Value = turtl.api.post("/auth")?.call_opt(opt).await?;
 
-    let mut user_guard_w = lockw!(turtl.user);
     let id_err = TErr!(TError::BadValue(format!("auth was successful, but API returned strange id object: {:?}", user_id)));
     let user_id = match user_id {
         Value::Number(x) => {
@@ -185,10 +186,12 @@ fn do_login(turtl: &Turtl, username: &String, key: Key, auth: String) -> TResult
         _ => return id_err,
     };
     let url = format!("/users/{}", user_id);
-    user_guard_w.id = Some(user_id);
-    user_guard_w.do_login(key, auth);
-    drop(user_guard_w);
-    let userdata: Value = turtl.api.get(url.as_str())?.call()?;
+    {
+        let mut user_guard_w = lockw!(turtl.user);
+        user_guard_w.id = Some(user_id);
+        user_guard_w.do_login(key, auth);
+    }
+    let userdata: Value = turtl.api.get(url.as_str())?.call().await?;
     let mut user_guard = lockw!(turtl.user);
     user_guard.merge_fields(&userdata)?;
     user_guard.deserialize()?;
@@ -218,47 +221,44 @@ fn validate_user(username: &String, password: &String) -> TResult<()> {
 
 impl User {
     /// Given a turtl, a username, and a password, see if we can log this user
-    /// in.
-    pub fn login(turtl: &Turtl, username: String, password: String, version: u16) -> TResult<()> {
+    /// in. Tries authenticating against various versions, starting from the
+    /// given one and working down to the earliest until we get a match or run
+    /// out of versions.
+    pub async fn login(turtl: &Turtl, username: String, password: String, version: u16) -> TResult<()> {
         let username = username.to_lowercase();
-        let (key, auth) = generate_auth(&username, &password, version)?;
-        do_login(turtl, &username, key, auth)
-            .or_else(|e| {
-                turtl.api.clear_auth();
-                let e = e.shed();
-                match e {
-                    TError::Api(x, y) => {
-                        match x {
-                            // if we got a BAD LOGIN error, try again with a
-                            // different (lesser) auth version
-                            StatusCode::UNAUTHORIZED => {
-                                if version <= 0 {
-                                    TErr!(TError::Api(StatusCode::UNAUTHORIZED, y))
-                                } else {
-                                    User::login(turtl, username, password, version - 1)
-                                }
-                            },
-                            _ => TErr!(TError::Api(x, y)),
-                        }
-                    },
-                    _ => Err(e)
-                }
-            })
+        let mut version = version;
+        loop {
+            let (key, auth) = generate_auth(&username, &password, version)?;
+            let err = match do_login(turtl, &username, key, auth).await {
+                Ok(_) => return Ok(()),
+                Err(e) => e,
+            };
+            turtl.api.clear_auth();
+            match err.shed() {
+                // if we got a BAD LOGIN error, try again with a different
+                // (lesser) auth version
+                TError::Api(StatusCode::UNAUTHORIZED, _) if version > 0 => {
+                    version -= 1;
+                },
+                TError::Api(status, msg) => return TErr!(TError::Api(status, msg)),
+                e => return Err(e),
+            }
+        }
     }
 
     /// Log the user in given a token returned from get_login_token()
-    pub fn login_token(turtl: &Turtl, token: String) -> TResult<()> {
+    pub async fn login_token(turtl: &Turtl, token: String) -> TResult<()> {
         let token_encrypted = crypto::from_base64(&token)?;
         let token_raw = crypto::decrypt(&(*TOKEN_KEY), token_encrypted)?;
         let tokenjson = String::from_utf8(token_raw)?;
         let token: LoginToken = jedi::parse(&tokenjson)?;
         let LoginToken {id: _id, key, auth, username} = token;
         let username = username.to_lowercase();
-        do_login(turtl, &username, key, auth)?;
+        do_login(turtl, &username, key, auth).await?;
         Ok(())
     }
 
-    pub fn join(turtl: &Turtl, username: String, password: String) -> TResult<()> {
+    pub async fn join(turtl: &Turtl, username: String, password: String) -> TResult<()> {
         validate_user(&username, &password)?;
         let username = username.to_lowercase();
         let (key, auth) = generate_auth(&username, &password, CURRENT_AUTH_VERSION)?;
@@ -279,7 +279,7 @@ impl User {
                 "username": username,
                 "data": userdata,
             }))
-            .call()?;
+            .call().await?;
         let user_id: String = jedi::get(&["id"], &joindata)?;
         let user_id: String = user_id.to_string();
         let mut user_guard_w = lockw!(turtl.user);
@@ -303,16 +303,22 @@ impl User {
     /// The idea is that this is all or nothing. In previous versions of Turtl
     /// we tried to shoehorn this through the sync system, but this tends to be
     /// a delicate procedure and you really want everything to work or nothing.
-    pub fn change_password(&mut self, turtl: &Turtl, current_username: String, current_password: String, new_username: String, new_password: String) -> TResult<()> {
+    ///
+    /// The user and profile are only locked for the parts that read or write
+    /// them, never while a request is out.
+    pub async fn change_password(turtl: &Turtl, current_username: String, current_password: String, new_username: String, new_password: String) -> TResult<()> {
         validate_user(&new_username, &new_password)?;
         let new_username = new_username.to_lowercase();
-        let user_id = self.id_or_else()?;
         let (_, auth) = generate_auth(&current_username, &current_password, CURRENT_AUTH_VERSION)?;
-        if Some(auth) != self.auth {
-            return TErr!(TError::BadValue(String::from("invalid current username/password given")));
-        }
+        let (user_id, mut new_user) = {
+            let user_guard = lockr!(turtl.user);
+            let user_id = user_guard.id_or_else()?;
+            if Some(auth) != user_guard.auth {
+                return TErr!(TError::BadValue(String::from("invalid current username/password given")));
+            }
+            (user_id, user_guard.clone()?)
+        };
 
-        let mut new_user = self.clone()?;
         new_user.username = new_username;
         let (new_key, new_auth) = generate_auth(&new_user.username, &new_password, CURRENT_AUTH_VERSION)?;
         new_user.set_key(Some(new_key.clone()));
@@ -342,7 +348,7 @@ impl User {
             "keychain": encrypted_keychain,
         });
         let url = format!("/users/{}", user_id);
-        let res: PWChangeResponse = turtl.api.put(&url[..])?.json(&auth_change).call()?;
+        let res: PWChangeResponse = turtl.api.put(&url[..])?.json(&auth_change).call().await?;
         match res.sync_ids.as_ref() {
             Some(ids) => {
                 let mut db_guard = lock!(turtl.db);
@@ -355,9 +361,12 @@ impl User {
         }
 
         turtl.api.set_auth(new_user.username.clone(), new_auth.clone())?;
-        turtl.api.post("/auth")?.call::<String>()?;
-        self.do_login(new_key.clone(), new_auth);
-        sync_model::save_model(SyncAction::Edit, turtl, self, true)?;
+        turtl.api.post("/auth")?.call::<String>().await?;
+        {
+            let mut user_guard = lockw!(turtl.user);
+            user_guard.do_login(new_key.clone(), new_auth);
+            sync_model::save_model(SyncAction::Edit, turtl, &mut *user_guard, true)?;
+        }
 
         // save the user's new key into the keychain entries
         {
@@ -381,7 +390,8 @@ impl User {
                 entry.outgoing(SyncAction::Edit, &user_id, db, true)?;
             }
         }
-        util::sleep(3000);
+        // give the outgoing sync a moment to send what we just saved
+        exec::sleep(3000).await;
         Ok(())
     }
 
@@ -531,12 +541,12 @@ impl User {
     }
 
     /// Delete the current user
-    pub fn delete_account(turtl: &Turtl) -> TResult<()> {
+    pub async fn delete_account(turtl: &Turtl) -> TResult<()> {
         let id = {
             let user_guard = lockr!(turtl.user);
             user_guard.id_or_else()?
         };
-        turtl.api.delete(format!("/users/{}", id).as_str())?.call::<bool>()?;
+        turtl.api.delete(format!("/users/{}", id).as_str())?.call::<bool>().await?;
         Ok(())
     }
 
@@ -560,8 +570,8 @@ impl User {
     }
 
     /// Resend a user's confirmation email
-    pub fn resend_confirmation(turtl: &Turtl) -> TResult<()> {
-        turtl.api.post("/users/confirmation/resend")?.call::<bool>()?;
+    pub async fn resend_confirmation(turtl: &Turtl) -> TResult<()> {
+        turtl.api.post("/users/confirmation/resend")?.call::<bool>().await?;
         Ok(())
     }
 
@@ -650,9 +660,9 @@ impl User {
     }
 
     /// Given an email address, find a matching user (pubkey and all)
-    pub fn find_by_email(turtl: &Turtl, email: &String) -> TResult<Option<User>> {
+    pub async fn find_by_email(turtl: &Turtl, email: &String) -> TResult<Option<User>> {
         let url = format!("/users/email/{}", email.to_lowercase());
-        turtl.api.get(url.as_str())?.call()
+        turtl.api.get(url.as_str())?.call().await
     }
 }
 

@@ -9,7 +9,7 @@ use crate::models::sync_record::{SyncType, SyncRecord};
 use crate::models::file::FileData;
 use ::std::time::Duration;
 use ::std::fs;
-use ::std::io::{Read, Write};
+use ::std::io::Write;
 use ::jedi::{self, Value};
 use crate::util;
 use ::config;
@@ -60,9 +60,9 @@ impl FileSyncIncoming {
         Ok(final_syncs)
     }
 
-    /// Given a sync record for an outgoing file, find the corresponding file
-    /// in our storage folder and stream it to our heroic API.
-    fn download_file(&mut self, sync: &SyncRecord) -> TResult<()> {
+    /// Given a sync record for an incoming file, download the file from our
+    /// heroic API and stream it into our storage folder.
+    async fn download_file(&mut self, sync: &SyncRecord) -> TResult<()> {
         let note_id = &sync.item_id;
         let user_id = {
             let local_config = self.get_config();
@@ -74,13 +74,13 @@ impl FileSyncIncoming {
         };
         info!("FileSyncIncoming.download_file() -- syncing file for {}", note_id);
 
-        // define a container function that grabs our file and runs the download.
-        // if anything in here fails, we mark 
-        let download = |note_id, user_id| -> TResult<()> {
+        // define a container that grabs our file and runs the download. if
+        // anything in here fails, we mark the sync record as failed below
+        let download = async {
             // generate the filename we'll save to, and open the file (we should
             // test if the file can be created before we run off blasting API
             // calls in every direction)
-            let file = FileData::new_file(user_id, note_id)?;
+            let file = FileData::new_file(&user_id, note_id)?;
             let parent = match file.parent() {
                 Some(path) => path.clone(),
                 None => return TErr!(TError::BadValue(format!("bad file path: {:?}", file))),
@@ -91,10 +91,10 @@ impl FileSyncIncoming {
             // start our API call to the note file attachment endpoint
             let url = format!("/notes/{}/attachment", note_id);
             // grab the location of the file we'll be downloading
-            let file_url: String = self.api.get(&url[..])?.call()?;
+            let file_url: String = self.api.get(&url[..])?.call().await?;
             info!("FileSyncIncoming.download_file() -- grabbing file at URL {}", file_url);
 
-            let mut client_builder = reqwest::blocking::Client::builder()
+            let mut client_builder = reqwest::Client::builder()
                 .timeout(Duration::new(30, 0));
             match config::get::<Option<String>>(&["api", "proxy"]) {
                 Ok(Some(proxy_cfg)) => {
@@ -111,32 +111,25 @@ impl FileSyncIncoming {
                 Some(auth) if file_url.contains(turtl_api_url.as_str()) => req.header("Authorization", auth),
                 _ => req,
             };
-            let mut res = client.execute(req.build()?)?;
+            let mut res = client.execute(req.build()?).await?;
             let status = res.status().clone();
             if status.as_u16() >= 400 {
-                let errstr = res.text()?;
+                let errstr = res.text().await?;
                 let val = match jedi::parse(&errstr) {
                     Ok(x) => x,
                     Err(_) => Value::String(errstr),
                 };
                 return TErr!(TError::Api(status, val));
             }
-            // start streaming our API call into the file 4K at a time
-            let mut buf = [0; 4096];
-            loop {
-                let read = res.read(&mut buf[..])?;
-                // all done! (EOF)
-                if read <= 0 { break; }
-                let (read_bytes, _) = buf.split_at(read);
-                let written = file.write(read_bytes)?;
-                if read != written {
-                    return TErr!(TError::Msg(format!("problem downloading file: downloaded {} bytes, only saved {} wtf wtf lol", read, written)));
-                }
+            // stream our API call into the file, a chunk at a time
+            while let Some(chunk) = res.chunk().await? {
+                file.write_all(&chunk[..])?;
             }
             Ok(())
         };
 
-        match download(&note_id, &user_id) {
+        let download_res: TResult<()> = download.await;
+        match download_res {
             Ok(_) => {}
             Err(e) => {
                 // our download failed? send to our sync failure handler
@@ -179,10 +172,10 @@ impl Syncer for FileSyncIncoming {
         self.run_version
     }
 
-    fn run_sync(&mut self) -> TResult<()> {
+    async fn run_sync(&mut self) -> TResult<()> {
         let syncs = self.get_incoming_file_syncs()?;
         for sync in &syncs {
-            self.download_file(sync)?;
+            self.download_file(sync).await?;
             // if we've been disabled, return
             if !self.is_enabled() { return Ok(()); }
         }

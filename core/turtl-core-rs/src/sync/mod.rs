@@ -15,38 +15,28 @@
 
 #[macro_use]
 mod macros;
-// TODO(wasm): `incoming` provides `SyncIncoming::ignore_on_next()`, which models/user.rs calls
-// regardless of target, so it gets a same-shape wasm32 stub (sync/incoming_wasm.rs) rather than
-// being cfg'd out entirely. `outgoing`/`files` have no consumers outside this module's own
-// (native-only, see below) `start()`, so they're simply native-only. All three real
-// implementations depend on blocking reqwest (via crate::api::Api) and real OS threads/rusqlite --
-// see docs/wasm-port-plan.md decisions 2.2/2.3/2.4 (storage/networking/concurrency), each its
-// own future milestone.
-#[cfg(not(target_arch = "wasm32"))]
+// The sync engine is the same code on every target: its loops are async fns that `util::exec` runs
+// (a thread each natively, a task on the host's event loop on wasm32). Only file attachments are
+// native-only for now, until the browser has a file store to put them in (docs/wasm-port-plan.md
+// step 4b-5b).
 pub mod incoming;
-#[cfg(target_arch = "wasm32")]
-#[path = "incoming_wasm.rs"]
-pub mod incoming;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod outgoing;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod files;
 #[macro_use]
 pub mod sync_model;
 
-use ::std::sync::{Arc, RwLock, Mutex, mpsc};
-use ::std::thread;
+use ::std::sync::{Arc, RwLock, Mutex};
+use ::futures_channel::oneshot;
 use ::config;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::sync::outgoing::SyncOutgoing;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::sync::incoming::SyncIncoming;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sync::files::outgoing::FileSyncOutgoing;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sync::files::incoming::FileSyncIncoming;
 use crate::models::sync_record::SyncRecord;
-use crate::util;
+use crate::util::exec::{self, TaskHandle};
 use crate::error::{TResult, TError};
 use crate::storage::Storage;
 use crate::api::Api;
@@ -113,7 +103,7 @@ impl SyncConfig {
 
 /// A structure that tracks some state for a running sync system.
 pub struct SyncState {
-    pub join_handles: Vec<thread::JoinHandle<()>>,
+    pub join_handles: Vec<TaskHandle>,
     pub shutdown: Box<dyn Fn() + 'static + Sync + Send>,
     pub pause: Box<dyn Fn() + 'static + Sync + Send>,
     pub resume: Box<dyn Fn() + 'static + Sync + Send>,
@@ -138,10 +128,10 @@ pub trait Syncer {
     ///
     /// Essentially, this is the meat of the syncer. This is the entry point for
     /// the custom work this syncer does.
-    fn run_sync(&mut self) -> TResult<()>;
+    async fn run_sync(&mut self) -> TResult<()>;
 
     /// Run any initialization this Syncer needs.
-    fn init(&mut self) -> TResult<()> {
+    async fn init(&mut self) -> TResult<()> {
         Ok(())
     }
 
@@ -193,7 +183,7 @@ pub trait Syncer {
     }
 
     /// Runs our syncer, with some quick checks on run status.
-    fn runner(&mut self, init_tx: mpsc::Sender<TResult<()>>) {
+    async fn runner(&mut self, init_tx: oneshot::Sender<TResult<()>>) {
         // pull our run version from the config
         {
             let local_config = self.get_config();
@@ -203,42 +193,31 @@ pub trait Syncer {
 
         info!("sync::runner() -- {} init (run {})", self.get_name(), self.get_run_version());
 
-        let init_res = self.init();
-        macro_rules! send_or_return {
-            ($sendex:expr) => {
-                match $sendex {
-                    Err(e) => error!("sync::runner() -- {}: problem sending init signal: {}", self.get_name(), e),
-                    _ => (),
-                }
-            }
-        }
-        match init_res {
+        match self.init().await {
             Ok(_) => {
-                send_or_return!(init_tx.send(Ok(())));
+                if init_tx.send(Ok(())).is_err() {
+                    warn!("sync::runner() -- {}: problem sending init signal: nobody is listening", self.get_name());
+                }
             },
             Err(e) => {
                 error!("sync::runner() -- {}: init: {}", self.get_name(), e);
-                send_or_return!(init_tx.send(Err(e)));
+                if init_tx.send(Err(e)).is_err() {
+                    error!("sync::runner() -- {}: problem sending init signal: nobody is listening", self.get_name());
+                }
                 return;
             },
-        }
-        match init_tx.send(init_res) {
-            Err(e) => warn!("sync::runner() -- {}: problem sending init signal: {}", self.get_name(), e),
-            _ => (),
         }
 
         info!("sync::runner() -- {} main loop", self.get_name());
         while !self.should_quit() {
             let delay = self.get_delay();
             if self.is_enabled() {
-                match self.run_sync() {
+                match self.run_sync().await {
                     Err(e) => error!("sync::runner() -- {}: main loop: {}", self.get_name(), e),
                     _ => (),
                 }
-                util::sleep(delay);
-            } else {
-                util::sleep(delay);
             }
+            exec::sleep(delay).await;
         }
     }
 
@@ -252,12 +231,10 @@ pub trait Syncer {
 
 /// Start our syncing system!
 ///
-/// Note that we have separate db objects for in/out. This is because each
-/// thread needs its own connection. We don't have the ability to create the
-/// connections in this scope (no access to Turtl by design) so we need to
-/// just have them passed in.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Option<Storage>>>) -> TResult<SyncState> {
+/// Each syncer runs as a task of its own (see `util::exec::spawn_task`), and they all share the db
+/// object we're given. Returns once every syncer has finished initializing (or one of them has
+/// failed to, in which case they are all stopped).
+pub async fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Option<Storage>>>) -> TResult<SyncState> {
     // enable syncing (set phasers to stun)
     {
         let mut config_guard = lockw!(config);
@@ -265,7 +242,7 @@ pub fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Optio
         (*config_guard).quit = false;
     }
 
-    // some holders for our thread handles and init receivers
+    // some holders for our task handles and init receivers
     let mut join_handles = Vec::with_capacity(4);
     let mut rx_vec = Vec::with_capacity(4);
 
@@ -274,19 +251,17 @@ pub fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Optio
         ($synctype:expr) => {
             {
                 // create the channel we'll use to send messages from the sync
-                // thread back to here (mainly, a "yes init succeeded" or "no,
+                // task back to here (mainly, a "yes init succeeded" or "no,
                 // init failed")
-                let (tx, rx) = mpsc::channel::<TResult<()>>();
+                let (tx, rx) = oneshot::channel::<TResult<()>>();
                 rx_vec.push(rx);
-                let config_c = config.clone();
-                let api_c = api.clone();
-                let db_c = db.clone();
-                let mut sync = $synctype(config_c, api_c, db_c);
-                let handle = thread::Builder::new().name(format!("sync:{}", sync.get_name())).spawn(move || {
-                    sync.runner(tx);
+                let mut sync = $synctype(config.clone(), api.clone(), db.clone());
+                let name = format!("sync:{}", sync.get_name());
+                let handle = exec::spawn_task(name.as_str(), move || async move {
+                    sync.runner(tx).await;
                     info!("sync::start() -- {} shut down (run {})", sync.get_name(), sync.get_run_version());
                 })?;
-                // push our handle/rx onto their respective holder vecs
+                // push our handle onto its holder vec
                 join_handles.push(handle);
             }
         }
@@ -296,21 +271,11 @@ pub fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Optio
     // the macro!
     sync_starter!(SyncOutgoing::new);
     sync_starter!(SyncIncoming::new);
-    sync_starter!(FileSyncOutgoing::new);
-    sync_starter!(FileSyncIncoming::new);
-
-    // seems to make the sync "ready!!" channels not bitch as much. if we don't
-    // have this here, we get a lot of:
-    //
-    //   sync::runner() -- incoming: problem sending init signal: sending on a closed channel
-    // 
-    // this isn't harmful, and the sync system seems to plow forward regardless,
-    // but i'd rather not have stupid errors crop up.
-    //
-    // it's important to note: i do not know WHY this fixes the above warning.
-    // given the nature of rust's mpsc channels, i would think there should be
-    // no need to synchronize/coordinate between the threads.
-    util::sleep(100);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        sync_starter!(FileSyncOutgoing::new);
+        sync_starter!(FileSyncIncoming::new);
+    }
 
     // define some callbacks Turtl can use to control the sync processes. turtl
     // could manage this junk itself, but it's nicer to have a single object
@@ -337,28 +302,24 @@ pub fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Optio
         guard.enabled
     };
 
-    // Wait on an "OK! A++++" Ok(()) signal from the sync thread (sent after it
+    // Wait on an "OK! A++++" Ok(()) signal from the sync task (sent after it
     // inits successfully) or a "SHITFUCK!" Err() if there was a problem.
     //
-    // note that if we hit ANY snags, we stop ALL the sync threads.
+    // note that if we hit ANY snags, we stop ALL the sync tasks.
     for rx in rx_vec {
-        match rx.recv() {
-            Ok(x) => {
-                match x {
-                    Err(e) => {
-                        shutdown();
-                        return Err(toterr!(e));
-                    }
-                    _ => (),
-                }
-            },
-            Err(e) => {
+        match rx.await {
+            Ok(Ok(_)) => (),
+            Ok(Err(e)) => {
                 shutdown();
                 return Err(toterr!(e));
             }
+            Err(_) => {
+                shutdown();
+                return TErr!(TError::Msg(String::from("a sync task ended before it finished starting")));
+            }
         }
     }
-    info!("sync::start() -- all sync threads started");
+    info!("sync::start() -- all sync tasks started");
 
     // uhhh, you have a ph... call. thank you. uhh, hand the phone to me, please.
     // yes, here you go.
@@ -369,17 +330,6 @@ pub fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Optio
         resume: Box::new(resume),
         enabled: Box::new(enabled),
     })
-}
-
-/// Start our syncing system!
-// TODO(wasm): the real sync engine spawns 4 OS threads (`std::thread::Builder::spawn`) that each
-// make blocking HTTP calls via `crate::api::Api` -- neither real OS-thread parallelism nor blocking
-// reqwest exist on wasm32 (see docs/wasm-port-plan.md decisions 2.3 networking and 2.4
-// concurrency, both separate future milestones: async reqwest/fetch + a single-threaded
-// spawn_local/Worker-based scheduler). Not yet ported.
-#[cfg(target_arch = "wasm32")]
-pub fn start(_config: Arc<RwLock<SyncConfig>>, _api: Arc<Api>, _db: Arc<Mutex<Option<Storage>>>) -> TResult<SyncState> {
-    TErr!(TError::NotImplemented)
 }
 
 #[cfg(test)]
@@ -407,22 +357,18 @@ mod tests {
         assert_eq!(syncstr, String::from(r#"{"id":"1234","body":null,"action":"add","item_id":"6969","user_id":1,"type":"note","data":{"id":"6969"},"errcount":0,"frozen":false,"blocked":false}"#));
     }
 
-    #[test]
-    fn starts_and_quits() {
+    /// Every syncer starts, reports in, and stops when told to (and joining waits for that).
+    async fn starts_and_quits() {
         let mut sync_config = SyncConfig::new();
         sync_config.skip_api_init = true;
         let sync_config = Arc::new(RwLock::new(sync_config));
         let api = Arc::new(Api::new());
         let db = Arc::new(Mutex::new(Some(Storage::new(&String::from(":memory:"), json!({})).unwrap())));
-        let mut state = start(sync_config, api, db).unwrap();
+        let state = start(sync_config, api, db).await.unwrap();
         (state.shutdown)();
-        loop {
-            let hn = state.join_handles.pop();
-            match hn {
-                Some(x) => x.join().unwrap(),
-                None => break,
-            }
+        for handle in state.join_handles {
+            handle.join().await.unwrap();
         }
     }
+    async_test!(starts_and_quits_test, starts_and_quits());
 }
-

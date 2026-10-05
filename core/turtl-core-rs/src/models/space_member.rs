@@ -28,23 +28,21 @@ pub struct SpaceMember {
 }
 
 impl SpaceMember {
-    /// Save this item
-    pub fn edit(&mut self, turtl: &Turtl, existing_member: Option<&mut SpaceMember>) -> TResult<()> {
+    /// Save this member to the API. Returns the member as the API saved it; applying that to
+    /// whatever copy the caller keeps is the caller's job (so that nothing needs to stay locked
+    /// while the request is out).
+    pub async fn edit(&self, turtl: &Turtl) -> TResult<SpaceMember> {
         let member_data = jedi::to_val(self)?;
         let url = format!("/spaces/{}/members/{}", self.space_id, self.user_id);
-        let saved_data: Value = turtl.api.put(url.as_str())?.json(&member_data).call()?;
+        let saved_data: Value = turtl.api.put(url.as_str())?.json(&member_data).call().await?;
         incoming::ignore_syncs_maybe(turtl, &saved_data, "SpaceMember.edit()");
-        match existing_member {
-            Some(x) => { *x = jedi::from_val(saved_data)?; }
-            None => {}
-        }
-        Ok(())
+        Ok(jedi::from_val(saved_data)?)
     }
 
-    /// Delete this member from the space
-    pub fn delete(&self, turtl: &Turtl) -> TResult<()> {
-        let url = format!("/spaces/{}/members/{}", self.space_id, self.user_id);
-        let ret: Value = turtl.api.delete(url.as_str())?.call()?;
+    /// Delete a member from a space (on the API)
+    pub async fn delete(turtl: &Turtl, space_id: &String, user_id: &String) -> TResult<()> {
+        let url = format!("/spaces/{}/members/{}", space_id, user_id);
+        let ret: Value = turtl.api.delete(url.as_str())?.call().await?;
         incoming::ignore_syncs_maybe(turtl, &ret, "SpaceMember.delete()");
         Ok(())
     }

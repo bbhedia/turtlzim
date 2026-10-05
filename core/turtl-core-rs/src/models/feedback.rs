@@ -9,15 +9,18 @@ pub struct Feedback {
 
 impl Feedback {
     /// Send feedback back. BO!
-    pub fn send(&self, turtl: &Turtl) -> TResult<()> {
-        let user_guard = lockr!(turtl.user);
-        if !user_guard.logged_in {
+    pub async fn send(&self, turtl: &Turtl) -> TResult<()> {
+        let logged_in = {
+            let user_guard = lockr!(turtl.user);
+            user_guard.logged_in
+        };
+        if !logged_in {
             // nice try
             return TErr!(TError::Msg(String::from("can't send feedback, not logged in")));
         }
         turtl.api.post("/feedback")?
             .json(&self)
-            .call::<bool>()?;
+            .call::<bool>().await?;
         Ok(())
     }
 }

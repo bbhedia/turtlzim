@@ -1,5 +1,3 @@
-use ::std::thread;
-use ::std::time::Duration;
 use crate::error::{TResult, TError};
 use ::std::io;
 use ::std::fs;
@@ -36,6 +34,26 @@ macro_rules! lockw {
     ($lockable:expr) => { do_lock!($lockable.write()) }
 }
 
+/// Defines a test that runs an async scenario (`$scenario` is an expression that makes the future):
+/// natively it is a plain `#[test]` that `exec::block_on`s it, on wasm32 it is a `wasm_bindgen_test`
+/// (run by `wasm-pack test --node`) that first injects libsodium. So a scenario is written once and
+/// the same assertions run on both targets. Visible crate-wide through `#[macro_use] mod util;`.
+#[cfg(test)]
+macro_rules! async_test {
+    ($name:ident, $scenario:expr) => {
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn $name() { $crate::util::exec::block_on($scenario) }
+
+        #[cfg(target_arch = "wasm32")]
+        #[::wasm_bindgen_test::wasm_bindgen_test]
+        async fn $name() {
+            $crate::crypto::wasm_test_support::init().await;
+            $scenario.await
+        }
+    };
+}
+
 pub mod exec;
 pub mod logger;
 pub mod thredder;
@@ -45,11 +63,6 @@ pub mod mock_server;
 pub mod ser;
 #[macro_use]
 pub mod i18n;
-
-/// Go to sleeeeep
-pub fn sleep(millis: u64) {
-    thread::sleep(Duration::from_millis(millis));
-}
 
 /// The current time as a unix `Timespec` (seconds + nanoseconds since the epoch).
 ///
