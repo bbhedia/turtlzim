@@ -33,6 +33,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+mod common;
+
 use zim_format::{Block, Inline, Page};
 
 /// Every `*.txt` file below the directories in `ZIM_GOLDEN_DIR`, in a stable order.
@@ -291,6 +293,12 @@ fn real_notebooks_stay_lossless_when_damaged() {
                     path.display(),
                     at + 1
                 ));
+            } else if let Some(problem) = common::span_problem(&variant) {
+                failures.push(format!(
+                    "{} ({damage} at line {}): spans: {problem}",
+                    path.display(),
+                    at + 1
+                ));
             }
         };
 
@@ -330,5 +338,41 @@ fn real_notebooks_stay_lossless_when_damaged() {
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+/// The syntax spans an editor draws from, on real pages: bounds, order, nesting, marker ownership,
+/// the delimiters of each kind, and counts that agree with the parsed tree
+/// (`common::span_problem`). Also tallies what the pages contain, so a kind that never occurs in
+/// real notebooks is visible.
+#[test]
+#[ignore = "needs a corpus of real Zim pages: set ZIM_GOLDEN_DIR (see the module docs)"]
+fn real_notebooks_have_well_formed_spans() {
+    let mut problems = Vec::new();
+    let mut tally: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut files = 0usize;
+    for path in corpus() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        files += 1;
+        if let Some(problem) = common::span_problem(&text) {
+            problems.push(format!("{}: {problem}", path.display()));
+            continue;
+        }
+        for span in zim_format::highlight(&text) {
+            *tally.entry(span.kind.name()).or_default() += 1;
+        }
+    }
+    println!("\nspans in {files} real pages:");
+    for (kind, n) in &tally {
+        println!("  {n:>6}  {kind}");
+    }
+    assert!(files > 0, "no readable UTF-8 pages in the corpus");
+    assert!(
+        problems.is_empty(),
+        "{} pages have malformed spans:\n{}",
+        problems.len(),
+        problems.join("\n")
     );
 }

@@ -35,9 +35,12 @@ three apps: **desktop** (Win/macOS/Linux), **web** (browser), **mobile** (iOS/An
   only ciphertext.
 - **Product license: GPL-3.0** (because it embeds `core-rs`, which is GPLv3).
 
-Working default for the one open UI decision (see Open issues #1): **shared web UI** — build
+UI decision (confirmed by the user 2026-10-05, see Open issues #1): **shared web UI** — build
 the Zim editor once (CodeMirror 6) and reuse it in Tauri (desktop), a Capacitor/webview shell
-(mobile), and the browser (web).
+(mobile), and the browser (web). The editor's document *is* the Zim file text (never an AST that
+is serialized back), so saving cannot change bytes; syntax spans for live formatting come from
+the core's `zim-format` parser compiled to wasm, so there is one Zim parser. Plan and status:
+`docs/zim-editor-plan.md`.
 
 ---
 
@@ -144,9 +147,10 @@ docker compose up                   # Postgres + server (define compose file)
 
 ## Open issues / risks
 
-1. **OPEN DECISION — shared web UI vs. native UIs.** Brief assumes shared web UI. Native UIs
-   per platform ~triple the editor work and change the mobile/desktop stack. Confirm before
-   building the editor.
+1. **DECIDED (2026-10-05) — shared web UI, not native UIs.** Native UIs per platform would
+   ~triple the editor work and change the mobile/desktop stack; the user confirmed the shared
+   CodeMirror 6 editor and chose to build it first, standalone (no server needed), as the `web/`
+   package.
 2. **WASM port of `core-rs`** is the central effort. Approach decided (see
    `docs/wasm-port-plan.md` for the full research/rationale): real `libsodium.js` via a JS
    bridge for crypto (byte-identical by construction), `sqlite-wasm-rs` (real SQLite, one wasm

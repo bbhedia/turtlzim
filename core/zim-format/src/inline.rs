@@ -183,6 +183,38 @@ fn render_one(sp: &Inline, out: &mut String) {
     }
 }
 
+/// The length in bytes of `render_inline(spans)`, without building the string.
+/// Kept in step with [`render_one`] by a test that compares the two on every
+/// shape the fuzzer and the real notebooks produce.
+pub(crate) fn rendered_len(spans: &[Inline]) -> usize {
+    spans.iter().map(rendered_len_one).sum()
+}
+
+pub(crate) fn rendered_len_one(sp: &Inline) -> usize {
+    match sp {
+        Inline::Text(t) => t.len(),
+        Inline::Bold(c) | Inline::Italic(c) | Inline::Underline(c) | Inline::Strike(c) => {
+            4 + rendered_len(c)
+        }
+        Inline::Verbatim(t) => 4 + t.len(),
+        Inline::Superscript(c) | Inline::Subscript(c) => 3 + rendered_len(c),
+        Inline::Link(l) => 4 + l.target.len() + l.display.as_ref().map_or(0, |d| 1 + d.len()),
+        Inline::Tag(name) => 1 + name.len(),
+        Inline::Image(im) => {
+            let query = if im.query.is_empty() {
+                0
+            } else {
+                // `?`, the tokens, and an `&` between each pair of them.
+                1 + im.query.len() - 1
+                    + im.query.iter().map(|(k, v)| k.len() + v.as_ref().map_or(0, |v| 1 + v.len())).sum::<usize>()
+            };
+            4 + im.path.len() + query + im.alt.as_ref().map_or(0, |a| 1 + a.len())
+        }
+        Inline::Anchor(raw) => 7 + raw.len(),
+        Inline::AutoUrl(raw) | Inline::AutoEmail(raw) => raw.len(),
+    }
+}
+
 fn wrap(out: &mut String, open: &str, content: &[Inline], close: &str) {
     out.push_str(open);
     out.push_str(&render_inline(content));

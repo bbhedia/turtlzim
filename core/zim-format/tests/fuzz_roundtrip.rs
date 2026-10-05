@@ -11,6 +11,8 @@
 
 use std::time::{Duration, Instant};
 
+mod common;
+
 use zim_format::inline::{parse_inline, render_inline};
 
 /// The format's punctuation and the tokens that give it something to bite on.
@@ -61,16 +63,30 @@ impl Rng {
     }
 }
 
-/// Every promise the crate makes about any text, as one predicate.
-fn holds(text: &str) -> bool {
+/// The first promise the crate makes about any text that does not hold for `text`, if any: the
+/// round trip, a stable parse, the inline round trip, and well-formed syntax spans.
+fn problem(text: &str) -> Option<String> {
     let page = zim_format::parse(text);
     let again = page.serialize();
-    again == text
-        && zim_format::parse(&again) == page
-        && text.ends_with(&page.body.serialize())
-        && [true, false]
-            .iter()
-            .all(|&tags| render_inline(&parse_inline(text, tags)) == text)
+    if again != text {
+        return Some(format!("serialize(parse(text)) differs: {again:?}"));
+    }
+    if zim_format::parse(&again) != page {
+        return Some("parse(serialize(parse(text))) != parse(text)".to_string());
+    }
+    if !text.ends_with(&page.body.serialize()) {
+        return Some("the serialized body is not the tail of the text".to_string());
+    }
+    for tags in [true, false] {
+        if render_inline(&parse_inline(text, tags)) != text {
+            return Some(format!("inline round trip (tags {tags}) differs"));
+        }
+    }
+    common::span_problem(text).map(|p| format!("spans: {p}"))
+}
+
+fn holds(text: &str) -> bool {
+    problem(text).is_none()
 }
 
 /// Drop tokens one at a time for as long as `fails` still holds without them.
@@ -100,8 +116,8 @@ fn check(tokens: Vec<&'static str>, how: &str, case: usize) {
     }
     let minimal = shrink(tokens, |t| !holds(t));
     panic!(
-        "{how} case {case}: round trip broken. Minimal input ({} tokens): {:?}\n  as text: {:?}\n  \
-         parsed: {:#?}",
+        "{how} case {case}: {}\n  minimal input ({} tokens): {:?}\n  as text: {:?}\n  parsed: {:#?}",
+        problem(&minimal.concat()).unwrap_or_default(),
         minimal.len(),
         minimal,
         minimal.concat(),

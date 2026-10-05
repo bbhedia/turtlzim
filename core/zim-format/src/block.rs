@@ -480,7 +480,7 @@ pub fn render_blocks(blocks: &[Block]) -> Vec<String> {
     lines
 }
 
-fn render_block(b: &Block, lines: &mut Vec<String>) {
+pub(crate) fn render_block(b: &Block, lines: &mut Vec<String>) {
     match b {
         Block::Blank(n) => {
             for _ in 0..*n {

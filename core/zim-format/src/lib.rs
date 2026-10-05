@@ -17,6 +17,7 @@
 
 pub mod block;
 pub mod header;
+pub mod highlight;
 pub mod inline;
 
 pub use block::{
@@ -24,6 +25,7 @@ pub use block::{
     Opaque, Paragraph, Verbatim,
 };
 pub use header::HeaderField;
+pub use highlight::{highlight, to_utf16, Span, SpanKind};
 pub use inline::{Image, Inline, Link};
 
 /// A parsed Zim wiki `.txt` page: an optional header block plus a body of
