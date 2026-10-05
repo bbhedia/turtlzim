@@ -167,4 +167,67 @@ scenarios.wipe = async ({ CoreClient, workerUrl, origin }) => {
     core.terminate();
 };
 
+// "Remember me" across a reload: the saved login lives in the kv store, which lives in OPFS, so a new
+// Worker can log in with just the user id and the key the page kept.
+scenarios.saved_login_survives_reload = async ({ CoreClient, workerUrl, origin }) => {
+    const config = { api: { endpoint: origin }, logging: { level: 'error' } };
+    const persistence = { directory: 'turtl-saved-login' };
+
+    let core = new CoreClient(workerUrl);
+    await core.boot(config, persistence);
+    assertEqual((await core.request('user:join', 'remember@test.com', 'rememberpassphrase')).e, 0, 'join');
+    const saved = await core.request('user:save-login');
+    assertEqual(saved.e, 0, `save-login: ${JSON.stringify(saved)}`);
+    await core.stop();
+    core.terminate();
+
+    core = new CoreClient(workerUrl);
+    await core.boot(config, persistence);
+    const back = await core.request('user:login-from-saved', saved.d.user_id, saved.d.key);
+    assertEqual(back.e, 0, `login-from-saved: ${JSON.stringify(back)}`);
+    assertEqual(back.d.username, 'remember@test.com');
+    await core.stop();
+    core.terminate();
+};
+
+// The interoperability fixtures (src/interop_tests.rs): an account made by the native build and one
+// made by the wasm32 build under Node. Here the production package, in a Worker in a real browser,
+// logs in to each, loads the profile from the ciphertext the other build stored and decrypts it.
+scenarios.reads_what_other_builds_made = async ({ CoreClient, workerUrl, origin }) => {
+    for (const name of ['interop_from_native.json', 'interop_from_wasm.json']) {
+        const fixture = await (await fetch(`/test-fixtures/${name}`)).json();
+        const expected = fixture.expected;
+        const seeded = await fetch('/seed', {
+            method: 'POST',
+            body: JSON.stringify({
+                account: { username: fixture.username, auth: fixture.auth, data: fixture.user },
+                full_sync: fixture.sync_records,
+            }),
+        });
+        assertEqual(seeded.status, 200, `seeding ${name}`);
+
+        const core = new CoreClient(workerUrl);
+        await core.boot({ api: { endpoint: origin }, logging: { level: 'error' } });
+        const login = await core.request('user:login', fixture.username, fixture.passphrase);
+        assertEqual(login.e, 0, `${name}: login ${JSON.stringify(login)}`);
+        assertEqual((await core.request('sync:start')).e, 0, `${name}: sync:start`);
+
+        const profile = (await core.request('profile:load')).d;
+        assertEqual(profile.spaces.map((s) => s.title).sort(), expected.spaces, `${name}: spaces`);
+        assertEqual(profile.boards.map((b) => b.title).sort(), expected.boards, `${name}: boards`);
+
+        const notes = await core.request('profile:get-notes', [expected.note.id]);
+        assertEqual(notes.e, 0, `${name}: get-notes ${JSON.stringify(notes)}`);
+        assertEqual([notes.d[0].title, notes.d[0].text], [expected.note.title, expected.note.text], `${name}: the note`);
+
+        const found = await core.request('profile:find-notes', { space_id: expected.note.space_id, text: 'encrypted' });
+        assertEqual(found.e, 0, `${name}: find-notes ${JSON.stringify(found)}`);
+        assertEqual(found.d.notes.map((n) => n.id), [expected.note.id], `${name}: search finds the note`);
+
+        await core.request('sync:shutdown', true);
+        await core.stop();
+        core.terminate();
+    }
+};
+
 export { assert, assertEqual };

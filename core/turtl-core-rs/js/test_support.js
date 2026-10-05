@@ -73,6 +73,7 @@ function createFlowHandler(options = {}) {
     const withNote = options.note !== false;
     let account = null;
     let polls = 0;
+    let fullSync = [];
     const log = [];
     return function handle(req, res, body) {
         const json = (status, obj) => {
@@ -111,8 +112,14 @@ function createFlowHandler(options = {}) {
             if (records.length > 0) { records[0].sync_ids = [101]; }
             return json(200, { success: records, failures: [], blocked: [] });
         }
+        if (req.method === 'POST' && req.url === '/seed') {
+            const seed = JSON.parse(body);
+            account = seed.account;
+            fullSync = seed.full_sync || [];
+            return json(200, {});
+        }
         if (req.method === 'GET' && req.url === '/sync/full') {
-            return json(200, { records: [], sync_id: 7 });
+            return json(200, { records: fullSync, sync_id: 7 });
         }
         if (req.method === 'GET' && req.url.startsWith('/sync?')) {
             polls += 1;
@@ -139,6 +146,19 @@ module.exports.startFlowServer = function startFlowServer() {
         flowServers.push(flowServer);
         flowServer.listen(0, '127.0.0.1', () => resolve(flowServer.address().port));
     });
+};
+
+// The interoperability fixtures (src/interop_tests.rs, test-fixtures/): they are only rewritten when
+// the run is asked to, with TURTL_WRITE_FIXTURES=1.
+module.exports.shouldWriteFixtures = function shouldWriteFixtures() {
+    return process.env.TURTL_WRITE_FIXTURES === '1';
+};
+
+// (The runner's working directory is the crate's: cargo runs tests from the package root. This file
+// itself is copied into a temporary snippets directory, so `__dirname` is no use here.)
+module.exports.writeFixture = function writeFixture(name, text) {
+    const path = require('path');
+    require('fs').writeFileSync(path.join(process.cwd(), 'test-fixtures', name), text);
 };
 
 module.exports.stopServer = function stopServer() {

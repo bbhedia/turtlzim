@@ -54,7 +54,7 @@ async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
         "user:login-from-saved" => {
             let user_id: String = jedi::get(&["2"], &data)?;
             let key: Key = jedi::get(&["3"], &data)?;
-            let token = User::restore_login(user_id, key)?;
+            let token = User::restore_login(turtl, user_id, key)?;
             turtl.login_token(token).await?;
             let user_guard = lockr!(turtl.user);
             user_guard.data()

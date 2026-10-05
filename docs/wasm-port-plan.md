@@ -839,4 +839,42 @@ Networking and concurrency are unified on async/await across both native and web
       * **Still open:** attachments (the file-sync tasks are native-only; they want an OPFS file store
         of their own), and the Worker bridge for the page is the app's: `core_worker.js` /
         `core_client.js` are the reference for it.
-- [ ] Step 5: full parity pass before calling the port done.
+- [x] Step 5: full parity pass -- **done (2026-10-05)** for everything but attachments, which are
+      the one open feature (below). "Parity" is checked layer by layer, each by the *same* test code
+      on both targets:
+
+      | Layer | Evidence |
+      |---|---|
+      | Crypto primitives | known-answer tests, and golden vectors made by native that wasm32 reproduces byte for byte in both directions (step 4b-5a) |
+      | **Whole accounts** | `src/interop_tests.rs` + `test-fixtures/`: an account made by the native build and one made by the wasm32 build (user record, auth token, keychain, spaces, boards, a note: what a server would store), each read by native, by wasm32 under Node and by the production package in a Chromium Worker: passphrase to key (the auth token must come out equal), user record, the key-unwrapping chain down to the note, the sync-record ingestion, and full-text search over the decrypted note |
+      | Storage and search | `dumpy`, `clouseau`, `storage`, `search` tests, unchanged, on both |
+      | Networking | the `Api` scenarios, one suite, both servers (step 4b-2b) |
+      | Flows | join, login, dispatcher, outgoing and incoming sync, the sync engine, the incoming hold, space operations, passphrase change, saved login: `src/flow_tests.rs` |
+      | Persistence | OPFS in a real browser (step 4b-5b): survives a reload, the in-memory control doesn't, wipes, a second tab is refused |
+
+      The fixtures are made once and checked in; `TURTL_WRITE_FIXTURES=1` on either target
+      regenerates its own file (the commands are in the module docs). Final counts: native
+      `turtl_core` 84, `dumpy` 6, `clouseau` 3, `jedi` 3; wasm32 under Node 52, `dumpy` 6, `clouseau`
+      3; browser 8 scenarios; the production smoke test; the native release build.
+
+      **The deliberate differences** (the wire protocol and every command that exists on both are the
+      same; these are where the platforms differ, each with the reason):
+
+      | | Native | wasm32 |
+      |---|---|---|
+      | Entry points | `start()`, `send()`, `recv*()`, the C API / JNI | `initCore`, `startCore`, `sendMessage`, `setMessageHandler`, `pollMessage`, `pollEvent`, `stopCore`, `enablePersistence` (no thread to block on) |
+      | Config | `config.yaml` plus runtime JSON | built-in defaults plus runtime JSON (no file) |
+      | Logging | stdout and a rotated log file, readable with `app:get-log` | the JS console; `app:get-log` answers with an error |
+      | Concurrency | a thread per message and per sync loop, `Thredder` on a thread pool | tasks on one thread in a Worker, `Thredder` inline (decision 2.4) |
+      | Databases | SQLite files in `data_folder` | in memory, or OPFS after `enablePersistence` |
+      | Saved login (`user:save-login`) | `<data_folder>/<user_id>.login` | the kv store, `login:<user_id>` |
+      | `api.proxy`, `api.allow_invalid_ssl` | honoured | the browser decides; ignored |
+      | Data-folder lockfile | `fs2` lock | none: one core per Worker, and the OPFS pool has one holder |
+      | Web clipper (`clip`) | `clippo` | `NotImplemented` |
+      | Import from Turtl 0.6 (`user:can-migrate`, `user:join-migrate`, `user:migrate-auth-debug`) | `migrate` crate | `can-migrate` says no, the others `NotImplemented` |
+      | **Note attachments** (`file` on a note, `profile:note:get-file`, the two file sync loops) | the filesystem | **not supported yet**: saving one fails, and the file syncers aren't started |
+
+      **Attachments are the open item.** They stream to and from files, so the browser needs a store
+      of its own (OPFS files, or blobs in the user database) behind `FileData`, and the two file sync
+      loops need to run on it; the stand-in server would grow `PUT/GET /notes/:id/attachment`. That is
+      a feature-sized step of its own, not a parity check, and nothing else depends on it.

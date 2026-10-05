@@ -54,6 +54,7 @@ const types = {
 const mounts = [
     ['/pkg/', join(root, 'pkg')],
     ['/js/browser/', join(root, 'js', 'browser')],
+    ['/test-fixtures/', join(root, 'test-fixtures')],
     ['/vendor/libsodium-wrappers.mjs', join(root, 'node_modules', 'libsodium-wrappers-sumo', 'dist', 'modules-sumo-esm', 'libsodium-wrappers.mjs')],
     ['/vendor/libsodium-sumo.mjs', join(root, 'node_modules', 'libsodium-sumo', 'dist', 'modules-sumo-esm', 'libsodium-sumo.mjs')],
 ];

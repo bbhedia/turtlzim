@@ -15,9 +15,11 @@
 //! GET  /users/42                          -> 200 {"id": "42", ...<the stored data>}
 //! PUT  /users/42  {user, auth, keychain}  -> 200 {"sync_ids": [102]}                replaces the account
 //! POST|PUT|DELETE /spaces/...             -> 200 {}
+//! POST /seed {account, full_sync}         -> 200 {}   test-only: preloads the account ({username, auth,
+//!                                                     data}) and the records GET /sync/full answers with
 //! POST /sync      [records]               -> 200 {"success": <the records, the first one with
 //!                                                 "sync_ids": [101]>, "failures": [], "blocked": []}
-//! GET  /sync/full                         -> 200 {"records": [], "sync_id": 7}
+//! GET  /sync/full                         -> 200 {"records": <seeded, or []>, "sync_id": 7}
 //! GET  /sync?...  (the first time)        -> 200 {"records": [<note n1>], "sync_id": 9}
 //! GET  /sync?...  (after that)            -> 200 {"records": [], "sync_id": 9}
 //! GET  /requests                          -> 200 ["<METHOD> <path>", ...] what the server was asked
@@ -45,7 +47,6 @@ use crate::sync::outgoing::SyncOutgoing;
 use crate::turtl::Turtl;
 use crate::util::exec;
 
-#[cfg(not(target_arch = "wasm32"))]
 use crate::crypto;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::util::mock_server::{MockServer, Request, Response};
@@ -60,8 +61,8 @@ use ::wasm_bindgen_futures::JsFuture;
 
 /// A running stand-in server. The native one stops when this is dropped; on wasm32 they live until
 /// the test run ends.
-struct Server {
-    url: String,
+pub(crate) struct Server {
+    pub(crate) url: String,
     #[cfg(not(target_arch = "wasm32"))]
     _server: MockServer,
 }
@@ -77,6 +78,7 @@ struct Account {
 #[derive(Default)]
 struct ServerState {
     account: Option<Account>,
+    full_sync: Vec<Value>,
     log: Vec<String>,
     polls: usize,
 }
@@ -136,7 +138,18 @@ fn flow_route(state: &Mutex<ServerState>, req: &Request) -> Response {
             }
             Response::json(200, &json!({"success": records, "failures": [], "blocked": []}).to_string())
         }
-        ("GET", "/sync/full") => Response::json(200, r#"{"records":[],"sync_id":7}"#),
+        ("POST", "/seed") => {
+            let seed: Value = jedi::parse(&req.body).unwrap();
+            let account = &seed["account"];
+            state.account = Some(Account {
+                username: String::from(account["username"].as_str().unwrap()),
+                auth: String::from(account["auth"].as_str().unwrap()),
+                data: account["data"].clone(),
+            });
+            state.full_sync = seed["full_sync"].as_array().cloned().unwrap_or_default();
+            Response::json(200, "{}")
+        }
+        ("GET", "/sync/full") => Response::json(200, &json!({"records": state.full_sync, "sync_id": 7}).to_string()),
         ("GET", path) if path.starts_with("/sync?") => {
             state.polls += 1;
             let records = if state.polls == 1 {
@@ -154,7 +167,7 @@ fn flow_route(state: &Mutex<ServerState>, req: &Request) -> Response {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn start_server() -> Server {
+pub(crate) async fn start_server() -> Server {
     let state = Arc::new(Mutex::new(ServerState::default()));
     let server = MockServer::start(move |req: &Request| flow_route(&state, req));
     Server { url: server.url(), _server: server }
@@ -169,7 +182,7 @@ extern "C" {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn start_server() -> Server {
+pub(crate) async fn start_server() -> Server {
     let port = JsFuture::from(start_flow_server()).await.unwrap().as_f64().unwrap() as u16;
     Server { url: format!("http://127.0.0.1:{}", port) }
 }
@@ -187,12 +200,12 @@ async fn requests(server: &Server) -> Vec<String> {
 
 /// The config is whatever `init()` makes of it: natively the repo's config.yaml (the way every other
 /// test of ours does it), on wasm32 the built-in defaults.
-fn init_config() {
+pub(crate) fn init_config() {
     crate::init(String::from("{}")).unwrap();
 }
 
 /// A fresh Turtl that talks to `server`.
-fn test_turtl(server: &Server) -> Turtl {
+pub(crate) fn test_turtl(server: &Server) -> Turtl {
     init_config();
     let turtl = Turtl::new().unwrap();
     turtl.api.set_endpoint(Some(server.url.clone()));
@@ -274,26 +287,26 @@ async fn join_and_login() {
 }
 async_test!(join_and_login_flow, join_and_login());
 
+/// Send the dispatcher `["<mid>", ...args]` and fetch the response with that message id.
+async fn ask(turtl: &Turtl, args: Value) -> Value {
+    let mid = String::from(args[0].as_str().unwrap());
+    dispatch::process(turtl, &args.to_string()).await.unwrap();
+    let mut others = Vec::new();
+    while let Some(msg) = crate::recv_nb(None).unwrap() {
+        let res: Value = jedi::parse(&msg).unwrap();
+        if res["id"] == json!(mid) {
+            return res;
+        }
+        others.push(msg);
+    }
+    panic!("no response to message {} (other responses: {:?})", mid, others);
+}
+
 /// Messages go in through the dispatcher and answers come out on the response channel, whether the
 /// command is synchronous, talks to the API, or fails.
 async fn dispatcher() {
     let server = start_server().await;
     let turtl = test_turtl(&server);
-
-    /// Send the dispatcher `["<mid>", ...args]` and fetch the response with that message id.
-    async fn ask(turtl: &Turtl, args: Value) -> Value {
-        let mid = String::from(args[0].as_str().unwrap());
-        dispatch::process(turtl, &args.to_string()).await.unwrap();
-        let mut others = Vec::new();
-        while let Some(msg) = crate::recv_nb(None).unwrap() {
-            let res: Value = jedi::parse(&msg).unwrap();
-            if res["id"] == json!(mid) {
-                return res;
-            }
-            others.push(msg);
-        }
-        panic!("no response to message {} (other responses: {:?})", mid, others);
-    }
 
     let res = ask(&turtl, json!(["d1", "ping"])).await;
     assert_eq!((res["e"].as_i64(), &res["d"]), (Some(0), &json!("pong")));
@@ -416,6 +429,42 @@ async fn sync_engine() {
     assert!(!turtl.sync_running());
 }
 async_test!(sync_engine_flow, sync_engine());
+
+/// "Remember me": the core saves an encrypted login, hands the UI the key, and the UI can later log
+/// in with that key alone. (Natively the saved login is a file in the data folder, on wasm32 a value
+/// in the kv store.)
+async fn saved_login() {
+    let server = start_server().await;
+    let turtl = test_turtl(&server);
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::util::create_dir(crate::util::file_folder(None).unwrap()).unwrap();
+
+    let joined = ask(&turtl, json!(["l1", "user:join", "Saved@Test.com", "savedpassphrase"])).await;
+    assert_eq!(joined.get("e"), Some(&json!(0)), "{}", joined);
+    let saved = ask(&turtl, json!(["l2", "user:save-login"])).await;
+    assert_eq!(saved["e"], json!(0), "{}", saved);
+    let (user_id, key) = (saved["d"]["user_id"].clone(), saved["d"]["key"].clone());
+    assert_eq!(user_id, json!("42"));
+
+    assert_eq!(ask(&turtl, json!(["l3", "user:logout"])).await["e"], json!(0));
+    assert!(!lockr!(turtl.user).logged_in);
+
+    // the wrong key doesn't open it...
+    let wrong_key = json!(crypto::to_base64(&vec![7u8; 32]).unwrap());
+    let refused = ask(&turtl, json!(["l4", "user:login-from-saved", user_id, wrong_key])).await;
+    assert_eq!(refused["e"], json!(1), "{}", refused);
+    assert!(!lockr!(turtl.user).logged_in);
+
+    // ...the right one logs us in again
+    let back = ask(&turtl, json!(["l5", "user:login-from-saved", user_id, key])).await;
+    assert_eq!(back["e"], json!(0), "{}", back);
+    assert_eq!(back["d"]["username"], json!("saved@test.com"));
+    assert!(lockr!(turtl.user).logged_in);
+
+    // nothing saved for someone else
+    assert_eq!(ask(&turtl, json!(["l6", "user:login-from-saved", "99", key])).await["e"], json!(1));
+}
+async_test!(saved_login_flow, saved_login());
 
 /// While `sync_start()` holds incoming syncs back, applying them waits; once the hold is released it
 /// goes through with what was queued.
@@ -605,17 +654,24 @@ mod host {
         assert_eq!(res["d"]["username"], json!("host@test.com"));
         wait_for(&inbox, |m| m.0 == "inproc://turtl-events" && m.1.contains("user:login")).await;
 
-        // with no handler, what the core sends waits for the poll functions
+        // with no handler, what the core sends waits for the poll functions. (The channels are shared
+        // with every other test that has made a Turtl, so look through what is queued for the answer
+        // and the event this ping causes rather than expecting them to be first.)
         wasm_host::set_message_handler(None);
         wasm_host::send_message(r#"["h3","ping"]"#).unwrap();
-        let mut polled = None;
+        let (mut answered, mut ponged) = (false, false);
         for _ in 0..500 {
-            polled = wasm_host::poll_message(None).unwrap();
-            if polled.is_some() { break; }
+            while let Some(message) = wasm_host::poll_message(None).unwrap() {
+                answered = answered || message == r#"{"id":"h3","e":0,"d":"pong"}"#;
+            }
+            while let Some(event) = wasm_host::poll_event().unwrap() {
+                ponged = ponged || event == r#"{"e":"pong","d":null}"#;
+            }
+            if answered && ponged { break; }
             exec::sleep(20).await;
         }
-        assert_eq!(polled.unwrap(), r#"{"id":"h3","e":0,"d":"pong"}"#);
-        assert_eq!(wasm_host::poll_event().unwrap(), Some(String::from(r#"{"e":"pong","d":null}"#)));
+        assert!(answered, "the ping's answer was queued for pollMessage()");
+        assert!(ponged, "the ping's event was queued for pollEvent()");
 
         // `app:shutdown` answers, and then there is no core any more
         let (inbox, _handler) = collect();

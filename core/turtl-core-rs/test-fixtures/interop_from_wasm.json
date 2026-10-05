@@ -1,0 +1,260 @@
+{
+  "auth": "000601000c3b284031a4e1aa0b16a1085a631b01a299945d39664a161ac73375dbbaf5426f3c4290b7c77f255bd27be27ec7c9cff1810a5261e91e54beaa3d150fbe8c9f5a02d074c7865b171cc45fb704b024812f8ecb33419447b9826b1c2f650cc660d6c89f21b2986ee753e920b376a2b407fc9075f286f0c1546e55a8d065de0536c2517540ef12676711aeb20ed35b39a301b99100474bfb88fc47680dcb",
+  "expected": {
+    "boards": [
+      "Bookmarks",
+      "Passwords",
+      "Photos"
+    ],
+    "note": {
+      "id": "01a10c429586635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0008e",
+      "space_id": "01a10c429576635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00083",
+      "text": "Zim wiki notes, encrypted end-to-end, read by the other build.",
+      "title": "Interop note"
+    },
+    "spaces": [
+      "Home",
+      "Personal",
+      "Work"
+    ]
+  },
+  "passphrase": "interoppassphrase",
+  "sync_records": [
+    {
+      "action": "add",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "body": "AAYBAAzYaUqQBcnBi1b+7MKrWX3T7o/X/kXWoUTjHHiugx7pUgCjgdU5YrqakMkqAU89QSIXYceM2WRKM8bwitj1Jj4FjNCvqZogJr67KZ2wifi/6g==",
+        "id": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007c",
+        "item_id": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007b",
+        "keys": [],
+        "type": "space",
+        "user_id": 42
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c429570635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007d",
+      "item_id": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007c",
+      "type": "keychain",
+      "user_id": 42
+    },
+    {
+      "action": "add",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "body": "AAYBAAx1B3v+mcMRMP4TP0QqAzPBfDxOZR6E3PuslotSce06DtUQQ2A7Oymf//LhYcrNWXOE7WOwJUyXWeonPpJPVmnTyjc=",
+        "id": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007b",
+        "invites": [],
+        "keys": [],
+        "members": [],
+        "user_id": 42
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c429572635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007e",
+      "item_id": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007b",
+      "type": "space",
+      "user_id": 42
+    },
+    {
+      "action": "add",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "body": "AAYBAAz1/kO9Cvxdjz/RktKY0wekGcST1lKi8Hf2UBeIUXBJBYQvsPrBNapSjgW0t+qCLnVyzqyWO9w+6RO4d7Uww0IyDdLMpNswaHNMHAbcfUz+tw==",
+        "id": "01a10c429573635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00080",
+        "item_id": "01a10c429573635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007f",
+        "keys": [],
+        "type": "space",
+        "user_id": 42
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c429574635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00081",
+      "item_id": "01a10c429573635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00080",
+      "type": "keychain",
+      "user_id": 42
+    },
+    {
+      "action": "add",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "body": "AAYBAAyh+cG/hU2Fd79KRin1MT/DmlBHORVve42/kKZE1eGWxpcbAsglqSAs9OAIrq1b9jMDYITNYo4AFyx/8ZJ5EQ==",
+        "id": "01a10c429573635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007f",
+        "invites": [],
+        "keys": [],
+        "members": [],
+        "user_id": 42
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c429575635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00082",
+      "item_id": "01a10c429573635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007f",
+      "type": "space",
+      "user_id": 42
+    },
+    {
+      "action": "add",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "body": "AAYBAAzInwjcvuaaGENA5RtTvZDSH+FcMXlM7oSfp2NxuT/p78KpJY4Pys2EM7aqIr9pcQnbnEpoMyshEz/vLYHA8Pn35fFhr4hOwDgBgwnU2qNW6A==",
+        "id": "01a10c429576635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00084",
+        "item_id": "01a10c429576635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00083",
+        "keys": [],
+        "type": "space",
+        "user_id": 42
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c429577635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00085",
+      "item_id": "01a10c429576635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00084",
+      "type": "keychain",
+      "user_id": 42
+    },
+    {
+      "action": "add",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "body": "AAYBAAzBrt4WV26ODbRDKFsuvAWqpbeTCzaiewTTdSCrnX4ugDJgVK92ljhzsLp4SOAzAvGeIgvrDvkj/RZEovCLNw==",
+        "id": "01a10c429576635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00083",
+        "invites": [],
+        "keys": [],
+        "members": [],
+        "user_id": 42
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c429579635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00086",
+      "item_id": "01a10c429576635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00083",
+      "type": "space",
+      "user_id": 42
+    },
+    {
+      "action": "add",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "body": "AAYBAAwxEPHms+mRMw4bnWzf43mjC0Bgt7Q1kdOZNC+sXQ3kO0FQXTOUwBEgi67/WxpMTabQ",
+        "id": "01a10c42957a635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00087",
+        "keys": [
+          {
+            "k": "AAYBAAxaEdF0KjY8xumVvMaZfkZXp29cRN3CdhLE8HChbxYzDGec5sYZNy5x2sKEGiK2Zyc3XTVfGHmAg4p/VI4=",
+            "s": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007b"
+          }
+        ],
+        "space_id": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007b",
+        "user_id": 42
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c42957b635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00088",
+      "item_id": "01a10c42957a635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00087",
+      "type": "board",
+      "user_id": 42
+    },
+    {
+      "action": "add",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "body": "AAYBAAzk8GDxf5zvlVNUhdJHO9LW0e6zti/up38Khb2FxtvUht52PHLOXY1CxnPSBtN4",
+        "id": "01a10c42957c635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00089",
+        "keys": [
+          {
+            "k": "AAYBAAx+nzKYZPOTwQLq5STGJ5SMAFM8lO9hPQgXsQ7NexF45T4uQ9w23ysz1YvgVw0oanarspu4n0mFPSrzt5I=",
+            "s": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007b"
+          }
+        ],
+        "space_id": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007b",
+        "user_id": 42
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c42957e635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0008a",
+      "item_id": "01a10c42957c635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00089",
+      "type": "board",
+      "user_id": 42
+    },
+    {
+      "action": "add",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "body": "AAYBAAzLjTVV2SmUn26j+LzS4veG0PYgkRTcvfFGrKhB4OR1bXLPpSdUl9n/yCMeLyZU2EjM",
+        "id": "01a10c42957f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0008b",
+        "keys": [
+          {
+            "k": "AAYBAAwywk7aTN9GgOckYxDvd3BJ1omiJkIUebVBr6ZYtIRYK0Vq6ZBtiPqU/9aV4xPaSQd33LIvzEoR+I8ykDw=",
+            "s": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007b"
+          }
+        ],
+        "space_id": "01a10c42956f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0007b",
+        "user_id": 42
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c429580635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0008c",
+      "item_id": "01a10c42957f635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0008b",
+      "type": "board",
+      "user_id": 42
+    },
+    {
+      "action": "edit",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "body": "AAYBAAz/pgpafF1dNuPD2sdNBwL4V48+weaS0LHtQcdsJ5l35rECYW2yfyfHHvSo1JO0Ruv3b9NdeVC7XEhobCLm7xAkCpDE0yrK8OMkbhsAYJCA6INT6EuobIbLLVL3fPwpQYaePT9nMB4Gir2e9TpZP4crCXstjJJ68ELSyfHILxouPj7NOpFbE1Uy3ZOFy4PfZbpfPa7mP3HRISwByoqYk8FFuYdLqtJW+W+wnciXUf8+1R86aNN01XSyuM+5jJLZEzQqFwXcTGs=",
+        "confirmed": false,
+        "id": "42",
+        "keys": [],
+        "pubkey": "I+z7B+c7mcCwAmisPf7hzZiSt5c2u4I5Mp3vacG/92M=",
+        "username": "interop@test.com"
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c429582635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0008d",
+      "item_id": "42",
+      "type": "user",
+      "user_id": 42
+    },
+    {
+      "action": "add",
+      "blocked": false,
+      "body": null,
+      "data": {
+        "board_id": null,
+        "body": "AAYBAAyBgIGTeqHNuRNH6O3xZLw2Ov3entJzToOSzRgXIoZGpMSIXcd7+dl7SapbIaUTvYc3DNyWWBYO1J8yE+4IPhyK6aFxft/lN6fol7Zrk8W8nWRz0Y8u5Axh3VBDDojLAKWxgRiMNhG7t/UzlQxxwGmSFB7FhON89ZO4CRBp9Vp19+r/V2PGjj2/wK8vq6a9UX6UKKABTIjaIOQvPS/q",
+        "has_file": false,
+        "id": "01a10c429586635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0008e",
+        "keys": [
+          {
+            "k": "AAYBAAwDioqBApB3B4T/fyhOk2KuWCdmR1JQimvRa64l8nPFd56vSxXH6KBRkZjzbaNvbEHOB3H+eml/leDQZ/Q=",
+            "s": "01a10c429576635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00083"
+          }
+        ],
+        "mod": 1791207052,
+        "space_id": "01a10c429576635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a00083",
+        "user_id": 42
+      },
+      "errcount": 0,
+      "frozen": false,
+      "id": "01a10c42958b635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0008f",
+      "item_id": "01a10c429586635f5592213480d33330d655e602ffab7d01aa2fa87c4bbc3ee74a6927e552a0008e",
+      "type": "note",
+      "user_id": 42
+    }
+  ],
+  "user": {
+    "body": "AAYBAAwg1ijay+zNUaJSsLrVCXeEtjyQ+fu+JwvliPE52230VngNi77FN1jrXdinIOE0q7mvvXUnbV2C/cl8DUORshOv3ZflKnntSVrugkBAHg9Efm5Pa9BBnA==",
+    "confirmed": false,
+    "id": "42",
+    "pubkey": "I+z7B+c7mcCwAmisPf7hzZiSt5c2u4I5Mp3vacG/92M=",
+    "username": "interop@test.com"
+  },
+  "username": "interop@test.com"
+}

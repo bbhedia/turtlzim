@@ -86,6 +86,8 @@ mod turtl;
 mod wasm_host;
 #[cfg(test)]
 mod flow_tests;
+#[cfg(test)]
+mod interop_tests;
 
 #[cfg(not(target_arch = "wasm32"))]
 use ::std::thread;
