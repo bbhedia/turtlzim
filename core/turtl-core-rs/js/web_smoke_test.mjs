@@ -17,7 +17,12 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import sodium from 'libsodium-wrappers-sumo';
-import init, { initWasmCrypto, cryptoSelfTest } from '../pkg/turtl_core.js';
+import init, {
+    initWasmCrypto, cryptoSelfTest,
+    initCore, startCore, stopCore, sendMessage, setMessageHandler, pollMessage, pollEvent,
+} from '../pkg/turtl_core.js';
+// the stand-in Turtl server the wasm tests use (CommonJS, so this is its module.exports)
+import testSupport from './test_support.js';
 
 const pkg = new URL('../pkg/', import.meta.url);
 
@@ -56,6 +61,55 @@ assert.match(cryptoSelfTest(), /passed/);
 // 7. ...and initialising again with a good object is harmless.
 await initWasmCrypto(sodium);
 assert.match(cryptoSelfTest(), /passed/);
+
+// 8. The host API (src/wasm_host.rs): run the core as a service, the way a web app would, with the
+//    stand-in server playing the Turtl API. Nothing here is available before libsodium is injected
+//    and the core configured and started.
+assert.throws(() => sendMessage('["x","ping"]'), /isn't started/);
+const port = await testSupport.startFlowServer();
+initCore(JSON.stringify({ api: { endpoint: `http://127.0.0.1:${port}` }, logging: { level: 'error' } }));
+const received = [];
+setMessageHandler((channel, message) => received.push({ channel, message }));
+startCore();
+assert.throws(() => startCore(), /already started/);
+
+const waitFor = async (what, predicate) => {
+    for (let i = 0; i < 1000; i++) {
+        const found = received.find(predicate);
+        if (found) return found;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.fail(`the core never sent ${what}; it sent ${JSON.stringify(received)}`);
+};
+
+await waitFor('its ready event', (m) => m.channel === 'inproc://turtl-events' && m.message === '{"e":"messaging:ready","d":true}');
+
+// a message in, its answer out, in the JSON every platform uses
+sendMessage(JSON.stringify(['s1', 'ping']));
+const pong = await waitFor('the answer to s1', (m) => m.message.includes('"id":"s1"'));
+assert.equal(pong.channel, 'inproc://turtl-req-core-out');
+assert.equal(pong.message, '{"id":"s1","e":0,"d":"pong"}');
+
+// joining goes through crypto, the API (fetch, to the stand-in server) and storage
+sendMessage(JSON.stringify(['s2', 'user:join', 'smoke@test.com', 'smokepassphrase']));
+const joined = JSON.parse((await waitFor('the answer to s2', (m) => m.message.includes('"id":"s2"'))).message);
+assert.equal(joined.e, 0, JSON.stringify(joined));
+assert.equal(joined.d.username, 'smoke@test.com');
+
+// without a handler the same messages wait for the poll functions
+setMessageHandler(null);
+sendMessage(JSON.stringify(['s3', 'ping']));
+let polled;
+for (let i = 0; i < 1000 && polled === undefined; i++) {
+    polled = pollMessage();
+    if (polled === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+}
+assert.equal(polled, '{"id":"s3","e":0,"d":"pong"}');
+assert.equal(pollEvent(), '{"e":"pong","d":null}');
+
+stopCore();
+assert.throws(() => sendMessage('["s4","ping"]'), /isn't started/);
+testSupport.stopServer();
 
 console.log(report);
 console.log('web smoke test OK');

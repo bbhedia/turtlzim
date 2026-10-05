@@ -56,6 +56,7 @@ pub struct Event {
 
 pub struct Messenger {
     /// Whether we're bound or not. Kind of vestigial
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     bound: bool,
 
     /// The channel we're listening to
@@ -107,11 +108,11 @@ impl Messenger {
         };
         let msg = jedi::stringify(&event)?;
         trace!("messaging: event: {} ({})", channel, msg.len());
-        carrier::send_string(channel.as_str(), msg)
-            .map_err(|e| From::from(e))
+        deliver(channel.as_str(), msg)
     }
 
-    /// Blocking receive
+    /// Blocking receive (only the native message loop does this)
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn recv(&self) -> TResult<String> {
         let bytes = carrier::recv(&self.channel_in[..])?;
         trace!("messaging: recv: {} ({})", self.channel_in, bytes.len());
@@ -134,33 +135,60 @@ impl Messenger {
     /// Send a message out
     pub fn send(&self, msg: String) -> TResult<()> {
         trace!("messaging: send: {} ({})", self.channel_out, msg.len());
-        carrier::send_string(self.channel_out.as_str(), msg)
-            .map_err(|e| From::from(e))
+        deliver(self.channel_out.as_str(), msg)
     }
 
     /// Send a message on the out channel, but suffix the channel
     pub fn send_suffix(&self, suffix: String, msg: String) -> TResult<()> {
         trace!("messaging: send_suffix: {}:{} ({})", self.channel_out, suffix, msg.len());
-        carrier::send_string(format!("{}:{}", &self.channel_out, suffix).as_str(), msg)
-            .map_err(|e| From::from(e))
+        deliver(format!("{}:{}", &self.channel_out, suffix).as_str(), msg)
     }
 
     /// Send a message out on the in channel
     pub fn send_rev(&self, msg: String) -> TResult<()> {
         trace!("messaging: send_rev: {}", msg.len());
-        carrier::send_string(&self.channel_in[..], msg)
-            .map_err(|e| From::from(e))
+        inbound(&self.channel_in[..], msg)
     }
 
     /// Shutdown the bound/connected socket endpoint
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn shutdown(&mut self) {
         self.bound = false;
     }
 
     /// Are we bound/connected?
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn is_bound(&self) -> bool {
         self.bound
     }
+}
+
+/// Hand a message we are sending out to whoever is listening on `channel`. Natively that is a carrier
+/// channel the host reads from; on wasm32 it is the host's message handler, if it registered one
+/// (and the same channel otherwise), see wasm_host.rs.
+fn deliver(channel: &str, msg: String) -> TResult<()> {
+    #[cfg(target_arch = "wasm32")]
+    let msg = match crate::wasm_host::offer_to_handler(channel, msg) {
+        Some(msg) => msg,
+        None => return Ok(()),
+    };
+    carrier::send_string(channel, msg)
+        .map_err(|e| From::from(e))
+}
+
+/// Send a message to our own dispatcher: natively, through the channel our message loop reads
+/// (`messaging::start()`); on wasm32 there is no loop, so with a core started it becomes a task right
+/// away. (With none started, or on a `Turtl` made without one, it waits on the channel, which is what
+/// natively happens when nobody is reading it either.)
+fn inbound(channel: &str, msg: String) -> TResult<()> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if crate::wasm_host::is_started() {
+            return crate::wasm_host::dispatch_inbound(msg);
+        }
+    }
+    carrier::send_string(channel, msg)
+        .map_err(|e| From::from(e))
 }
 
 /// Defines our callback type for the messaging system.
@@ -179,7 +207,8 @@ impl<F: FnOnce(&mut Messenger) + Send + 'static> MsgThunk for F {
 
 /// Start the messaging system. Essentially does a blocking poll on incoming
 /// messages, running the given callback for each one, until the thread gets the
-/// "ok, quit!" message.
+/// "ok, quit!" message. (Native only: the wasm32 build has no thread to block, see wasm_host.rs.)
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start<F>(process: F) -> TResult<()>
     where F: Fn(String) + Send + Sync + 'static
 {
@@ -207,7 +236,12 @@ pub fn start<F>(process: F) -> TResult<()>
 }
 
 /// Call any time to send the "quit" message to the messaging system, which
-/// breaks out of its eternal loop.
+/// breaks out of its eternal loop. (On wasm32 there is no loop: this lets go of the core.)
+#[cfg(target_arch = "wasm32")]
+pub fn stop() {
+    crate::wasm_host::stop();
+}
+#[cfg(not(target_arch = "wasm32"))]
 pub fn stop() {
     let messenger = Messenger::new();
     // send out a shutdown signal on the *incoming* channel so the messaging

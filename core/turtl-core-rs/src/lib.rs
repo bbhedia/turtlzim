@@ -80,19 +80,36 @@ mod search;
 mod dispatch;
 mod schema;
 mod turtl;
+// How a JS host runs the core on wasm32: the replacement for the thread-based `start()`, the
+// channel-reading `recv()`s and the C API below, which are native only.
+#[cfg(target_arch = "wasm32")]
+mod wasm_host;
 #[cfg(test)]
 mod flow_tests;
 
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::thread;
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::env;
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use ::jedi::Value;
 use crate::error::TResult;
 #[cfg(not(target_arch = "wasm32"))]
 use ::fs2::FileExt;
 
+/// Init any state/logging/etc the app needs. (On wasm32 there is no config file to read or data
+/// folder to create: see `wasm_host::init`.)
+#[cfg(target_arch = "wasm32")]
+pub fn init(config_str: String) -> TResult<()> {
+    wasm_host::init(&config_str)
+}
+
 /// Init any state/logging/etc the app needs
+#[cfg(not(target_arch = "wasm32"))]
 pub fn init(config_str: String) -> TResult<()> {
     log_panics::init();
     let runtime_config: Value = match jedi::parse(&config_str) {
@@ -169,14 +186,6 @@ fn acquire_lockfile(data_folder: &String) -> TResult<Option<fs::File>> {
         Ok(None)
     }
 }
-/// TODO(wasm): no real filesystem (let alone advisory file locking) on wasm32-unknown-unknown --
-/// the single-instance-per-data-dir guard the native lockfile provides doesn't apply there (no
-/// shared on-disk data dir to race over between processes in a browser tab/worker anyway).
-#[cfg(target_arch = "wasm32")]
-fn acquire_lockfile(_data_folder: &String) -> TResult<Option<fs::File>> {
-    Ok(None)
-}
-
 /// Start our app...spawns all our worker/helper threads, including our comm
 /// system that listens for external messages.
 ///
@@ -188,6 +197,10 @@ fn acquire_lockfile(_data_folder: &String) -> TResult<Option<fs::File>> {
 /// NOTE: we copy the runtime config into our main config, overwriting any of
 /// those keys that exist in the config.yaml (app config). this gives the entire
 /// app access to our runtime config.
+///
+/// (Native only. On wasm32 there is no thread to run this loop on: the host calls
+/// `startCore()` and `sendMessage()`, see wasm_host.rs.)
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start() -> thread::JoinHandle<()> {
     info!("main::start() -- begin");
     let handle = thread::Builder::new().name(String::from("turtl-main")).spawn(move || {
@@ -235,12 +248,20 @@ pub fn start() -> thread::JoinHandle<()> {
 }
 
 /// Send a message into turtl's dispatcher
+#[cfg(not(target_arch = "wasm32"))]
 pub fn send(msg: String) -> TResult<()> {
     let channel: String = format!("{}-core-in", config::get::<String>(&["messaging", "reqres"])?);
     carrier::send_string(channel.as_str(), msg)?;
     Ok(())
 }
 
+/// Send a message into turtl's dispatcher (it runs as a task of its own)
+#[cfg(target_arch = "wasm32")]
+pub fn send(msg: String) -> TResult<()> {
+    wasm_host::dispatch_inbound(msg)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn recv_impl(event: bool, msg_id: Option<&str>) -> TResult<String> {
     let chan_switch = if event { "events" } else { "reqres" };
     let chan_cfg: String = config::get(&["messaging", chan_switch])?;
@@ -278,12 +299,14 @@ fn recv_nb_impl(event: bool, msg_id: Option<&str>) -> TResult<Option<String>> {
     };
     Ok(mapped)
 }
-/// Receive a turtl message (blocking)
+/// Receive a turtl message (blocking; native only: wasm32 can't block, see `recv_nb()`)
+#[cfg(not(target_arch = "wasm32"))]
 pub fn recv(msg_id: Option<&str>) -> TResult<String> {
     recv_impl(false, msg_id)
 }
 
-/// Receive a turtl event (blocking)
+/// Receive a turtl event (blocking; native only: wasm32 can't block, see `recv_event_nb()`)
+#[cfg(not(target_arch = "wasm32"))]
 pub fn recv_event() -> TResult<String> {
     recv_impl(true, None)
 }
@@ -299,8 +322,9 @@ pub fn recv_event_nb() -> TResult<Option<String>> {
 }
 
 // -----------------------------------------------------------------------------
-// our C api
+// our C api (native only: a wasm32 host uses the exports in wasm_host.rs)
 // -----------------------------------------------------------------------------
+#[cfg(not(target_arch = "wasm32"))]
 pub mod c_api {
     use super::*;
     use ::std::os::raw::c_char;

@@ -185,40 +185,10 @@ async fn requests(server: &Server) -> Vec<String> {
 // setup
 // ---------------------------------------------------------------------------------------------
 
-/// Natively the config is the repo's config.yaml (loaded the way every other test of ours does).
-#[cfg(not(target_arch = "wasm32"))]
+/// The config is whatever `init()` makes of it: natively the repo's config.yaml (the way every other
+/// test of ours does it), on wasm32 the built-in defaults.
 fn init_config() {
     crate::init(String::from("{}")).unwrap();
-}
-
-/// On wasm32 there is no config file to load, so the values the flows read are set here: the same
-/// ones config.yaml has.
-#[cfg(target_arch = "wasm32")]
-fn init_config() {
-    ::config::load_config(Some(String::from(":null:"))).unwrap();
-    ::config::merge(&json!({
-        "wrap_errors": false,
-        "data_folder": ":memory:",
-        "integration_tests": {"data_folder": ":memory:"},
-        "messaging": {
-            "reqres": "inproc://turtl-req",
-            "events": "inproc://turtl-events",
-            "reqres_append_mid": false,
-        },
-        "api": {
-            "endpoint": "http://127.0.0.1:1",
-            "client_version_string": "core",
-            "proxy": null,
-            "allow_invalid_ssl": false,
-        },
-        "sync": {
-            "enable_incoming": true,
-            "enable_outgoing": true,
-            "enable_files_incoming": true,
-            "enable_files_outgoing": true,
-            "poll_timeout": 25,
-        },
-    })).unwrap();
 }
 
 /// A fresh Turtl that talks to `server`.
@@ -568,3 +538,91 @@ async fn change_password() {
     assert!(lockr!(turtl.user).privkey.is_some());
 }
 async_test!(change_password_flow, change_password());
+
+/// What a JS host sees of the core on wasm32 (wasm_host.rs): everything the core sends goes to the
+/// message handler, the same JSON as on native; without a handler it queues up for the poll
+/// functions; and the core can be stopped. Driven here the way a host would drive it.
+#[cfg(target_arch = "wasm32")]
+mod host {
+    use super::*;
+    use ::std::cell::RefCell;
+    use ::std::rc::Rc;
+    use ::wasm_bindgen::closure::Closure;
+    use ::wasm_bindgen::JsCast;
+    use crate::wasm_host;
+
+    /// What the handler has been given so far: (channel, message).
+    type Inbox = Rc<RefCell<Vec<(String, String)>>>;
+
+    /// Register a handler that collects what the core sends. Keep the closure alive while it's registered.
+    fn collect() -> (Inbox, Closure<dyn FnMut(String, String)>) {
+        let inbox: Inbox = Rc::new(RefCell::new(Vec::new()));
+        let inbox_in_handler = inbox.clone();
+        let closure = Closure::wrap(Box::new(move |channel: String, message: String| {
+            inbox_in_handler.borrow_mut().push((channel, message));
+        }) as Box<dyn FnMut(String, String)>);
+        wasm_host::set_message_handler(Some(closure.as_ref().unchecked_ref::<::js_sys::Function>().clone()));
+        (inbox, closure)
+    }
+
+    /// The first message in `inbox` that `wanted` likes (waiting for it to arrive, if need be).
+    async fn wait_for<F: Fn(&(String, String)) -> bool>(inbox: &Inbox, wanted: F) -> (String, String) {
+        for _ in 0..500 {
+            let found = inbox.borrow().iter().find(|m| wanted(m)).cloned();
+            if let Some(found) = found {
+                return found;
+            }
+            exec::sleep(20).await;
+        }
+        panic!("the core never sent what was expected; it sent: {:?}", inbox.borrow());
+    }
+
+    async fn host_api() {
+        let server = start_server().await;
+
+        // before the core is started there is nobody to take a message
+        assert!(wasm_host::send_message(r#"["h0","ping"]"#).is_err());
+
+        let config = json!({"api": {"endpoint": server.url}, "logging": {"level": "error"}});
+        wasm_host::init_core(&config.to_string()).unwrap();
+        let (inbox, _handler) = collect();
+        wasm_host::start_core().unwrap();
+        assert!(wasm_host::start_core().is_err(), "the core can only be started once");
+        wait_for(&inbox, |m| m.0 == "inproc://turtl-events" && m.1 == r#"{"e":"messaging:ready","d":true}"#).await;
+
+        // a message in, its response out, on the channel and in the JSON native uses
+        wasm_host::send_message(r#"["h1","ping"]"#).unwrap();
+        let (channel, message) = wait_for(&inbox, |m| m.1.contains(r#""id":"h1""#)).await;
+        assert_eq!(channel, "inproc://turtl-req-core-out");
+        assert_eq!(message, r#"{"id":"h1","e":0,"d":"pong"}"#);
+
+        // a command that goes through the whole stack (crypto, the API, storage), configured through
+        // the config we gave initCore
+        wasm_host::send_message(&json!(["h2", "user:join", "Host@Test.com", "hostpassphrase"]).to_string()).unwrap();
+        let (_, message) = wait_for(&inbox, |m| m.1.contains(r#""id":"h2""#)).await;
+        let res: Value = jedi::parse(&message).unwrap();
+        assert_eq!(res["e"], json!(0), "{}", message);
+        assert_eq!(res["d"]["username"], json!("host@test.com"));
+        wait_for(&inbox, |m| m.0 == "inproc://turtl-events" && m.1.contains("user:login")).await;
+
+        // with no handler, what the core sends waits for the poll functions
+        wasm_host::set_message_handler(None);
+        wasm_host::send_message(r#"["h3","ping"]"#).unwrap();
+        let mut polled = None;
+        for _ in 0..500 {
+            polled = wasm_host::poll_message(None).unwrap();
+            if polled.is_some() { break; }
+            exec::sleep(20).await;
+        }
+        assert_eq!(polled.unwrap(), r#"{"id":"h3","e":0,"d":"pong"}"#);
+        assert_eq!(wasm_host::poll_event().unwrap(), Some(String::from(r#"{"e":"pong","d":null}"#)));
+
+        // `app:shutdown` answers, and then there is no core any more
+        let (inbox, _handler) = collect();
+        wasm_host::send_message(r#"["h4","app:shutdown"]"#).unwrap();
+        wait_for(&inbox, |m| m.1.contains(r#""id":"h4""#)).await;
+        assert!(wasm_host::send_message(r#"["h5","ping"]"#).is_err());
+        wasm_host::set_message_handler(None);
+    }
+    async_test!(host_api_flow, host_api());
+}

@@ -669,15 +669,64 @@ Networking and concurrency are unified on async/await across both native and web
         `cargo build --release --features sqlite-static`; the production `--target web` build (3.29 MB)
         and its smoke test.
 
-        **Still open for 4b-3 and later** (found, not fixed here): `lib.rs::start()` is still the
-        native thread plus the blocking `carrier::recv` loop, so wasm has no message entry point yet
+        **Still open when 4b-2c was done** (4b-3 below resolved all but the filesystem item):
+        `lib.rs::start()` is still the native thread plus the blocking `carrier::recv` loop, so wasm has no message entry point yet
         (4b-3: push messages in, `spawn_local` the `process` call); `Thredder` is still the
         synchronous-inline placeholder on wasm; `init()` reads a config *file* (the wasm tests set the
         config by hand with `load_config(":null:")` + `merge`); anything that uses the filesystem
         (`wipe_*`, `save_login`/`restore_login`, attachments) is native-only until 4b-5b;
         `util/logger.rs` calls `time::now()`, which panics on wasm32.
-- [ ] Step 4b-3: the real single-threaded-async concurrency rewrite (2.4) replacing `Thredder`'s
-      synchronous-inline placeholder.
+- [x] Step 4b-3: the core as a service in a JS host (decision 2.4) -- **done (2026-10-05).** With
+      4b-2 the networking, the sync engine and the dispatcher were already tasks that `spawn_local`
+      can run, so what was left of "the concurrency rewrite" was the entry point: native's `start()`
+      is a thread plus a blocking `carrier::recv` loop, which wasm32 cannot have. New
+      `src/wasm_host.rs` is the wasm32 counterpart, with the **same wire protocol** (the
+      `["<id>", "<command>", args..]` messages in, the `{id, e, d}` responses and `{e, d}` events out,
+      on the same channel names), so the UI above it cannot tell the targets apart. The exports, in the
+      order a host calls them (see the module docs for the contract):
+
+      ```text
+      await init({ module_or_path })   // wasm-bindgen's own loader
+      await initWasmCrypto(sodium)     // libsodium.js injected (decision 2.1)
+      initCore(configJson)             // built-in defaults, with the host's runtime config laid over them
+      setMessageHandler((channel, message) => ..)
+      startCore()                      // the core announces itself with the `messaging:ready` event
+      sendMessage('["1","user:login","me@example.com","passphrase"]')
+      stopCore()                       // or the `app:shutdown` command
+      ```
+
+      * **Transport.** Every message the core sends is handed to the registered handler as
+        `(channel, message)` (`messaging::deliver`); every message the host sends becomes a task on
+        the host's event loop (`spawn_local` of `dispatch::process`) instead of being read off a
+        channel by a loop, and so do the core's own app events (`messaging::inbound`). With no
+        handler registered, outgoing messages queue on the same in-process channels native uses and
+        `pollMessage(msgId?)` / `pollEvent()` read them without blocking (native's `recv_nb` /
+        `recv_event_nb`). Messages sent before `startCore()` are an error for the host, while a
+        `Turtl` made directly (tests, embedders) keeps working: its app events just queue, as on native.
+      * **Config and logging.** `crate::init` on wasm32 builds the config from a built-in JSON default
+        (the config.yaml keys, with `data_folder` `:memory:` until 4b-5b, and the file syncers off)
+        plus the host's runtime config, so no file is read; logging goes to the JS console at
+        `logging.level` (default `warn`; `time::now()` and stdout don't work on this target). Native-only
+        now, and compiled out: `start()`, the blocking `recv()`/`recv_event()`, the C API, the
+        data-folder lockfile and the log-file rotation.
+      * **`Thredder` stays inline on wasm32, on purpose.** Decision 2.4 puts the whole core in one
+        Worker, where nothing runs in parallel anyway: CPU work (decrypting, scrypt) running inline
+        costs the page nothing, because the page is not the thread running it. If it ever shows up as
+        jank in the Worker's own responsiveness, the lever is a second Worker, not a pool.
+
+      **Verified:** a wasm-bindgen test (`flow_tests::host`) drives the exports like a host would: the
+      ready event, a ping answered on `inproc://turtl-req-core-out` with the exact native JSON, a
+      `user:join` through crypto, `fetch` to the stand-in server and storage, the poll functions
+      with no handler, `app:shutdown` and "not started" errors; and `js/web_smoke_test.mjs` now runs
+      the same through the **production `--target web` package** from Node (3.17 MB). The package's
+      JS surface is nine functions: `initCore`, `startCore`, `stopCore`, `sendMessage`,
+      `setMessageHandler`, `pollMessage`, `pollEvent`, `initWasmCrypto`, `cryptoSelfTest`. The tests
+      that make a `Turtl` directly now also run through the real `crate::init` on wasm32. Native
+      `turtl_core` 80/80 (`dumpy` 6, `clouseau` 3, `jedi` 3), wasm32 48/48.
+
+      **Left for later:** hosting the module in a dedicated Worker, with a `postMessage` bridge to the
+      page, is the host's code (and arrives with OPFS persistence in 4b-5b, which needs the Worker
+      anyway); the filesystem-bound features stay native-only until then.
 - [x] Step 4b-4 (`wasm-pack build --target web`, with libsodium injected) -- **done**
       (2026-10-05), following the "inject libsodium" refinement under decision 2.1. New
       `src/crypto/wasm_sodium.rs` holds the whole mechanism: typed wasm-bindgen bindings for the ten
