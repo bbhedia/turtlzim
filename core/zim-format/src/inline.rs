@@ -66,7 +66,9 @@ pub struct Image {
     pub path: String,
     /// Ordered, opaque query parameters (after `?`, `&`-separated).
     /// `None` value means the token had no `=` (a bare flag token).
-    /// Stored raw/un-decoded, including any percent-encoding.
+    /// Stored raw/un-decoded, including any percent-encoding. Empty exactly
+    /// when the image has no `?`; a bare trailing `?` (`{{pic.png?}}`) is one
+    /// empty token, so the `?` survives a round trip.
     pub query: Vec<(String, Option<String>)>,
     /// Raw alt/label text after a trailing `|`, if present.
     pub alt: Option<String>,
@@ -389,10 +391,11 @@ fn find_close(haystack: &str, close: &str) -> Option<usize> {
     None
 }
 
+/// Split the text after an image's `?` into its tokens. Only called when a `?`
+/// is present, so an empty `qs` (`{{pic.png?}}`) is one empty token rather than
+/// "no query": the renderer writes the `?` back exactly when `query` is
+/// non-empty, and `{{pic.png?}}` must not lose its `?`.
 fn parse_query(qs: &str) -> Vec<(String, Option<String>)> {
-    if qs.is_empty() {
-        return Vec::new();
-    }
     qs.split('&')
         .map(|tok| match tok.find('=') {
             Some(p) => (tok[..p].to_string(), Some(tok[p + 1..].to_string())),

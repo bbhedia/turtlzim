@@ -133,5 +133,14 @@ node js/browser_test.mjs
 cargo build --release --features sqlite-static
 ```
 
+The Zim format crate (`core/zim-format`, a separate workspace from `core/turtl-core-rs`) runs from the
+repository root:
+
+```bash
+cargo test -p zim-format       # fixtures, regression tests, and the corpus-free fuzz tests (~20 s unoptimized)
+scripts/zim-golden.sh          # byte-identical round trips on real Zim pages (clones Zim into ~/.cache once)
+cargo build -p zim-format --target wasm32-unknown-unknown --release   # it has no dependencies; this just proves it
+```
+
 `TURTL_WRITE_FIXTURES=1` on a native or wasm test run regenerates that target's interoperability
 fixture in `test-fixtures/` (see `src/interop_tests.rs`); leave it unset otherwise.

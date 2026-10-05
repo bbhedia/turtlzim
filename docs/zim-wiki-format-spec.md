@@ -117,6 +117,14 @@ raw content, no inline markup parsing at all
 - Content lines have the block's base indent stripped for storage and re-added verbatim
   (including each line's own *extra* indentation beyond the base) on serialize. No inline
   markup is parsed inside — the raw text is stored as-is.
+- A content line with **fewer** leading tabs than the base indent (an empty line inside an
+  indented block is the everyday case: real notebooks have them) has nothing to strip. It must
+  come back with exactly the tabs it had — never padded to the base indent — so the parsed block
+  records which lines were short (`Verbatim::under_indented`).
+- An opening fence that never finds its closing line makes the block run to the end of the page
+  (`closed == false`), the same way an unterminated fenced block does in CommonMark. This is the
+  lossless choice; it is also what a live editor sees between typing the opening fence and the
+  closing one.
 
 ### 2.5 Horizontal rule
 
@@ -210,6 +218,8 @@ case-insensitive for matching purposes but store the original casing for round-t
   `height`, `width`, `href` (makes the image also a link), and values may be percent-encoded
   (e.g. `%3A` for `:`) — store the raw encoded string, don't decode/re-encode it ourselves.
   Unknown keys must still round-trip (store as opaque key/value pairs, not a fixed struct).
+  A `?` with nothing after it (`{{pic.png?}}`) is a query consisting of one empty token, so that
+  the `?` survives; "no query" means no `?` at all.
 - Optional trailing `|Alt text` sets the alt/label text, same pipe convention as links.
 - A `type=` param (e.g. `?type=equation`) selects a richer embed kind in real Zim (backed by
   a plugin). v1 treats this the same as any other query param — store it, don't act on it.
@@ -234,3 +244,31 @@ bytes -> parse() -> AST -> serialize() -> bytes
 must reproduce the exact original bytes. Fixtures are original test files we author
 ourselves (not copied from any Zim repository) covering each row of §2 and §3, plus a
 combined "everything at once" fixture exercising nesting and adjacency edge cases.
+
+### 4.1 Verification status (2026-10-05)
+
+Fixtures we author only test what we thought of, so three further checks stand behind the
+requirement (all in `core/zim-format/tests/`):
+
+| Check | What it covers | How to run |
+|---|---|---|
+| `golden_real_notebooks.rs` | **Real pages**: every `*.txt` below `ZIM_GOLDEN_DIR` must round-trip byte for byte, and `parse(serialize(parse(t))) == parse(t)`; the same for ~16,000 damaged variants of those pages (cut off after or inside any line, any line dropped, any line doubled). Prints a census of what the pages contain. The pages are never copied into this repo (Zim is GPLv2). | `scripts/zim-golden.sh` (shallow-clones Zim into `~/.cache/turtlzim-labs/` once; or pass your own notebook directories) |
+| `fuzz_roundtrip.rs` | **Arbitrary text**: 80,000 fixed-seed random strings of format punctuation (shrunk to a minimal case on failure), every prefix and suffix of a page using every construct, every single line dropped or doubled, and inline-level round trips. Needs no corpus. | `cargo test -p zim-format` |
+| unit/regression files | the constructs of §2 and §3, plus a regression test for each bug the two checks above found | `cargo test -p zim-format` |
+
+Result on Zim's own repository (the user manual, a real 81-page notebook, its website pages,
+its format test pages and templates): 96 of 96 UTF-8 pages round-trip byte for byte. The one
+page that is not UTF-8 (`tests/data/non-utf8.txt`) cannot reach `parse(&str)` at all; the layer
+that reads notebook files must refuse it, or repair it visibly, and never convert and write back.
+A byte-order mark round-trips as ordinary text of the first line (so headers on such a page are
+not recognized: strip the mark in the file layer and write it back).
+
+Bugs these checks found on their first run, both fixed: an indented verbatim block gained tabs on
+its short or empty lines (§2.4, found on a real Zim test page), and `{{pic.png?}}` lost its `?`
+(§3.5, found by the fuzzer).
+
+Known limits: tables and `{{{object}}}` blocks stay opaque (§2.6; 16 lines in the whole Zim
+corpus), and the inline matcher is quadratic in the length of a *single block* when that block
+holds thousands of unmatched openers (e.g. 100 KB of `^{` takes tens of seconds). Blocks are
+parsed one at a time and no real page looks like that; `fuzz_roundtrip.rs` pins that nothing is
+worse than quadratic.

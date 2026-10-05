@@ -131,6 +131,15 @@ pub struct Verbatim {
     /// `false` only for a malformed/unterminated block that ran to end of
     /// input without finding a matching closing `'''` line.
     pub closed: bool,
+    /// Content lines that start with fewer tabs than `indent`, as
+    /// `(index into content_lines, tabs the line really had)`, ascending by
+    /// index. An empty line inside an indented block is the usual case (code
+    /// samples have them); real Zim notebooks contain it. Such a line has
+    /// nothing to strip, so without this record the serializer would add
+    /// `indent` tabs to it and the file would change on save. Every line not
+    /// listed here had at least `indent` tabs. Leave empty when building a
+    /// block by hand.
+    pub under_indented: Vec<(usize, usize)>,
 }
 
 /// A horizontal rule: a bare line of `-` characters (spec §2.5).
@@ -170,6 +179,22 @@ fn strip_leading_tabs(line: &str, n: usize) -> (&str, usize) {
         idx += c.len_utf8();
     }
     (&line[idx..], count)
+}
+
+/// Split the lines between a verbatim block's fences into their stored form:
+/// the text left after stripping up to `indent` tabs, plus the record of the
+/// lines that had fewer tabs than that (see [`Verbatim::under_indented`]).
+fn split_verbatim_content(lines: &[&str], indent: usize) -> (Vec<String>, Vec<(usize, usize)>) {
+    let mut content = Vec::with_capacity(lines.len());
+    let mut under_indented = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let (rest, stripped) = strip_leading_tabs(line, indent);
+        if stripped < indent {
+            under_indented.push((i, stripped));
+        }
+        content.push(rest.to_string());
+    }
+    (content, under_indented)
 }
 
 fn is_blank(line: &str) -> bool {
@@ -351,26 +376,24 @@ pub fn parse_blocks(lines: &[&str]) -> Vec<Block> {
         if let Some(indent) = is_verbatim_start(line) {
             match find_block_end(lines, i, indent, "'''") {
                 Some(end) => {
-                    let content_lines = lines[i + 1..end]
-                        .iter()
-                        .map(|l| strip_leading_tabs(l, indent).0.to_string())
-                        .collect();
+                    let (content_lines, under_indented) =
+                        split_verbatim_content(&lines[i + 1..end], indent);
                     blocks.push(Block::Verbatim(Verbatim {
                         indent,
                         content_lines,
                         closed: true,
+                        under_indented,
                     }));
                     i = end + 1;
                 }
                 None => {
-                    let content_lines = lines[i + 1..]
-                        .iter()
-                        .map(|l| strip_leading_tabs(l, indent).0.to_string())
-                        .collect();
+                    let (content_lines, under_indented) =
+                        split_verbatim_content(&lines[i + 1..], indent);
                     blocks.push(Block::Verbatim(Verbatim {
                         indent,
                         content_lines,
                         closed: false,
+                        under_indented,
                     }));
                     i = lines.len();
                 }
@@ -489,8 +512,12 @@ fn render_block(b: &Block, lines: &mut Vec<String>) {
         Block::Verbatim(v) => {
             let tabs = "\t".repeat(v.indent);
             lines.push(format!("{tabs}'''"));
-            for l in &v.content_lines {
-                lines.push(format!("{tabs}{l}"));
+            let mut short = v.under_indented.iter().peekable();
+            for (i, l) in v.content_lines.iter().enumerate() {
+                match short.next_if(|&&(at, _)| at == i) {
+                    Some(&(_, own_tabs)) => lines.push(format!("{}{l}", "\t".repeat(own_tabs))),
+                    None => lines.push(format!("{tabs}{l}")),
+                }
             }
             if v.closed {
                 lines.push(format!("{tabs}'''"));

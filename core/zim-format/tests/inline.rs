@@ -201,3 +201,26 @@ fn unused_helper_is_exercised() {
     let spans = paragraph_spans("**a //b// c**\n");
     assert_eq!(count_matching(&spans, |s| matches!(s, Inline::Italic(_))), 1);
 }
+
+// `{{pic.png?}}` has a `?` and nothing after it. That is a query of one empty token, not "no
+// query": treating it as none dropped the `?` on serialize. (Found by `fuzz_roundtrip`.)
+#[test]
+fn image_with_a_bare_question_mark_keeps_it() {
+    for input in ["{{pic.png?}}", "{{pic.png?|alt text}}", "see {{?}} and {{a?}}.", "{{{?}}}"] {
+        assert_roundtrip(input);
+    }
+
+    let spans = paragraph_spans("{{pic.png?}}");
+    let [Inline::Image(im)] = &spans[..] else {
+        panic!("expected one image, got {spans:?}");
+    };
+    assert_eq!(im.path, "pic.png");
+    assert_eq!(im.query, vec![(String::new(), None)]);
+
+    // No `?` at all stays "no query".
+    let spans = paragraph_spans("{{pic.png}}");
+    let [Inline::Image(im)] = &spans[..] else {
+        panic!("expected one image, got {spans:?}");
+    };
+    assert!(im.query.is_empty());
+}

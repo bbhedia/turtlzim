@@ -134,8 +134,10 @@ docker compose up                   # Postgres + server (define compose file)
   across an `.await` (a contended std lock panics on wasm32, where all tasks share one thread; see
   `core/turtl-core-rs/src/util/exec.rs`). Test async code with `async_test!` so one scenario runs
   natively and on wasm32.
-- Zim `.txt` round-trips must be byte-identical (write a golden-file test against real Zim
-  notebooks early).
+- Zim `.txt` round-trips must be byte-identical. The golden-file test against real Zim notebooks
+  is `scripts/zim-golden.sh` (the corpus stays outside the repo; see
+  `core/zim-format/tests/golden_real_notebooks.rs`), and the corpus-free fuzz test runs in every
+  `cargo test -p zim-format`. Run both after touching `core/zim-format`.
 - Never copy Zim source into this repo; reimplement the format from its documented syntax.
 
 ---
