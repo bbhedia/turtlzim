@@ -5,7 +5,6 @@ use ::error::{TResult, TError};
 use ::sync::{SyncConfig, Syncer};
 use ::sync::sync_model::{SyncModel, MemorySaver};
 use ::storage::Storage;
-use ::rusqlite::NO_PARAMS;
 use ::api::{Api, ApiReq};
 use ::messaging;
 use ::models;
@@ -271,14 +270,14 @@ impl SyncIncoming {
         info!("SyncIncoming.update_local_db_from_api_sync() -- ignored {} incoming syncs", ignore_count);
         with_db!{ db, self.db,
             // start a transaction. running incoming sync is all or nothing.
-            db.conn.execute("BEGIN TRANSACTION", NO_PARAMS)?;
+            db.conn.execute("BEGIN TRANSACTION", [])?;
             for rec in &mut records {
                 self.run_sync_item(db, rec)?;
             }
             // save our sync id
             db.kv_set("sync_id", &sync_id.to_string())?;
             // ok, commit
-            db.conn.execute("COMMIT TRANSACTION", NO_PARAMS)?;
+            db.conn.execute("COMMIT TRANSACTION", [])?;
         }
 
         // send our incoming syncs into a queue that the Turtl/dispatch thread

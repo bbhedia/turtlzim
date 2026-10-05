@@ -7,11 +7,13 @@
 #[macro_use]
 extern crate quick_error;
 extern crate rusqlite;
+#[cfg(all(test, target_arch = "wasm32"))]
+extern crate wasm_bindgen_test;
 
 use ::std::error::Error;
 use ::std::mem;
 
-use ::rusqlite::{Connection, NO_PARAMS};
+use ::rusqlite::Connection;
 
 //                          ....~?=:::~M8.+$??Z$DON??=Z+,+=~.....               
 //           ...           ....~?IZO==+:=$+:+:?.$8=I.$~::+:=~....               
@@ -104,7 +106,7 @@ impl Clouseau {
     /// Very clever. Very clever indeed!
     pub fn new() -> CResult<Clouseau> {
         let conn = Connection::open_in_memory()?;
-        conn.execute("CREATE VIRTUAL TABLE objects USING fts4 (id VARCHAR(64) PRIMARY KEY, content TEXT)", NO_PARAMS)?;
+        conn.execute("CREATE VIRTUAL TABLE objects USING fts4 (id VARCHAR(64) PRIMARY KEY, content TEXT)", [])?;
         Ok(Clouseau {
             conn: conn,
         })
@@ -145,6 +147,12 @@ impl Clouseau {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // On wasm32 these run under `wasm-pack test --node` against real SQLite (sqlite-wasm-rs),
+    // which is what proves FTS4 is really compiled into the wasm SQLite build (see
+    // .cargo/config.toml): wasm-bindgen-test's attribute shadows `#[test]`.
+    #[cfg(target_arch = "wasm32")]
+    use ::wasm_bindgen_test::wasm_bindgen_test as test;
 
     #[test]
     fn sqlite_has_ft() {

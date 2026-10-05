@@ -22,8 +22,10 @@ public-api-tests = []
 [dependencies]
 base64 = "0.9.1"
 carrier = { path = "carrier" }
+clouseau = { path = "clouseau" }
 config = { path = "config" }
 crossbeam = "0.3.0"
+dumpy = { path = "dumpy" }
 encoding_rs = "0.8.6"
 fern = "0.5.5"
 futures = "0.1.14"
@@ -37,6 +39,11 @@ log = "0.4.1"
 log-panics = { version = "2.0.0", features = ["with-backtrace"] }
 protected_derive = { path = "protected_derive" }
 quick-error = "1.2.2"
+# rusqlite 0.40 swaps in `sqlite-wasm-rs` (real SQLite compiled to wasm32) by itself on
+# wasm32-unknown-unknown, so dumpy/clouseau/storage.rs/search.rs run the same source on every
+# target (docs/wasm-port-plan.md decision 2.2 and 2.2.1). The `sqlite-static` feature above only
+# matters natively (it bundles SQLite instead of linking the system library).
+rusqlite = "0.40"
 serde = "1.0.8"
 serde_derive = "1.0.8"
 serde_json = "1.0.2"
@@ -45,26 +52,23 @@ url = "2.1.1"
 
 # --- native-only dependencies ---
 # These either have no wasm32-unknown-unknown build story at all (native C
-# libraries via a build.rs: rusqlite/libsqlite3-sys and dumpy/clouseau which
-# wrap it, sodiumoxide/libsodium-sys, rust-crypto via the `migrate` crate) or
-# pull in a transitive dependency that doesn't support wasm32 (regex 0.1.x ->
-# thread-id/memchr 0.1, clippo -> regex + scraper/html5ever + blocking
-# reqwest). Each is a separate, already-decided future milestone per
-# docs/wasm-port-plan.md (§2.1 crypto, §2.2 storage) or, for clippo/migrate,
-# out of scope for the port entirely for now. See the matching
-# `#[cfg(target_arch = "wasm32")]` stubs at each crate's call sites
-# (src/storage_wasm.rs, src/search_wasm.rs, src/crypto/low.rs, etc).
+# libraries via a build.rs: sodiumoxide/libsodium-sys, rust-crypto via the
+# `migrate` crate) or pull in a transitive dependency that doesn't support
+# wasm32 (regex 0.1.x -> thread-id/memchr 0.1, clippo -> regex +
+# scraper/html5ever + blocking reqwest). Each is a separate, already-decided
+# future milestone per docs/wasm-port-plan.md (§2.1 crypto, §2.3 networking)
+# or, for clippo/migrate, out of scope for the port entirely for now. See the
+# matching `#[cfg(target_arch = "wasm32")]` stubs at each crate's call sites
+# (src/api_wasm.rs, src/crypto/low.rs, etc). SQLite is deliberately NOT here:
+# rusqlite/dumpy/clouseau build for wasm32 too (see [dependencies] above).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clippo = { path = "clippo" }
-clouseau = { path = "clouseau" }
-dumpy = { path = "dumpy" }
 fs2 = "0.4.3"
 migrate = { path = "migrate" }
 num_cpus = "1.8.0"
 futures-cpupool = "0.1.5"
 regex = "0.1.77"
 reqwest = { version = "0.10.4", features = ["blocking", "json"] }
-rusqlite = "0.20.0"
 sodiumoxide = "0.0.16"
 
 # wasm32-only dependencies

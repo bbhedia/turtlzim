@@ -5,7 +5,6 @@
 //!
 //! Note that this module only returns note IDs when returning search results.
 
-use ::rusqlite::NO_PARAMS;
 use ::rusqlite::types::ToSql;
 
 use ::clouseau::Clouseau;
@@ -58,8 +57,8 @@ impl Search {
     /// Create a new Search object
     pub fn new() -> TResult<Search> {
         let idx = Clouseau::new()?;
-        idx.conn.execute("CREATE TABLE IF NOT EXISTS notes (id VARCHAR(64) PRIMARY KEY, space_id VARCHAR(96), board_id VARCHAR(96), has_file BOOL, created INTEGER, mod INTEGER, type VARCHAR(32), color INTEGER, url VARCHAR(256))", NO_PARAMS)?;
-        idx.conn.execute("CREATE TABLE IF NOT EXISTS notes_tags (id ROWID, note_id VARCHAR(64), tag VARCHAR(128))", NO_PARAMS)?;
+        idx.conn.execute("CREATE TABLE IF NOT EXISTS notes (id VARCHAR(64) PRIMARY KEY, space_id VARCHAR(96), board_id VARCHAR(96), has_file BOOL, created INTEGER, mod INTEGER, type VARCHAR(32), color INTEGER, url VARCHAR(256))", [])?;
+        idx.conn.execute("CREATE TABLE IF NOT EXISTS notes_tags (id ROWID, note_id VARCHAR(64), tag VARCHAR(128))", [])?;
         Ok(Search {
             idx: idx,
         })
@@ -352,6 +351,11 @@ mod tests {
 
     use ::jedi;
     use ::models::note::Note;
+
+    // On wasm32 these run under `wasm-pack test --node` against real SQLite (sqlite-wasm-rs),
+    // exercising the same FTS4 queries as native: wasm-bindgen-test's attribute shadows `#[test]`.
+    #[cfg(target_arch = "wasm32")]
+    use ::wasm_bindgen_test::wasm_bindgen_test as test;
 
     #[test]
     fn loads_search() {

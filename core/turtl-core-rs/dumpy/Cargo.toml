@@ -6,8 +6,12 @@ authors = ["Andrew Danger Lyon <orthecreedence@gmail.com>"]
 [dependencies]
 jedi = { path = "../jedi" }
 libc = "0.2.15"
-rusqlite = "0.20.0"
+rusqlite = "0.40"
 quick-error = "1.2.3"
 serde = "1.0.8"
 serde_json = "1.0.2"
 
+# Lets `wasm-pack test --node` run this crate's unit tests against real SQLite
+# (sqlite-wasm-rs, via rusqlite) on wasm32 -- see docs/wasm-port-plan.md 2.2.1.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

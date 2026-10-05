@@ -58,6 +58,14 @@ cargo build --release --features sqlite-static
 cargo test --features sqlite-static
 ```
 
+`cargo test` at the workspace root runs only `turtl_core`'s own tests. The path-dependency
+member crates carry tests too (`dumpy`, `clouseau`, `jedi`, ...) and silently bit-rotted because
+nothing ran them -- `dumpy`'s did not compile at all until the WASM storage step. Run them with:
+
+```bash
+cargo test --features sqlite-static -p turtl_core -p dumpy -p clouseau -p jedi
+```
+
 This crate is its own Cargo workspace (it has several path-dependency member
 crates: `carrier`, `clippo`, `clouseau`, `dumpy`, `jedi`, `migrate`), so it's
 excluded from — not a member of — the repo's root workspace (root `Cargo.toml`).
@@ -83,3 +91,12 @@ Build/test it from inside `core/turtl-core-rs`, not from the repo root.
   dependency *majors*, just re-resolved to their newest compatible patch/minor
   releases. A deeper modernization (async/await, `reqwest` 0.11+, etc.) is
   possible later but wasn't needed just to get it building and passing tests.
+
+## Update (2026-10-05): rusqlite is now 0.40
+
+The "original dependency majors" statement above no longer holds for SQLite: for the WASM port
+`rusqlite` was upgraded 0.20 → 0.40.2 (bundled SQLite and `libsqlite3-sys` 0.16 → 0.38.2
+natively; `sqlite-wasm-rs` on wasm32), so the storage layer runs the same source on every
+target. The only API migration was the removed `NO_PARAMS` (now `[]`). Details, the FTS4 build
+flag, and the verification are in `docs/wasm-port-plan.md` (decision 2.2.1 and the Step 4b-1
+status entry).

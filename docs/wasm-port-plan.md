@@ -19,9 +19,11 @@ networking patterns.
 Uses `sodiumoxide` (native libsodium bindings), confined entirely to `src/crypto/low.rs` +
 `src/crypto/mod.rs` — nothing in `carrier`/`dumpy`/`clouseau` touches crypto. Primitives:
 `aead::chacha20poly1305_ietf` (seal/open — the *only* symmetric cipher, `SYM_ALGORITHM =
-["chacha20poly1305"]`), `sealedbox` (curve25519 anonymous encryption), `pwhash` (Argon2-family
-key stretching), `hash::sha256`/`sha512`, `auth`/HMAC-SHA512256 (defined but never called
-outside its own unit tests — dead code), and `randombytes`.
+["chacha20poly1305"]`), `sealedbox` (curve25519 anonymous encryption), `pwhash` (**scrypt** —
+`crypto_pwhash_scryptsalsa208sha256`; sodiumoxide 0.0.16's `pwhash` module contains only that,
+not Argon2 as an earlier draft of this audit said; corrected 2026-10-05 from the crate source),
+`hash::sha256`/`sha512`, `auth`/HMAC-SHA512256 (defined but never called outside its own unit
+tests — dead code), and `randombytes`.
 
 **Hot path for "encrypt/decrypt a note" — the one that matters most for the WASM port — is
 narrow: only `chacha20poly1305_ietf` seal/open plus `randombytes` for the nonce.** Every
@@ -175,6 +177,53 @@ production use.
 Worker (never the main/DOM thread, never a `SharedWorker`) — storage must be moved into a
 Worker regardless of which SQL-on-wasm option is used. Single-connection/multi-tab access
 needs an explicit pause/resume handshake under SAHPool-style VFSes.
+
+#### 2.2.1 Refinement (2026-10-05, verified against the published crate sources)
+
+Reading the actual crates before wiring them in changed *how* decision 2.2 gets executed (not
+the decision itself — it is still real SQLite via `sqlite-wasm-rs`, linked into the one wasm
+binary):
+
+- **No hand-written rusqlite shim.** The "thin rusqlite-shaped wrapper" idea above is
+  superseded: `rusqlite` **0.39+ integrates `sqlite-wasm-rs` upstream**. Its `ffi-sqlite-wasm-rs`
+  feature is on by default and, on `wasm32-unknown-unknown`, swaps `libsqlite3-sys` for
+  `sqlite-wasm-rs` (`Connection::open*` then uses an in-memory DB unless a persistent VFS is
+  installed). So the plan is to **upgrade `rusqlite` 0.20 → 0.40.x on both targets** and run the
+  *same* `dumpy`/`clouseau`/`storage.rs`/`search.rs` source everywhere, instead of keeping
+  whole-file `storage_wasm.rs`/`search_wasm.rs` stubs. The API surface to migrate is small
+  (inventoried: `Connection::{open_in_memory[_with_flags], open_with_flags, execute, prepare,
+  query_row[_and_then], close}`, `Statement::query_map`, `Row::get[_unwrap]`, `ToSql`/
+  `ToSqlOutput`, `types::Value`, `OpenFlags`, `NO_PARAMS`, `Error::QueryReturnedNoRows`; no
+  PRAGMAs, no ATTACH, no custom SQL functions; the only explicit transaction is the
+  `BEGIN`/`COMMIT TRANSACTION` pair in `sync/incoming.rs`).
+- **FTS4 is not compiled into the wasm SQLite.** `sqlite-wasm-rs`'s build enables
+  `SQLITE_ENABLE_FTS5` but not `FTS3`/`FTS4`, while `clouseau` creates its index with
+  `USING fts4` and passes user text straight to `MATCH`. Rewriting to FTS5 would change native
+  behaviour too (stricter query syntax, different default tokenizer), which breaks the "same
+  semantics on every target" rule. So `fts4` is kept and
+  `-DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS3_PARENTHESIS` are added to the
+  wasm32 C build via the checked-in `core/turtl-core-rs/.cargo/config.toml` `[env]` entry
+  (`CFLAGS_wasm32_unknown_unknown`, read by the `cc` crate). **Verified, with a negative
+  control:** `clouseau`'s 3 searches and `turtl_core`'s `search::tests::index_unindex_filter`
+  (which uses the enhanced `(a OR "b c")` syntax that needs `FTS3_PARENTHESIS`) pass in real
+  wasm; overriding the flag away makes all 3 `clouseau` tests fail with `no such module: fts4`.
+  Cargo only discovers that config when run from inside `core/turtl-core-rs`.
+- **Persistence layout changed between crate lines.** `rusqlite` 0.40.2 depends on
+  `sqlite-wasm-rs ^0.5.1`; the standalone 0.6.x line moved the OPFS `sahpool` VFS out into a
+  separate `sqlite-wasm-vfs` crate (default VFS is in-memory in both). Either way it needs a
+  secure context and a dedicated Worker, and does not support concurrent connections to the same
+  database — consistent with decision 2.4. cargo resolved `sqlite-wasm-rs` **0.5.5** (in-memory
+  VFS only, which is what every test uses); the matching SAHPool VFS crate version still has to
+  be chosen when persistence is wired (a later step: it needs a real browser to test, Node has no
+  OPFS).
+- **Build requirements (not just Rust).** `sqlite-wasm-rs` compiles SQLite's C source for
+  `wasm32-unknown-unknown`, so the machine needs a wasm32-capable `clang` (the `cc` crate
+  defaults to clang for wasm32: "Compiling WASM is not currently supported by GCC") plus
+  `llvm-ar` (cc-rs looks for it for wasm32 archives; a GNU `ar` archive has no symbol index
+  `wasm-ld` can use). On Debian/Ubuntu: `sudo apt-get install -y build-essential clang llvm`.
+  `build-essential` is also needed for any native build (proc-macros and build scripts link
+  natively), which the first fresh-machine setup discovered was missing from the import script's
+  package list.
 
 ### 2.3 Networking: upgrade `reqwest` in place, make it async everywhere
 
@@ -413,11 +462,72 @@ Networking and concurrency are unified on async/await across both native and web
       **Native regression check:** `cargo test --features sqlite-static` -- still 63/63,
       unchanged (same count as the step-3 milestone). `cargo check --target wasm32-unknown-unknown`
       still succeeds, now compiling real crypto for the hot path instead of stubs.
-- [ ] Step 4b: `sqlite-wasm-rs` into `storage.rs`/`search.rs`, and async `reqwest`/`fetch` into
-      `api.rs` (decisions 2.2/2.3), plus the real single-threaded-async concurrency rewrite
-      (2.4) to replace `Thredder`'s current synchronous-inline placeholder. Also still open:
-      `wasm-pack build --target web` producing a loadable module end to end (this milestone only
-      ran `wasm-pack test --node`, a `--target nodejs`-style build for tests; a real
-      `--target web` build/load hasn't been attempted yet), and the remaining incidental crypto
-      stubs (`sha256`/`sha512`/`hmac`/`secure_compare`/`gen_key`(pwhash)/`asym::*`).
+- [x] Step 4b-1 (storage + search on real SQLite, decision 2.2/2.2.1) -- **done** (2026-10-05,
+      on a fresh machine, toolchain pinned to rustc 1.98.1 / Node 24.21.0 / wasm-pack 0.15.0).
+      `dumpy`, `clouseau`, `storage.rs`, `search.rs` now compile from the **same source on every
+      target**: `rusqlite` went 0.20 → 0.40.2 (its default `ffi-sqlite-wasm-rs` feature swaps in
+      `sqlite-wasm-rs` 0.5.5 on wasm32; `libsqlite3-sys` 0.16 → 0.38.2 natively), the only API
+      migration being the removed `NO_PARAMS` → `[]`. Deleted `storage_wasm.rs` and
+      `search_wasm.rs` (≈215 lines of stubs) and their `#[path]` swaps; un-gated the dumpy/
+      clouseau/rusqlite error conversions in `error.rs`; moved the three crates out of the
+      native-only dependency table. FTS4 enabled in the wasm SQLite via `.cargo/config.toml`
+      (2.2.1). `time` 0.1 has no clock on wasm32 (`get_time()` is `unimplemented!()`), which
+      broke model-ID generation, so `util::get_time()` reads `Date.now()` there and calls
+      `time::get_time()` natively (used by `models/model.rs` and `sync/sync_model.rs`).
+
+      **Verified (both targets, same tests):**
+      - native: `turtl_core` 63/63, `dumpy` 6/6, `clouseau` 3/3, `jedi` 3/3 -- `dumpy`'s tests
+        had not compiled since the toolchain drift (plain `cargo test` at the root only runs
+        `turtl_core`), so this is their first green run.
+      - wasm32 (real wasm in Node): `dumpy` 6/6, `clouseau` 3/3, `turtl_core` 9/9 -- 2 search
+        tests (FTS4 incl. `OR`/phrase syntax, intersect/union filters, paging, tag counts),
+        4 storage tests including **two end-to-end encrypted-model round trips** (model ID from
+        `Date.now()`, key from libsodium.js randomness, libsodium.js encrypt, real SQLite save,
+        load, decrypt), and the 3 earlier crypto parity tests.
+      - Re-verified unchanged on the new machine before editing: crypto PoC 11/11 byte-exact +
+        tamper checks; the earlier wasm32 crypto tests.
+
+      ```bash
+      cd core/turtl-core-rs
+      cargo test --features sqlite-static -p turtl_core -p dumpy -p clouseau -p jedi
+      NODE_PATH="$(pwd)/node_modules" wasm-pack test --node   # turtl_core on wasm32
+      wasm-pack test --node dumpy; wasm-pack test --node clouseau
+      ```
+
+      **Known limits / follow-ups from this step:** (a) wasm32 uses the default **in-memory**
+      VFS -- nothing persists; OPFS-SAHPool needs a Worker + browser tests (see 2.2.1). (b)
+      `config::load_config()` reads `config.yaml` from a file, so the non-test
+      `storage::db_location()` path can't work on wasm32 until config is injected from JS. (c)
+      `util/logger.rs` still calls `time::now()` (panics on wasm32); only matters once logger
+      setup runs there. (d) `wasm-pack build` (not `test`) fails if the crate-root
+      `package.json` has a `dependencies` object: wasm-bindgen copies it into `pkg/package.json`
+      and wasm-pack 0.15.0 parses that file as a flat string map (`invalid type: map, expected a
+      string`). `core/wasm-crypto-poc/package.json` is therefore *deliberately* a bare map, so
+      `npm ci` installs nothing there -- use `npm install --no-save --no-package-lock
+      libsodium-wrappers@0.7.16`. `core/turtl-core-rs/package.json` will hit the same wall at
+      the `--target web` step. (e) Every native `cargo test` of `turtl_core` rewrites the tracked
+      `core/wasm-crypto-poc/test/golden_vectors.json` (`generate_wasm_golden_vectors`); `git
+      checkout` it before committing.
+- [ ] Step 4b-2: async `reqwest`/`fetch` into `api.rs` (decision 2.3) -- the whole call chain
+      through `dispatch.rs` and every `Syncer` impl; `turtl_core` is a 2015-edition crate, so
+      prefer futures-0.1 combinators (`.then()`/`.map()`/`.and_then()`) over hand-rolled
+      `poll()`.
+- [ ] Step 4b-3: the real single-threaded-async concurrency rewrite (2.4) replacing `Thredder`'s
+      synchronous-inline placeholder.
+- [ ] Step 4b-4: `wasm-pack build --target web` producing a loadable module end to end (only
+      `wasm-pack test --node` and the PoC's `--target nodejs` build have run so far); see
+      follow-up (d) above for the `package.json` trap.
+- [ ] Step 4b-5: persistence (OPFS-SAHPool in a dedicated Worker, browser-tested), and the
+      remaining incidental crypto stubs (`sha256`/`sha512`/`hmac`/`secure_compare`/
+      `gen_key`(pwhash)/`asym::*`). **Matters for the web login path:** `gen_key` is what turns a
+      user's passphrase into the master key that decrypts everything synced from other clients, so
+      byte-identical scrypt output is non-negotiable. Verified 2026-10-05 against the installed
+      packages: the **standard `libsodium-wrappers` 0.7.16 has no password hashing at all**
+      (no scrypt, no Argon2 `crypto_pwhash`) and no explicit `crypto_hash_sha512`; the **sumo**
+      build (`libsodium-wrappers-sumo` 0.7.16, libsodium 1.0.20) has scrypt with the same
+      `INTERACTIVE` limits native uses (`OPSLIMIT` 524288 / `MEMLIMIT` 16777216), Argon2, and the
+      explicit SHA functions, for about +0.7 MB of wasm (2.0 MB vs 1.3 MB on disk). So this step
+      switches the JS bridge to the sumo package (a superset; same `sodium.ready` init) and adds
+      golden-vector parity tests against native `sodiumoxide` for each primitive, `gen_key`
+      first.
 - [ ] Step 5: full parity pass before calling the port done.

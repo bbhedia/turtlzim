@@ -48,6 +48,23 @@ pub fn sleep(millis: u64) {
     thread::sleep(Duration::from_millis(millis));
 }
 
+/// The current time as a unix `Timespec` (seconds + nanoseconds since the epoch).
+///
+/// Natively this is just `time::get_time()`. The `time` 0.1 crate has no clock at all on
+/// wasm32-unknown-unknown (its `get_time()` is `unimplemented!()` there), so on that target we
+/// read the JS clock (`Date.now()`, millisecond resolution) instead.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn get_time() -> ::time::Timespec {
+    ::time::get_time()
+}
+#[cfg(target_arch = "wasm32")]
+pub fn get_time() -> ::time::Timespec {
+    let millis = ::js_sys::Date::now();
+    let sec = (millis / 1000.0).floor();
+    let nsec = (millis - sec * 1000.0) * 1_000_000.0;
+    ::time::Timespec::new(sec as i64, nsec as i32)
+}
+
 /// Get the app's file folder. This can be different depending on whether we're
 /// running tests or not, so tries to be mindful of that.
 pub fn file_folder(suffix: Option<&str>) -> TResult<String> {

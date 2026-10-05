@@ -595,39 +595,9 @@ mod wasm_parity_tests {
     // `wasm-pack test --node`) is the default target when neither
     // `run_in_browser` nor `run_in_worker`/`run_in_dedicated_worker` is set.
 
-    /// Awaits the real `crypto::init_wasm_crypto()` Promise, then runs a
-    /// synchronous closure. See the module doc comment above for why this
-    /// hand-written `Future` exists instead of `async fn`/`.await`.
-    struct ThenReady {
-        ready: ::wasm_bindgen_futures::JsFuture,
-        body: Option<Box<dyn FnOnce()>>,
-    }
-
-    impl ThenReady {
-        fn new<F: FnOnce() + 'static>(body: F) -> ThenReady {
-            ThenReady {
-                ready: ::wasm_bindgen_futures::JsFuture::from(init_wasm_crypto()),
-                body: Some(Box::new(body)),
-            }
-        }
-    }
-
-    impl ::std::future::Future for ThenReady {
-        type Output = ();
-
-        fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context) -> ::std::task::Poll<()> {
-            let this = self.get_mut();
-            match ::std::pin::Pin::new(&mut this.ready).poll(cx) {
-                ::std::task::Poll::Ready(result) => {
-                    result.expect("init_wasm_crypto() promise rejected");
-                    let body = this.body.take().expect("ThenReady polled after completion");
-                    body();
-                    ::std::task::Poll::Ready(())
-                }
-                ::std::task::Poll::Pending => ::std::task::Poll::Pending,
-            }
-        }
-    }
+    // The hand-written `Future` this module's doc comment describes lives in
+    // `wasm_test_support` (below) so other wasm32 tests that need real crypto can reuse it.
+    use super::wasm_test_support::ThenReady;
 
     /// (name, key_hex, plaintext_hex, envelope_hex). Covers an empty
     /// plaintext (edge case: zero-length AEAD input), a plain ASCII short
@@ -743,3 +713,54 @@ mod wasm_parity_tests {
     }
 }
 
+
+/// Test-only support shared by every wasm32 test that needs real crypto: this file's own
+/// `wasm_parity_tests` and, e.g., the encrypted-model round trips in `storage.rs`.
+///
+/// `turtl_core` is a Rust 2015-edition crate, so `async fn`/`.await` aren't available (see
+/// `wasm_parity_tests`'s doc comment and `low::InitCryptoFuture`), and libsodium.js needs a
+/// one-time async init before any crypto call. `ThenReady` is the small hand-written `Future`
+/// that bridges the two: it awaits the real `init_wasm_crypto()` Promise and then runs an
+/// ordinary synchronous closure. A test uses it with `wasm-bindgen-test`'s `(async)` form:
+///
+/// ```ignore
+/// #[wasm_bindgen_test(async)]
+/// fn my_test() -> ThenReady { ThenReady::new(|| { /* plain sync body */ }) }
+/// ```
+#[cfg(all(test, target_arch = "wasm32"))]
+pub mod wasm_test_support {
+    use ::std::future::Future;
+    use super::init_wasm_crypto;
+
+    /// Awaits the real `crypto::init_wasm_crypto()` Promise, then runs a synchronous closure.
+    pub struct ThenReady {
+        ready: ::wasm_bindgen_futures::JsFuture,
+        body: Option<Box<dyn FnOnce()>>,
+    }
+
+    impl ThenReady {
+        pub fn new<F: FnOnce() + 'static>(body: F) -> ThenReady {
+            ThenReady {
+                ready: ::wasm_bindgen_futures::JsFuture::from(init_wasm_crypto()),
+                body: Some(Box::new(body)),
+            }
+        }
+    }
+
+    impl Future for ThenReady {
+        type Output = ();
+
+        fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context) -> ::std::task::Poll<()> {
+            let this = self.get_mut();
+            match ::std::pin::Pin::new(&mut this.ready).poll(cx) {
+                ::std::task::Poll::Ready(result) => {
+                    result.expect("init_wasm_crypto() promise rejected");
+                    let body = this.body.take().expect("ThenReady polled after completion");
+                    body();
+                    ::std::task::Poll::Ready(())
+                }
+                ::std::task::Poll::Pending => ::std::task::Poll::Pending,
+            }
+        }
+    }
+}

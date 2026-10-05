@@ -530,8 +530,9 @@ impl Turtl {
     // 0.1, which don't support this target -- see docs/wasm-port-plan.md and Cargo.toml). This
     // is a plain, non-regex equivalent (filter out non-alphanumeric ASCII, same as
     // `(?i)[^a-z0-9]` above) rather than a NotImplemented stub, since it's simple, pure string
-    // logic with no crypto/storage/network involved -- feeding into `storage::db_location()`,
-    // which itself is not-yet-ported on wasm32 anyway (see storage_wasm.rs).
+    // logic with no crypto/storage/network involved -- feeding into `storage::db_location()`.
+    // (On wasm32 the resulting name opens an in-memory SQLite database until a persistent
+    // VFS such as OPFS-SAHPool is installed -- see docs/wasm-port-plan.md 2.2.1.)
     #[cfg(target_arch = "wasm32")]
     pub fn get_user_db_location(&self, user_id: &String) -> TResult<String> {
         let api_endpoint = config::get::<String>(&["api", "endpoint"])?;

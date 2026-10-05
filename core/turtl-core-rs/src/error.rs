@@ -3,13 +3,11 @@ use ::std::io::Error as IoError;
 use ::std::convert::From;
 use ::std::sync::Arc;
 use ::jedi::{Value, JSONError};
-#[cfg(not(target_arch = "wasm32"))]
 use ::dumpy::DError;
 #[cfg(not(target_arch = "wasm32"))]
 use ::clippo::error::CError as ClippoError;
 #[cfg(not(target_arch = "wasm32"))]
 use ::migrate::error::MError as MigrateError;
-#[cfg(not(target_arch = "wasm32"))]
 use ::rusqlite;
 use ::api::StatusCode;
 use ::crypto::CryptoError;
@@ -83,7 +81,6 @@ quick_error! {
             description("JSON error")
             display("{}", quick_error_obj!("json_error", err))
         }
-        #[cfg(not(target_arch = "wasm32"))]
         Dumpy(err: DError) {
             cause(err)
             description("Dumpy error")
@@ -250,7 +247,6 @@ impl From<JSONError> for TError {
         }
     }
 }
-#[cfg(not(target_arch = "wasm32"))]
 impl From<DError> for TError {
     fn from(err: DError) -> TError {
         if cfg!(feature = "panic-on-error") {
@@ -272,7 +268,6 @@ impl From<Box<dyn (::std::any::Any) + Send>> for TError {
         }
     }
 }
-#[cfg(not(target_arch = "wasm32"))]
 impl From<(rusqlite::Connection, rusqlite::Error)> for TError {
     fn from(err: (rusqlite::Connection, rusqlite::Error)) -> TError {
         if cfg!(feature = "panic-on-error") {
@@ -284,10 +279,8 @@ impl From<(rusqlite::Connection, rusqlite::Error)> for TError {
 }
 from_err!(::fern::InitError);
 from_err!(::carrier::CError);
-#[cfg(not(target_arch = "wasm32"))]
 from_err!(::clouseau::CError);
 from_err!(::std::string::FromUtf8Error);
-#[cfg(not(target_arch = "wasm32"))]
 from_err!(::rusqlite::Error);
 from_err!(::std::num::ParseIntError);
 #[cfg(not(target_arch = "wasm32"))]

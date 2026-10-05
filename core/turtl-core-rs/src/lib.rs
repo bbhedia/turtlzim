@@ -4,11 +4,9 @@ extern crate base64;
 extern crate carrier;
 #[cfg(not(target_arch = "wasm32"))]
 extern crate clippo;
-#[cfg(not(target_arch = "wasm32"))]
 extern crate clouseau;
 extern crate config;
 extern crate crossbeam;
-#[cfg(not(target_arch = "wasm32"))]
 extern crate dumpy;
 extern crate encoding_rs;
 extern crate fern;
@@ -55,7 +53,6 @@ extern crate wasm_bindgen_futures;
 extern crate js_sys;
 #[cfg(all(test, target_arch = "wasm32"))]
 extern crate wasm_bindgen_test;
-#[cfg(not(target_arch = "wasm32"))]
 #[macro_use]
 extern crate rusqlite;
 extern crate serde;
@@ -89,19 +86,9 @@ mod sync;
 #[macro_use]
 mod models;
 mod profile;
-// TODO(wasm): storage.rs/search.rs are real-SQLite-backed (rusqlite/dumpy, clouseau) with no
-// wasm32 build story yet (docs/wasm-port-plan.md decision 2.2, a future `sqlite-wasm-rs`
-// milestone) -- swapped for same-public-API stub files on wasm32 so everything downstream
-// (sync_model.rs, profile.rs, most of models/) keeps compiling unchanged.
-#[cfg(not(target_arch = "wasm32"))]
+// storage.rs/search.rs run the same source on every target: rusqlite 0.40 drives real SQLite via
+// `sqlite-wasm-rs` on wasm32 (docs/wasm-port-plan.md decision 2.2 / 2.2.1).
 mod storage;
-#[cfg(target_arch = "wasm32")]
-#[path = "storage_wasm.rs"]
-mod storage;
-#[cfg(not(target_arch = "wasm32"))]
-mod search;
-#[cfg(target_arch = "wasm32")]
-#[path = "search_wasm.rs"]
 mod search;
 mod dispatch;
 mod schema;

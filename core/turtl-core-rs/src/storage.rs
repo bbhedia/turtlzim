@@ -184,6 +184,30 @@ mod tests {
     use ::models::model::{self, Model};
     use ::models::protected::Protected;
 
+    // On wasm32 these run under `wasm-pack test --node` against real SQLite (sqlite-wasm-rs):
+    // wasm-bindgen-test's attribute shadows `#[test]`, and the tests that need real crypto go
+    // through `crypto_test!` below, because libsodium.js needs a one-time async init first.
+    #[cfg(target_arch = "wasm32")]
+    use ::wasm_bindgen_test::wasm_bindgen_test as test;
+    #[cfg(target_arch = "wasm32")]
+    use ::wasm_bindgen_test::wasm_bindgen_test;
+    #[cfg(target_arch = "wasm32")]
+    use ::crypto::wasm_test_support::ThenReady;
+
+    /// Declares a test that needs real crypto: a plain `#[test]` natively; on wasm32 the body runs
+    /// after the one-time async libsodium.js init (see `crypto::wasm_test_support`).
+    macro_rules! crypto_test {
+        ($name:ident, $body:ident) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            #[test]
+            fn $name() { $body() }
+
+            #[cfg(target_arch = "wasm32")]
+            #[wasm_bindgen_test(async)]
+            fn $name() -> ThenReady { ThenReady::new($body) }
+        };
+    }
+
     protected! {
         #[derive(Serialize, Deserialize)]
         pub struct Shiba {
@@ -210,10 +234,10 @@ mod tests {
         // `&[]` no longer type-infers as a param list, and `Row::get_checked`
         // was renamed to `get` in the rusqlite version this now resolves to.
         let storage = pretest();
-        storage.conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name VARCHAR(16))", rusqlite::NO_PARAMS).unwrap();
+        storage.conn.execute("CREATE TABLE test (id INTEGER PRIMARY KEY, name VARCHAR(16))", []).unwrap();
         storage.conn.execute("INSERT INTO test (name) VALUES ($1)", &[&String::from("bartholomew")]).unwrap();
         let then = "SELECT * FROM test LIMIT 1";
-        let res = storage.conn.query_row_and_then(then, rusqlite::NO_PARAMS, |row| -> TResult<String> {
+        let res = storage.conn.query_row_and_then(then, [], |row| -> TResult<String> {
             let name_sql: SqlValue = row.get("name").unwrap();
             match name_sql {
                 SqlValue::Text(ref x) => Ok(x.clone()),
@@ -223,8 +247,7 @@ mod tests {
         assert_eq!(res, "bartholomew");
     }
 
-    #[test]
-    fn saves_retrieves_models() {
+    fn saves_retrieves_models_body() {
         let storage = pretest();
         let mut model = Shiba::new_with_id().unwrap();
         let key = model.generate_key().unwrap().clone();
@@ -245,8 +268,7 @@ mod tests {
         assert_eq!(storage.all::<Shiba>("shibas").unwrap().len(), 1);
     }
 
-    #[test]
-    fn deletes_models() {
+    fn deletes_models_body() {
         let storage = pretest();
         let mut model = Shiba::new_with_id().unwrap();
         model.generate_key().unwrap();
@@ -273,5 +295,8 @@ mod tests {
         storage.kv_delete("get a job").unwrap();
         assert_eq!(storage.kv_get("get a job").unwrap(), None);
     }
+
+    crypto_test!(saves_retrieves_models, saves_retrieves_models_body);
+    crypto_test!(deletes_models, deletes_models_body);
 }
 

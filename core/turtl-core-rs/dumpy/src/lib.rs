@@ -25,8 +25,10 @@ extern crate libc;
 extern crate quick_error;
 extern crate rusqlite;
 extern crate serde_json;
+#[cfg(all(test, target_arch = "wasm32"))]
+extern crate wasm_bindgen_test;
 
-use ::rusqlite::{Connection, NO_PARAMS};
+use ::rusqlite::Connection;
 use ::rusqlite::types::Value as SqlValue;
 use ::rusqlite::types::{ToSql, ToSqlOutput};
 use ::rusqlite::Error as SqlError;
@@ -78,13 +80,13 @@ impl Dumpy {
 
     /// Init our dumpy store on an existing connection.
     pub fn init(&self, conn: &Connection) -> DResult<()> {
-        conn.execute("CREATE TABLE IF NOT EXISTS dumpy_objects (id VARCHAR(64) PRIMARY KEY, table_name VARCHAR(32), data TEXT)", NO_PARAMS)?;
-        conn.execute("CREATE TABLE IF NOT EXISTS dumpy_index (id INTEGER PRIMARY KEY, table_name VARCHAR(32), index_name VARCHAR(32), vals VARCHAR(256), object_id VARCHAR(64))", NO_PARAMS)?;
-        conn.execute("CREATE TABLE IF NOT EXISTS dumpy_kv (key VARCHAR(32) PRIMARY KEY, value TEXT)", NO_PARAMS)?;
+        conn.execute("CREATE TABLE IF NOT EXISTS dumpy_objects (id VARCHAR(64) PRIMARY KEY, table_name VARCHAR(32), data TEXT)", [])?;
+        conn.execute("CREATE TABLE IF NOT EXISTS dumpy_index (id INTEGER PRIMARY KEY, table_name VARCHAR(32), index_name VARCHAR(32), vals VARCHAR(256), object_id VARCHAR(64))", [])?;
+        conn.execute("CREATE TABLE IF NOT EXISTS dumpy_kv (key VARCHAR(32) PRIMARY KEY, value TEXT)", [])?;
 
-        conn.execute("CREATE INDEX IF NOT EXISTS dumpy_idx_index ON dumpy_index (table_name, index_name, vals)", NO_PARAMS)?;
-        conn.execute("CREATE INDEX IF NOT EXISTS dumpy_idx_index_obj ON dumpy_index (table_name, object_id)", NO_PARAMS)?;
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS dumpy_idx_kv ON dumpy_kv (key)", NO_PARAMS)?;
+        conn.execute("CREATE INDEX IF NOT EXISTS dumpy_idx_index ON dumpy_index (table_name, index_name, vals)", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS dumpy_idx_index_obj ON dumpy_index (table_name, object_id)", [])?;
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS dumpy_idx_kv ON dumpy_kv (key)", [])?;
         Ok(())
     }
 
@@ -265,7 +267,7 @@ impl Dumpy {
         });
         let query = format!("SELECT data FROM dumpy_objects WHERE id IN ({}) ORDER BY id ASC", oids);
         let mut query = conn.prepare(&query[..])?;
-        let rows = query.query_map(NO_PARAMS, |row| {
+        let rows = query.query_map([], |row| {
             row.get("data")
         })?;
         let mut objects: Vec<Value> = Vec::new();
@@ -384,6 +386,11 @@ mod tests {
     use ::rusqlite::types::Value as SqlValue;
     use ::error::DResult;
 
+    // On wasm32 these run under `wasm-pack test --node` against real SQLite (sqlite-wasm-rs):
+    // wasm-bindgen-test's attribute shadows `#[test]`.
+    #[cfg(target_arch = "wasm32")]
+    use ::wasm_bindgen_test::wasm_bindgen_test as test;
+
     fn pre_test() -> (Connection, Dumpy) {
         let conn = Connection::open_in_memory().unwrap();
         let schema = jedi::parse(&String::from(r#"{"boards":null,"notes":{"indexes":[{"fields":["boards"]},{"name":"user_boards","fields":["user_id","boards"]}]}}"#)).unwrap();
@@ -392,7 +399,7 @@ mod tests {
     }
 
     fn index_count(conn: &Connection) -> i64 {
-        conn.query_row_and_then("SELECT COUNT(*) AS count FROM dumpy_index", &[], |row| -> DResult<i64> {
+        conn.query_row_and_then("SELECT COUNT(*) AS count FROM dumpy_index", [], |row| -> DResult<i64> {
             let data: SqlValue = row.get("count")?;
             match data {
                 SqlValue::Integer(ref x) => Ok(x.clone()),

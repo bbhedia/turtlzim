@@ -5,5 +5,9 @@ authors = ["Andrew Danger Lyon <orthecreedence@gmail.com>"]
 
 [dependencies]
 quick-error = "1.2.3"
-rusqlite = "0.20.0"
+rusqlite = "0.40"
 
+# Lets `wasm-pack test --node` run this crate's unit tests against real SQLite
+# (sqlite-wasm-rs, via rusqlite) on wasm32 -- see docs/wasm-port-plan.md 2.2.1.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

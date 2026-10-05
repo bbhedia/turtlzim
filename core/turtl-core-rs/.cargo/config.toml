@@ -1,0 +1,13 @@
+# Cargo configuration for core/turtl-core-rs (its own Cargo workspace).
+# Cargo only discovers this file when run from inside core/turtl-core-rs (or a
+# subdirectory), which is where the core is built and tested anyway.
+
+[env]
+# clouseau (clouseau/src/lib.rs) builds its full-text index with
+# `CREATE VIRTUAL TABLE ... USING fts4` and hands raw user text to MATCH. Native
+# rusqlite's bundled SQLite compiles FTS3/FTS4 in, but sqlite-wasm-rs's own C build
+# only enables FTS5. Ask its C compile for FTS3/FTS4 too, so the exact same SQL and
+# query syntax runs on every target (a switch to FTS5 would change native search
+# behaviour as well). The `cc` crate reads CFLAGS_<target> and appends it to the C
+# invocation; it is ignored for every other target. See docs/wasm-port-plan.md 2.2.1.
+CFLAGS_wasm32_unknown_unknown = "-DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS4 -DSQLITE_ENABLE_FTS3_PARENTHESIS"

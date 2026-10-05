@@ -7,7 +7,7 @@
 
 use ::std::sync::RwLock;
 
-use ::time;
+use ::util;
 use ::serde::ser::Serialize;
 use ::serde::de::DeserializeOwned;
 use ::jedi::{self, Value};
@@ -86,7 +86,7 @@ pub fn cid_w_timestamp(millis: u64) -> TResult<String> {
 
 /// Create a turtl object id from a client id
 pub fn cid() -> TResult<String> {
-    let now = time::get_time();
+    let now = util::get_time();
     let millis = ((now.sec as u64) * 1000) + ((now.nsec as u64) / 1000000);
     cid_w_timestamp(millis)
 }
