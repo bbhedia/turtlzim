@@ -15,7 +15,24 @@
       <button id="sample" type="button">Sample page</button>
     </header>
     <main><div id="editor"></div></main>
-    <footer class="status"><span id="status">Loading…</span></footer>
+    <footer class="status">
+      <span id="status">Loading…</span>
+      <details class="keys">
+        <summary>Keyboard shortcuts</summary>
+        <dl>
+          <dt>Ctrl+B &nbsp; Ctrl+I &nbsp; Ctrl+U</dt><dd>bold, italic, underline</dd>
+          <dt>Ctrl+Shift+X &nbsp; Ctrl+E</dt><dd>strikethrough, code</dd>
+          <dt>Ctrl+. &nbsp; Ctrl+,</dt><dd>superscript, subscript</dd>
+          <dt>Ctrl+K</dt><dd>link</dd>
+          <dt>Ctrl+Alt+1 … 5, 0</dt><dd>heading level, or plain text</dd>
+          <dt>Ctrl+Shift+8 &nbsp; 7 &nbsp; 9</dt><dd>bullet, numbered, checkbox list</dd>
+          <dt>Ctrl+Enter &nbsp; F12</dt><dd>tick a checkbox (Ctrl+Shift+Enter, F11: drop it)</dd>
+          <dt>Enter, Tab, Shift+Tab, Backspace</dt><dd>continue, nest, un-nest, or leave a list</dd>
+          <dt>Ctrl+click</dt><dd>follow a link</dd>
+        </dl>
+        <p>On a Mac, Cmd instead of Ctrl.</p>
+      </details>
+    </footer>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -2,11 +2,12 @@
 // See docs/zim-editor-plan.md for the design.
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { searchKeymap } from "@codemirror/search";
-import { EditorState } from "@codemirror/state";
+import { EditorState, Prec } from "@codemirror/state";
 import type { Extension } from "@codemirror/state";
 import { EditorView, drawSelection, highlightSpecialChars, keymap } from "@codemirror/view";
 import type { ViewUpdate } from "@codemirror/view";
 import { toggleCheckboxAt } from "./commands";
+import { zimKeymap } from "./keymap";
 import { decorationsField } from "./decorations";
 import { linkAt } from "./links";
 import type { LinkInfo } from "./links";
@@ -14,6 +15,8 @@ import { setShowMarkup, showMarkupField, syntaxField } from "./syntax";
 import { zimTheme } from "./theme";
 
 export { buildDecorations, decorationsField } from "./decorations";
+export * as commands from "./commands";
+export { zimKeymap } from "./keymap";
 export { classifyLink, linkAt } from "./links";
 export type { LinkInfo, LinkKind } from "./links";
 export { setShowMarkup, showMarkupField, spansOf, syntaxField } from "./syntax";
@@ -82,6 +85,8 @@ export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
       if (update.docChanged) options.onChange?.(update);
     }),
     ...(options.readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
+    // The Zim keys come first so that Enter, Tab and Backspace reach the list commands before the defaults.
+    Prec.high(keymap.of([...zimKeymap])),
     keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
     ...(options.extensions ?? []),
   ];

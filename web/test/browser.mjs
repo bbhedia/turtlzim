@@ -220,6 +220,74 @@ try {
     assertEqual(await status(), "Would follow a page link to Projects:Garden", "Ctrl-click reports the link");
   });
 
+  await scenario("formatting shortcuts, headings and list editing work with real key presses", async () => {
+    const select = (from, to) =>
+      page.evaluate(
+        ([from, to]) => {
+          const { view } = window.__zim.editor;
+          view.dispatch({ selection: { anchor: from, head: to } });
+          view.focus();
+        },
+        [from, to],
+      );
+
+    // Ctrl+B wraps the selection in bold; with the caret inside, it takes the bold off again.
+    await setText("hello world\n");
+    await select(0, 5);
+    await page.keyboard.press("Control+b");
+    assertEqual(await text(), "**hello** world\n", "Ctrl+B makes the selection bold");
+    await caretTo(4);
+    await page.keyboard.press("Control+b");
+    assertEqual(await text(), "hello world\n", "Ctrl+B inside the bold takes it off");
+    await page.keyboard.press("Control+i");
+    assertEqual(await text(), "//hello// world\n", "Ctrl+I italicizes the word under the caret");
+    await page.keyboard.press("Control+z");
+    assertEqual(await text(), "hello world\n", "undo takes the formatting back");
+
+    // Ctrl+Alt+1 makes the line a heading, again it makes it plain.
+    await setText("Title\n");
+    await caretTo(2);
+    await page.keyboard.press("Control+Alt+1");
+    assertEqual(await text(), "====== Title ======\n", "Ctrl+Alt+1 makes a level-1 heading");
+    await page.keyboard.press("Control+Alt+2");
+    assertEqual(await text(), "===== Title =====\n", "Ctrl+Alt+2 changes the level");
+    await page.keyboard.press("Control+Alt+0");
+    assertEqual(await text(), "Title\n", "Ctrl+Alt+0 makes it plain text again");
+
+    // Enter continues a list, Tab nests it, Enter on an empty item goes out, then off the list.
+    await setText("* one");
+    await caretTo(5);
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("two");
+    assertEqual(await text(), "* one\n* two", "Enter continues the list");
+    await page.keyboard.press("Tab");
+    assertEqual(await text(), "* one\n\t* two", "Tab nests the item");
+    await page.keyboard.press("Enter");
+    assertEqual(await text(), "* one\n\t* two\n\t* ", "Enter continues at the same depth");
+    await page.keyboard.press("Enter");
+    assertEqual(await text(), "* one\n\t* two\n* ", "Enter on an empty item goes out a level");
+    await page.keyboard.press("Enter");
+    assertEqual(await text(), "* one\n\t* two\n", "Enter on an empty top-level item ends the list");
+
+    // Numbers count up, and Backspace right after a marker takes the item off the list.
+    await setText("1. first");
+    await caretTo(8);
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("second");
+    assertEqual(await text(), "1. first\n2. second", "numbers count up");
+    await caretTo(12); // just after "2. "
+    await page.keyboard.press("Backspace");
+    assertEqual(await text(), "1. first\nsecond", "Backspace after the marker removes the marker");
+
+    // Ctrl+Enter ticks the box on the caret's line.
+    await setText("[ ] task\n");
+    await caretTo(6);
+    await page.keyboard.press("Control+Enter");
+    assertEqual(await text(), "[*] task\n", "Ctrl+Enter ticks the box");
+    await page.keyboard.press("Control+Enter");
+    assertEqual(await text(), "[ ] task\n", "and unticks it");
+  });
+
   await scenario("a CRLF page with a byte-order mark is shown as a clean page and saved back in its own dialect", async () => {
     const original = Buffer.from(
       "﻿Content-Type: text/x-zim-wiki\r\n\r\n====== Windows page ======\r\nSome **bold** text  \r\n\r\n[ ] a task\r\n",

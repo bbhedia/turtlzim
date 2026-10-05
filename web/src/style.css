@@ -93,3 +93,11 @@ main {
   .bar { padding: 0.5rem 0.75rem; }
   main { padding: 0; }
 }
+
+.keys { margin-top: 0.35rem; }
+.keys summary { cursor: pointer; }
+.keys dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.15rem 1rem; margin: 0.5rem 0; }
+.keys dt { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.75rem; color: var(--zim-fg); }
+.keys dd { margin: 0; }
+.keys p { margin: 0.25rem 0 0.5rem; }
+@media (max-width: 40rem) { .keys dl { grid-template-columns: 1fr; } }

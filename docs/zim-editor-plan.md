@@ -71,6 +71,48 @@ the number of spans of each kind equal to the constructs in the parsed tree. A m
 (breaking the tab mapping, an image length, a heading marker) is caught by at least two tests
 each.
 
+## Editing commands and keys
+
+All commands are pure CodeMirror `StateCommand`s over the editor state (`web/src/editor/commands.ts`),
+so they are tested without a DOM, and what counts as a bold span, a list item or a heading comes from
+the parser's spans, never from sniffing the text. `Mod` is Ctrl, or Cmd on a Mac.
+
+| Keys | Does |
+|---|---|
+| `Mod-B` `Mod-I` `Mod-U` | bold, italic, underline |
+| `Mod-Shift-X` (`Mod-T` in desktop/mobile shells) · `Mod-E` | strikethrough · inline code (`''verbatim''`) |
+| `Mod-.` · `Mod-,` | superscript · subscript |
+| `Mod-K` | link: wraps the selection in `[[ ]]`, or inserts an empty one |
+| `Mod-Alt-1` … `5` · `Mod-Alt-0` | heading level (again: back to plain) · plain text |
+| `Mod-Shift-8` · `7` · `9` | bullet · numbered · checkbox list (again: off) |
+| `Mod-Enter` · `F12`; `Mod-Shift-Enter` · `F11` | tick a box; drop it (a plain line or bullet becomes a checkbox) |
+| `Enter` | in a list: continue it (numbers and letters count up, boxes start open); on an empty item go out a level, then off the list |
+| `Backspace` right after a marker | take the item out a level, then off the list |
+| `Tab` · `Shift-Tab` | nest · un-nest the selected list items (a tab in plain text) |
+| `Ctrl/Cmd-click` | follow a link (`onNavigate`) |
+
+An inline toggle takes the style off when the caret or selection is inside a construct of that kind;
+otherwise it wraps the selection (trimmed, one piece per line), or the word under a bare caret, or
+inserts an empty pair. Keys a browser reserves for itself cannot be bound by a page (Ctrl+1..9 switch
+tabs, Ctrl+T opens one), hence Ctrl+Alt+digit for headings.
+
+## Performance
+
+The whole page is re-parsed on every change and decorations are rebuilt on every change or caret move;
+both are linear. Median time for one keystroke or caret move in the real browser, including the one
+frame (about 17 ms) it takes to paint:
+
+| Page | Lines | Load | Keystroke | Caret move |
+|---|---|---|---|---|
+| 14 KB | 460 | 22 ms | 17 ms | 17 ms |
+| 142 KB | 4,600 | 52 ms | 21 ms | 17 ms |
+| 284 KB | 9,200 | 82 ms | 35 ms | 17 ms |
+| 568 KB | 18,400 | 151 ms | 61 ms | 31 ms |
+
+Zim pages are a few KB, so there is a wide margin. If it is ever needed: parse only the changed block
+(blocks are separate), and build decorations only for the viewport. (The one known super-linear case
+is a single block holding thousands of *unmatched* inline openers; see the spec's known limits.)
+
 ## Layers and what verifies each
 
 | Layer | Where | Verified by |
@@ -112,4 +154,21 @@ selection shows it directly.
       checkboxes with click-to-toggle, rules, image and anchor chips), block styling, link
       activation (Ctrl/Cmd-click), `createZimEditor` / `zimExtensions` API.
 - [x] Tests in a real browser on real Zim pages; demo page (open, save, show markup).
-- [ ] Commands and keymap (bold/italic/... toggles, list continuation, indent, headings).
+- [x] Commands and keymap (inline toggles, headings, list continuation/indent/backspace, list kinds,
+      checkboxes, links): 34 headless tests plus real key presses in the browser test.
+
+## Not done yet
+
+- **Images** are chips with a drawn icon; nothing is loaded, because a standalone editor has no
+  notebook to resolve `./pictures/a.png` against. That arrives with the notebook layer.
+- **Internal links** only raise `onNavigate({kind: "page", target})`; resolving and completing page
+  names (typing `[[` to get a list) needs the notebook too.
+- **Tables and object blocks** (`{{{code ...}}}`) are shown raw, as the format crate keeps them opaque.
+- **The header block** is shown, dimmed. Zim hides it; folding it is a small follow-up.
+- **Accessibility**: Tab is a list command (it traps keyboard focus, as most editors do; CodeMirror's
+  tab-focus-mode toggle is not wired up), and the checkbox/bullet widgets have roles but no keyboard
+  path other than the commands above.
+- **Mobile**: nothing touch-specific yet (long-press link follow, a formatting toolbar). The editor
+  itself is a plain CodeMirror view, which works with touch and IME input.
+- **The Zim parser's `{{{`/table support** (and any new inline kind) will need span kinds added in
+  both `highlight.rs` and `web/src/kinds.ts`; `checkCodes` fails at load time if the two disagree.
