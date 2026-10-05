@@ -107,8 +107,8 @@ The "WASM port has not been started" gap above is closed: `turtl_core` now build
 `wasm32-unknown-unknown` with the same async code as native (edition 2018, `async fn` all the way
 up, reqwest 0.13, `rusqlite` 0.40 on SQLite compiled to wasm, libsodium.js injected by the host,
 OPFS persistence). What it does, what differs from native and why, and the evidence are in
-`docs/wasm-port-plan.md` (Status, and the table at Step 5). The one open feature there is note
-attachments on wasm32.
+`docs/wasm-port-plan.md` (Status, and the table at Step 5). Everything on the original roadmap is
+done and verified on both targets, note attachments included.
 
 Everything below runs from `core/turtl-core-rs`, after the one-time setup in `CLAUDE.md`:
 
