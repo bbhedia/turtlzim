@@ -4,9 +4,9 @@
 //! `#[cfg(target_arch = "wasm32")]`: native calls `sodiumoxide` (libsodium C
 //! bindings, which have no `wasm32-unknown-unknown` build story -- see
 //! docs/wasm-port-plan.md §1); wasm32 calls the very same libsodium C code,
-//! Emscripten-built (npm `libsodium-wrappers-sumo`), through a wasm-bindgen JS
-//! bridge (`wasm_bridge`, below, backed by `js/sodium_bridge.js`), per
-//! docs/wasm-port-plan.md decision 2.1. That makes byte-identical output a
+//! Emscripten-built (npm `libsodium-wrappers-sumo`), through the libsodium object the
+//! host injects (`wasm_sodium.rs`, per docs/wasm-port-plan.md decision 2.1). That makes
+//! byte-identical output a
 //! structural property rather than something to hope for, and it is verified:
 //! the crate's own known-answer tests (SHA, HMAC, scrypt key derivation, AEAD
 //! envelopes, a sealed box produced by the original JS client) run on BOTH
@@ -16,9 +16,9 @@
 //! Because libsodium-wrappers needs an async `sodium.ready` before any of its
 //! `crypto_*`/`randombytes_*` calls work, and wasm32-unknown-unknown in a
 //! browser is single-threaded (a sync fn can't block on a JS Promise without
-//! deadlocking), callers MUST call and await `init_wasm_crypto()` exactly
-//! once before using any crypto:: function on wasm32 -- see that function's
-//! doc comment.
+//! deadlocking), the host MUST call and await `initWasmCrypto(sodium)`
+//! (`wasm_sodium::init_wasm_crypto`) exactly once before using any crypto::
+//! function on wasm32 -- see that function's doc comment.
 
 use ::hex;
 use ::base64;
@@ -31,161 +31,8 @@ use ::sodiumoxide::crypto::auth as sodium_auth;
 #[cfg(not(target_arch = "wasm32"))]
 use ::sodiumoxide::crypto::pwhash;
 #[cfg(target_arch = "wasm32")]
-use ::wasm_bindgen::prelude::*;
-#[cfg(target_arch = "wasm32")]
-use ::std::sync::atomic::{AtomicBool, Ordering};
+use ::crypto::wasm_sodium;
 use ::crypto::error::{CResult, CryptoError};
-
-/// wasm32 real-crypto bridge to `libsodium-wrappers-sumo` (real libsodium.js), per
-/// docs/wasm-port-plan.md decision 2.1. See `../../js/sodium_bridge.js` for
-/// the JS glue this binds to -- this is the same bridge mechanism already
-/// proven byte-exact against native `sodiumoxide` in the standalone
-/// `core/wasm-crypto-poc` crate.
-#[cfg(target_arch = "wasm32")]
-mod wasm_bridge {
-    use ::wasm_bindgen::prelude::*;
-
-    #[wasm_bindgen(module = "/js/sodium_bridge.js")]
-    extern "C" {
-        /// Resolves once libsodium-wrappers' underlying wasm module has
-        /// finished loading. Must be awaited (via `init_wasm_crypto()`,
-        /// below) before any other function in this module is called.
-        #[wasm_bindgen(js_name = sodiumReady)]
-        pub fn sodium_ready() -> ::js_sys::Promise;
-
-        /// Real chacha20poly1305_ietf AEAD seal via libsodium-wrappers.
-        #[wasm_bindgen(js_name = aeadEncrypt, catch)]
-        pub fn aead_encrypt(key: &[u8], nonce: &[u8], ad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsValue>;
-
-        /// Real chacha20poly1305_ietf AEAD open via libsodium-wrappers.
-        #[wasm_bindgen(js_name = aeadDecrypt, catch)]
-        pub fn aead_decrypt(key: &[u8], nonce: &[u8], ad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, JsValue>;
-
-        /// Real CSPRNG bytes via libsodium-wrappers' randombytes_buf.
-        #[wasm_bindgen(js_name = randomBytes, catch)]
-        pub fn random_bytes(len: u32) -> Result<Vec<u8>, JsValue>;
-
-        /// crypto_hash_sha256.
-        #[wasm_bindgen(js_name = hashSha256, catch)]
-        pub fn hash_sha256(data: &[u8]) -> Result<Vec<u8>, JsValue>;
-
-        /// crypto_hash_sha512.
-        #[wasm_bindgen(js_name = hashSha512, catch)]
-        pub fn hash_sha512(data: &[u8]) -> Result<Vec<u8>, JsValue>;
-
-        /// crypto_auth (HMAC-SHA512-256). `key` must already be validated as 32 bytes.
-        #[wasm_bindgen(js_name = hmacSha512256, catch)]
-        pub fn hmac_sha512256(key: &[u8], data: &[u8]) -> Result<Vec<u8>, JsValue>;
-
-        /// scrypt (crypto_pwhash_scryptsalsa208sha256). `salt` must already be validated as 32 bytes.
-        #[wasm_bindgen(js_name = scryptDeriveKey, catch)]
-        pub fn scrypt_derive_key(password: &[u8], salt: &[u8], ops_limit: u32, mem_limit: u32, out_len: u32) -> Result<Vec<u8>, JsValue>;
-
-        /// crypto_box_keypair: the 32-byte public key followed by the 32-byte secret key.
-        #[wasm_bindgen(js_name = boxKeypair, catch)]
-        pub fn box_keypair() -> Result<Vec<u8>, JsValue>;
-
-        /// crypto_box_seal (anonymous sealed box). `pubkey` must already be validated as 32 bytes.
-        #[wasm_bindgen(js_name = sealedBoxSeal, catch)]
-        pub fn sealed_box_seal(pubkey: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsValue>;
-
-        /// crypto_box_seal_open; errors if the box doesn't open. Keys must already be validated as 32 bytes.
-        #[wasm_bindgen(js_name = sealedBoxOpen, catch)]
-        pub fn sealed_box_open(pubkey: &[u8], privkey: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, JsValue>;
-    }
-}
-
-/// Tracks whether `init_wasm_crypto()` has resolved yet. wasm32-unknown-unknown
-/// in a browser is single-threaded, so a plain atomic flag is enough here --
-/// no real synchronization primitive (e.g. a `Mutex`) is needed.
-#[cfg(target_arch = "wasm32")]
-static CRYPTO_READY: AtomicBool = AtomicBool::new(false);
-
-/// A manual (non-`async fn`) `Future` that awaits `sodium.ready` and then
-/// marks `CRYPTO_READY`. Written by hand rather than as `async fn .. { ..
-/// .await .. }` because `turtl_core` is (and, per docs/wasm-port-plan.md,
-/// stays) a Rust 2015-edition crate -- `async`/`.await` syntax is rejected
-/// outright there (`error[E0670]: async fn is not permitted in Rust 2015`),
-/// and bumping the crate's edition to get the sugar is NOT a safe, narrow
-/// change: it was tried and reverted during this milestone (edition 2018
-/// broke ~600 unrelated call sites crate-wide, from this crate's pervasive
-/// 2015-style macro/path resolution). Implementing the `Future` trait by
-/// hand has no such restriction -- only the `async`/`.await` *syntax* is
-/// edition-gated, not the trait itself.
-#[cfg(target_arch = "wasm32")]
-struct InitCryptoFuture {
-    ready: ::wasm_bindgen_futures::JsFuture,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl ::std::future::Future for InitCryptoFuture {
-    type Output = Result<JsValue, JsValue>;
-
-    fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context) -> ::std::task::Poll<Self::Output> {
-        let this = self.get_mut();
-        match ::std::pin::Pin::new(&mut this.ready).poll(cx) {
-            ::std::task::Poll::Ready(Ok(_)) => {
-                CRYPTO_READY.store(true, Ordering::Relaxed);
-                ::std::task::Poll::Ready(Ok(JsValue::UNDEFINED))
-            }
-            ::std::task::Poll::Ready(Err(e)) => ::std::task::Poll::Ready(Err(e)),
-            ::std::task::Poll::Pending => ::std::task::Poll::Pending,
-        }
-    }
-}
-
-/// Must be called and awaited (from JS: `await wasm.initWasmCrypto()`)
-/// exactly once, before any other `crypto::` function is used on wasm32 --
-/// `rand_bytes()`, `chacha20poly1305::{encrypt, decrypt}`, the hashes, `hmac()`,
-/// `gen_key()` (scrypt), the `asym` sealed-box functions, and everything
-/// built on top of them (`crypto::encrypt()`/`crypto::decrypt()` in
-/// `mod.rs`, and everything in `models/` that goes through those, e.g.
-/// `models/protected.rs`, `models/file.rs`, `models/user.rs`).
-///
-/// This one entry point exists (and is the *only* async-flavored crypto fn)
-/// because `libsodium-wrappers` needs an async `sodium.ready` before any of
-/// its `crypto_*`/`randombytes_*` calls work (the underlying Emscripten wasm
-/// module has to finish loading first), but `wasm32-unknown-unknown` in a
-/// browser is single-threaded: a synchronous Rust fn cannot block on a JS
-/// Promise without deadlocking (nothing could run the microtask queue that
-/// would resolve it). Making `rand_bytes()`/`chacha20poly1305::{encrypt,
-/// decrypt}` themselves async instead would force `crypto::encrypt()`/
-/// `decrypt()` and everything that calls them to become async too -- a much
-/// bigger, separate "make the whole crate async" refactor, not part of this
-/// milestone. So instead: await this once (via the returned `Promise`), then
-/// every other crypto function stays a plain, synchronous fn with the exact
-/// same signature as native, calling into the (by-then-ready) synchronous JS
-/// bridge functions above.
-///
-/// Returns a `js_sys::Promise` (rather than being an `async fn`, which this
-/// Rust-2015-edition crate cannot use -- see `InitCryptoFuture`'s doc comment)
-/// so a JS embedder can `await wasm.initWasmCrypto()` directly, and so
-/// in-crate Rust callers (e.g. this file's own wasm-bindgen-test tests, in
-/// `crypto/mod.rs`) can drive it via `wasm_bindgen_futures::JsFuture`.
-/// Calling any of those crypto functions before this has resolved is a
-/// programming error on the embedder's part: `require_wasm_crypto_ready()`
-/// turns it into a `CryptoError::OperationFailed` with a clear message, not a
-/// silent no-op or fallback.
-#[cfg(target_arch = "wasm32")]
-#[wasm_bindgen(js_name = initWasmCrypto)]
-pub fn init_wasm_crypto() -> ::js_sys::Promise {
-    let fut = InitCryptoFuture { ready: ::wasm_bindgen_futures::JsFuture::from(wasm_bridge::sodium_ready()) };
-    ::wasm_bindgen_futures::future_to_promise(fut)
-}
-
-/// Returns an error unless `init_wasm_crypto()` has already resolved. Called
-/// at the top of every real wasm32 crypto primitive below.
-#[cfg(target_arch = "wasm32")]
-fn require_wasm_crypto_ready(fn_name: &str) -> CResult<()> {
-    if CRYPTO_READY.load(Ordering::Relaxed) {
-        Ok(())
-    } else {
-        Err(CryptoError::OperationFailed(format!(
-            "crypto::low::{}() -- wasm crypto bridge not initialized; call and await crypto::low::init_wasm_crypto() once before any crypto:: call (see docs/wasm-port-plan.md)",
-            fn_name
-        )))
-    }
-}
 
 /// Abstract the size of hmac keys
 #[allow(dead_code)]
@@ -224,14 +71,13 @@ pub fn sha256(data: &[u8]) -> CResult<Vec<u8>> {
 }
 /// Run a sha256 hash on some data
 ///
-/// libsodium.js's crypto_hash_sha256 via the JS bridge. Requires `init_wasm_crypto()` to have been
-/// awaited first.
+/// libsodium.js's crypto_hash_sha256, through the injected libsodium object (see `wasm_sodium`).
+/// Requires `initWasmCrypto(sodium)` to have been awaited first.
 #[allow(dead_code)]
 #[cfg(target_arch = "wasm32")]
 pub fn sha256(data: &[u8]) -> CResult<Vec<u8>> {
-    require_wasm_crypto_ready("sha256")?;
-    wasm_bridge::hash_sha256(data)
-        .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::sha256() -- js bridge error: {:?}", e)))
+    wasm_sodium::with_sodium("sha256", |s| s.crypto_hash_sha256(data, "uint8array"))?
+        .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::sha256() -- libsodium.js error: {:?}", e)))
 }
 
 /// Run a sha512 hash on some data
@@ -241,13 +87,12 @@ pub fn sha512(data: &[u8]) -> CResult<Vec<u8>> {
 }
 /// Run a sha512 hash on some data
 ///
-/// libsodium.js's crypto_hash_sha512 via the JS bridge. Requires `init_wasm_crypto()` to have been
-/// awaited first.
+/// libsodium.js's crypto_hash_sha512, through the injected libsodium object (see `wasm_sodium`).
+/// Requires `initWasmCrypto(sodium)` to have been awaited first.
 #[cfg(target_arch = "wasm32")]
 pub fn sha512(data: &[u8]) -> CResult<Vec<u8>> {
-    require_wasm_crypto_ready("sha512")?;
-    wasm_bridge::hash_sha512(data)
-        .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::sha512() -- js bridge error: {:?}", e)))
+    wasm_sodium::with_sodium("sha512", |s| s.crypto_hash_sha512(data, "uint8array"))?
+        .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::sha512() -- libsodium.js error: {:?}", e)))
 }
 
 /// Convert a byte array into a hex string
@@ -286,18 +131,18 @@ pub fn hmac(key: &[u8], data: &[u8]) -> CResult<Vec<u8>> {
 /// Given a key (password/secret) and a set of data, run an HMAC-SHA512256 and
 /// return the binary result as a u8 vec.
 ///
-/// libsodium.js's crypto_auth via the JS bridge. The key length is checked here, so a bad key is
-/// the same `BadData` error native gives (libsodium.js would throw its own, differently-worded
-/// one). Requires `init_wasm_crypto()` to have been awaited first.
+/// libsodium.js's crypto_auth, through the injected libsodium object (see `wasm_sodium`). The key
+/// length is checked here, so a bad key is the same `BadData` error native gives (libsodium.js
+/// would throw its own, differently-worded one). Requires `initWasmCrypto(sodium)` to have been
+/// awaited first.
 #[allow(dead_code)]
 #[cfg(target_arch = "wasm32")]
 pub fn hmac(key: &[u8], data: &[u8]) -> CResult<Vec<u8>> {
     if key.len() != HMAC_KEYLEN {
         return Err(CryptoError::BadData(format!("crypto::low::hmac() -- invalid hmac key supplied")));
     }
-    require_wasm_crypto_ready("hmac")?;
-    wasm_bridge::hmac_sha512256(key, data)
-        .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::hmac() -- js bridge error: {:?}", e)))
+    wasm_sodium::with_sodium("hmac", |s| s.crypto_auth(data, key, "uint8array"))?
+        .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::hmac() -- libsodium.js error: {:?}", e)))
 }
 
 /// Do a secure comparison of two byte arrays.
@@ -336,14 +181,13 @@ pub fn rand_bytes(len: usize) -> CResult<Vec<u8>> {
 }
 /// Generate N number of CS random bytes.
 ///
-/// Real implementation via the libsodium.js JS bridge (docs/wasm-port-plan.md
-/// decision 2.1) -- NOT a second RNG crate/implementation. Requires
-/// `init_wasm_crypto()` to have been awaited first.
+/// libsodium.js's randombytes_buf, through the injected libsodium object (see `wasm_sodium`) --
+/// NOT a second RNG crate/implementation. Requires `initWasmCrypto(sodium)` to have been awaited
+/// first.
 #[cfg(target_arch = "wasm32")]
 pub fn rand_bytes(len: usize) -> CResult<Vec<u8>> {
-    require_wasm_crypto_ready("rand_bytes")?;
-    wasm_bridge::random_bytes(len as u32)
-        .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::rand_bytes() -- js bridge error: {:?}", e)))
+    wasm_sodium::with_sodium("rand_bytes", |s| s.randombytes_buf(len as u32, "uint8array"))?
+        .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::rand_bytes() -- libsodium.js error: {:?}", e)))
 }
 
 /// Generate a random u64. Uses rand_bytes() and bit shifting to build a u64.
@@ -396,18 +240,20 @@ pub fn gen_key(password: &[u8], salt: &[u8], cpu: usize, mem: usize) -> CResult<
 /// Generate a key given a password and a salt
 ///
 /// scrypt via libsodium.js (`crypto_pwhash_scryptsalsa208sha256`, the same function native's
-/// `pwhash::derive_key` calls), so the derived key is byte-identical to native and to every
-/// existing client: this is what turns a user's passphrase into the master key. The password is
-/// passed as raw bytes. The salt length is checked here (native's `Salt::from_slice` does the
-/// same). Requires `init_wasm_crypto()` to have been awaited first.
+/// `pwhash::derive_key` calls), through the injected libsodium object, so the derived key is
+/// byte-identical to native and to every existing client: this is what turns a user's passphrase
+/// into the master key. The password is passed as raw bytes. The salt length is checked here
+/// (native's `Salt::from_slice` does the same). Requires `initWasmCrypto(sodium)` to have been
+/// awaited first.
 #[cfg(target_arch = "wasm32")]
 pub fn gen_key(password: &[u8], salt: &[u8], cpu: usize, mem: usize) -> CResult<Vec<u8>> {
     if salt.len() != KEYGEN_SALT_LEN {
         return Err(CryptoError::BadData(format!("crypto::low::gen_key() -- bad salt given")));
     }
-    require_wasm_crypto_ready("gen_key")?;
     // usize is 32 bits on wasm32, so the `as u32` casts are lossless.
-    wasm_bridge::scrypt_derive_key(password, salt, cpu as u32, mem as u32, chacha20poly1305::keylen() as u32)
+    wasm_sodium::with_sodium("gen_key", |s| {
+        s.crypto_pwhash_scryptsalsa208sha256(chacha20poly1305::keylen() as u32, password, salt, cpu as u32, mem as u32, "uint8array")
+    })?
         .map_err(|_| CryptoError::OperationFailed(format!("crypto::low::gen_key() -- could not generate key (OOM?)")))
 }
 
@@ -417,6 +263,8 @@ pub mod chacha20poly1305 {
     #[cfg(not(target_arch = "wasm32"))]
     use ::sodiumoxide::crypto::aead::chacha20poly1305_ietf as aead;
     use ::crypto::{CResult, CryptoError};
+    #[cfg(target_arch = "wasm32")]
+    use ::crypto::wasm_sodium;
 
     /// Get the key length for chacha20poly1305
     #[cfg(not(target_arch = "wasm32"))]
@@ -470,16 +318,23 @@ pub mod chacha20poly1305 {
     }
     /// Encrypt data using chacha20poly1305
     ///
-    /// Real implementation via the libsodium.js JS bridge (docs/wasm-port-plan.md
-    /// decision 2.1) -- byte-identical to native by construction (same
-    /// underlying C implementation, just Emscripten-built), already proven
-    /// out in `core/wasm-crypto-poc`. Requires `init_wasm_crypto()` to have
-    /// been awaited first.
+    /// libsodium.js's chacha20poly1305-ietf seal, through the injected libsodium object (see
+    /// `wasm_sodium`) -- byte-identical to native by construction (same C implementation,
+    /// Emscripten-built), and proven out in `core/wasm-crypto-poc`. The key and nonce lengths are
+    /// checked here, so bad ones are native's `BadData` errors. Requires `initWasmCrypto(sodium)` to
+    /// have been awaited first.
     #[cfg(target_arch = "wasm32")]
     pub fn encrypt(key: &[u8], nonce: &[u8], auth: &[u8], plaintext: &[u8]) -> CResult<Vec<u8>> {
-        super::require_wasm_crypto_ready("chacha20poly1305::encrypt")?;
-        super::wasm_bridge::aead_encrypt(key, nonce, auth, plaintext)
-            .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::chacha20poly1305::encrypt() -- js bridge error: {:?}", e)))
+        if key.len() != keylen() {
+            return Err(CryptoError::BadData(format!("crypto::low::encrypt() -- bad key given")));
+        }
+        if nonce.len() != noncelen() {
+            return Err(CryptoError::BadData(format!("crypto::low::encrypt() -- bad nonce given")));
+        }
+        wasm_sodium::with_sodium("chacha20poly1305::encrypt", |s| {
+            s.crypto_aead_chacha20poly1305_ietf_encrypt(plaintext, auth, &::wasm_bindgen::JsValue::NULL, nonce, key, "uint8array")
+        })?
+            .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::chacha20poly1305::encrypt() -- libsodium.js error: {:?}", e)))
     }
 
     /// Decrypt data using chacha20poly1305
@@ -500,22 +355,30 @@ pub mod chacha20poly1305 {
     }
     /// Decrypt data using chacha20poly1305
     ///
-    /// Real implementation via the libsodium.js JS bridge (docs/wasm-port-plan.md
-    /// decision 2.1), same rationale/provenance as encrypt() above. Requires
-    /// `init_wasm_crypto()` to have been awaited first. Once that's true, any
-    /// error from the bridge here (bad key/nonce, or -- the common case --
-    /// tampered/mismatched additional-authenticated-data or ciphertext) means
-    /// authentication failed, mirroring native's `aead::open` error mapping.
+    /// libsodium.js's chacha20poly1305-ietf open, through the injected libsodium object; same
+    /// rationale/provenance as encrypt() above. Once the key and nonce lengths check out, any error
+    /// from libsodium.js here means authentication failed (tampered or mismatched
+    /// additional-authenticated-data or ciphertext), mirroring native's `aead::open` error mapping.
+    /// Requires `initWasmCrypto(sodium)` to have been awaited first.
     #[cfg(target_arch = "wasm32")]
     pub fn decrypt(key: &[u8], nonce: &[u8], auth: &[u8], ciphertext: &[u8]) -> CResult<Vec<u8>> {
-        super::require_wasm_crypto_ready("chacha20poly1305::decrypt")?;
-        super::wasm_bridge::aead_decrypt(key, nonce, auth, ciphertext)
+        if key.len() != keylen() {
+            return Err(CryptoError::BadData(format!("crypto::low::decrypt() -- bad key given")));
+        }
+        if nonce.len() != noncelen() {
+            return Err(CryptoError::BadData(format!("crypto::low::decrypt() -- bad nonce given")));
+        }
+        wasm_sodium::with_sodium("chacha20poly1305::decrypt", |s| {
+            s.crypto_aead_chacha20poly1305_ietf_decrypt(&::wasm_bindgen::JsValue::NULL, ciphertext, auth, nonce, key, "uint8array")
+        })?
             .map_err(|_| CryptoError::Authentication(format!("crypto::low::chacha20poly1305::decrypt() -- authentication failed while decrypting")))
     }
 }
 
 pub mod asym {
     use ::crypto::error::{CryptoError, CResult};
+    #[cfg(target_arch = "wasm32")]
+    use ::crypto::wasm_sodium;
     #[cfg(not(target_arch = "wasm32"))]
     use ::sodiumoxide::crypto::box_ as crypto_box;
     #[cfg(not(target_arch = "wasm32"))]
@@ -535,17 +398,21 @@ pub mod asym {
 
     /// Generate a public/private keypair for use with the crypto::box lib
     ///
-    /// libsodium.js's crypto_box_keypair via the JS bridge. Requires `init_wasm_crypto()` to have
-    /// been awaited first.
+    /// libsodium.js's crypto_box_keypair, through the injected libsodium object (see
+    /// `wasm_sodium`). Requires `initWasmCrypto(sodium)` to have been awaited first.
     #[cfg(target_arch = "wasm32")]
     pub fn keygen() -> CResult<(Vec<u8>, Vec<u8>)> {
-        super::require_wasm_crypto_ready("asym::keygen")?;
-        let both = super::wasm_bridge::box_keypair()
-            .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::asym::keygen() -- js bridge error: {:?}", e)))?;
-        if both.len() != PUBLICKEYBYTES + SECRETKEYBYTES {
-            return Err(CryptoError::OperationFailed(format!("crypto::low::asym::keygen() -- js bridge returned {} bytes, expected {}", both.len(), PUBLICKEYBYTES + SECRETKEYBYTES)));
+        let pair = wasm_sodium::with_sodium("asym::keygen", |s| s.crypto_box_keypair("uint8array"))?
+            .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::asym::keygen() -- libsodium.js error: {:?}", e)))?;
+        let pk = wasm_sodium::bytes_property(&pair, "publicKey")?;
+        let sk = wasm_sodium::bytes_property(&pair, "privateKey")?;
+        if pk.len() != PUBLICKEYBYTES || sk.len() != SECRETKEYBYTES {
+            return Err(CryptoError::OperationFailed(format!(
+                "crypto::low::asym::keygen() -- libsodium.js returned a {}-byte public key and a {}-byte secret key, expected {} and {}",
+                pk.len(), sk.len(), PUBLICKEYBYTES, SECRETKEYBYTES
+            )));
         }
-        Ok((both[..PUBLICKEYBYTES].to_vec(), both[PUBLICKEYBYTES..].to_vec()))
+        Ok((pk, sk))
     }
 
     /// Encrypt data using crypto_box (asym)
@@ -559,16 +426,16 @@ pub mod asym {
     }
     /// Encrypt data using crypto_box (asym)
     ///
-    /// libsodium.js's crypto_box_seal via the JS bridge; the key length is checked here so a bad
-    /// key is native's `BadData` error. Requires `init_wasm_crypto()` to have been awaited first.
+    /// libsodium.js's crypto_box_seal, through the injected libsodium object; the key length is
+    /// checked here so a bad key is native's `BadData` error. Requires `initWasmCrypto(sodium)` to
+    /// have been awaited first.
     #[cfg(target_arch = "wasm32")]
     pub fn encrypt(their_pubkey: &[u8], plaintext: &[u8]) -> CResult<Vec<u8>> {
         if their_pubkey.len() != PUBLICKEYBYTES {
             return Err(CryptoError::BadData(String::from("crypto::low::async::encrypt() -- bad public key given")));
         }
-        super::require_wasm_crypto_ready("asym::encrypt")?;
-        super::wasm_bridge::sealed_box_seal(their_pubkey, plaintext)
-            .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::asym::encrypt() -- js bridge error: {:?}", e)))
+        wasm_sodium::with_sodium("asym::encrypt", |s| s.crypto_box_seal(plaintext, their_pubkey, "uint8array"))?
+            .map_err(|e| CryptoError::OperationFailed(format!("crypto::low::asym::encrypt() -- libsodium.js error: {:?}", e)))
     }
 
     /// Decrypt data using crypto_box (asym)
@@ -589,9 +456,10 @@ pub mod asym {
     }
     /// Decrypt data using crypto_box (asym)
     ///
-    /// libsodium.js's crypto_box_seal_open via the JS bridge; the key lengths are checked here so a
-    /// bad key is native's `BadData` error, and a box that doesn't open (wrong keys or tampered
-    /// data) is native's "decrypt failed". Requires `init_wasm_crypto()` to have been awaited first.
+    /// libsodium.js's crypto_box_seal_open, through the injected libsodium object; the key lengths
+    /// are checked here so a bad key is native's `BadData` error, and a box that doesn't open (wrong
+    /// keys or tampered data) is native's "decrypt failed". Requires `initWasmCrypto(sodium)` to
+    /// have been awaited first.
     #[cfg(target_arch = "wasm32")]
     pub fn decrypt(our_pubkey: &[u8], our_privkey: &[u8], ciphertext: &[u8]) -> CResult<Vec<u8>> {
         if our_pubkey.len() != PUBLICKEYBYTES {
@@ -600,8 +468,7 @@ pub mod asym {
         if our_privkey.len() != SECRETKEYBYTES {
             return Err(CryptoError::BadData(String::from("crypto::low::async::decrypt() -- bad private key given")));
         }
-        super::require_wasm_crypto_ready("asym::decrypt")?;
-        super::wasm_bridge::sealed_box_open(our_pubkey, our_privkey, ciphertext)
+        wasm_sodium::with_sodium("asym::decrypt", |s| s.crypto_box_seal_open(ciphertext, our_pubkey, our_privkey, "uint8array"))?
             .map_err(|_| CryptoError::OperationFailed(String::from("crypto::low::async::decrypt() -- decrypt failed")))
     }
 }
@@ -836,6 +703,11 @@ mod tests {
         // scrypt wants exactly KEYGEN_SALT_LEN bytes of salt
         assert!(is_bad_data(gen_key(b"pw", &[7u8; 16], KEYGEN_OPS_DEFAULT, KEYGEN_MEM_DEFAULT)));
         assert!(is_bad_data(gen_key(b"pw", &[7u8; 33], KEYGEN_OPS_DEFAULT, KEYGEN_MEM_DEFAULT)));
+        // chacha20poly1305 wants a 32-byte key and a 12-byte nonce, for both seal and open
+        assert!(is_bad_data(chacha20poly1305::encrypt(&[7u8; 16], &[7u8; 12], b"ad", b"x")));
+        assert!(is_bad_data(chacha20poly1305::encrypt(&[7u8; 32], &[7u8; 8], b"ad", b"x")));
+        assert!(is_bad_data(chacha20poly1305::decrypt(&[7u8; 16], &[7u8; 12], b"ad", &[0u8; 32])));
+        assert!(is_bad_data(chacha20poly1305::decrypt(&[7u8; 32], &[7u8; 8], b"ad", &[0u8; 32])));
         // sealed boxes want 32-byte keys
         let (pk, sk) = asym::keygen().unwrap();
         assert_eq!(pk.len(), 32);

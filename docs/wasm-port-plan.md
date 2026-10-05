@@ -134,6 +134,33 @@ uses libsodium.js in-browser for Argon2id + XChaCha20-Poly1305 in a real E2EE pr
 `libsodium-wrappers-sumo` has them, with the same API and init. See Step 4b-5a in the Status
 section for the verification.
 
+**Refinement (2026-10-05): inject libsodium, don't import it.** The core ships no JS of its own.
+The host app loads libsodium.js and hands it in; Rust calls its methods through typed wasm-bindgen
+bindings (`core/turtl-core-rs/src/crypto/wasm_sodium.rs`):
+
+```js
+import init, { initWasmCrypto, cryptoSelfTest } from 'turtl_core';  // the wasm-pack output
+import sodium from 'libsodium-wrappers-sumo';                       // the HOST owns this dependency
+
+await init();                    // load the core's wasm
+await initWasmCrypto(sodium);    // awaits sodium.ready, checks it is the sumo build, keeps it
+cryptoSelfTest();                // optional startup assertion: known answers from the injected build
+```
+
+Why this over a JS bridge file the crate imports itself: (1) there is no CommonJS-vs-ES-module split
+per wasm-bindgen target (a bridge file must be written in the module system of the target it is
+built for, `require` for `nodejs`/`--node` tests but `import` for `web`/`bundler`), so one wasm
+serves `web`, `bundler`, `nodejs` and Deno alike; (2) production builds have no npm dependency of
+the crate at all, which also removes the wasm-pack `package.json` trap (Step 4b-1 follow-up d);
+(3) the dependency lives in the web app's (or Tauri/Capacitor shell's) own `package.json`, resolved
+by the bundler it already uses, so quirks in how libsodium.js packages itself are the host's to
+handle rather than the core's; (4) the trust model is unchanged: the host is the app, so which
+libsodium build it loads was always the app's responsibility (SRI, pinned service worker; open
+issue #6), and `cryptoSelfTest()` lets it assert at startup that what it injected behaves like
+native (it catches a wrong build or a version mismatch, not a malicious host). The alternative
+that was weighed, a second ES-module copy of the bridge chosen by a build flag, would have left a
+JS file and a per-target duplicate inside the crate.
+
 **Known integration costs:** libsodium.js requires an async `await sodium.ready` init before
 any call (native init is currently synchronous); two wasm modules load instead of one; every
 crypto call crosses a JS↔wasm boundary. **Non-negotiable regardless of approach:** a
@@ -282,13 +309,14 @@ building."
 
 ---
 
-## 3. Net result: one wasm binary, one JS-bridged crypto module
+## 3. Net result: one wasm binary, one host-injected crypto module
 
 The chosen architecture is: **core-rs's own Rust code + `sqlite-wasm-rs` (real SQLite) compile
 together into one `wasm32-unknown-unknown` binary** (matching core-rs's native "one process,
-direct FFI" shape for storage), which **calls out over a JS bridge to a second, independent
-wasm module (`libsodium.js`) only for cryptography** (the one place where "byte-identical to
-native" is non-negotiable and only a real-libsodium approach delivers it structurally).
+direct FFI" shape for storage), which **calls out to a second, independent wasm module
+(`libsodium.js`, injected by the host app via `initWasmCrypto(sodium)`) only for cryptography**
+(the one place where "byte-identical to native" is non-negotiable and only a real-libsodium
+approach delivers it structurally).
 Networking and concurrency are unified on async/await across both native and web targets.
 
 ---
@@ -387,7 +415,10 @@ Networking and concurrency are unified on async/await across both native and web
       **Changed:** `Cargo.toml`, `src/lib.rs`, `src/error.rs`, `src/crypto/low.rs`,
       `src/dispatch.rs`, `src/turtl.rs`, `src/models/user.rs`, `src/sync/mod.rs`,
       `src/util/thredder.rs`.
-- [x] Step 4a (crypto hot path only): wired `core/wasm-crypto-poc`'s real-libsodium.js bridge
+- [x] Step 4a (crypto hot path only) -- *the JS-bridge mechanism described in this entry was
+      replaced by host injection in Step 4b-4 (`js/sodium_bridge.js` and the `wasm_bridge` module
+      no longer exist); the async-init reasoning and the verification still stand*:
+      wired `core/wasm-crypto-poc`'s real-libsodium.js bridge
       into the ACTUAL `turtl_core::crypto` module -- **done**. `crypto/low.rs`'s wasm32 stubs for
       `rand_bytes()` and `chacha20poly1305::{encrypt, decrypt}` (the only primitives
       `crypto::encrypt`/`crypto::decrypt` in `mod.rs` -- the crate's real note/board/keychain
@@ -509,8 +540,10 @@ Networking and concurrency are unified on async/await across both native and web
       and wasm-pack 0.15.0 parses that file as a flat string map (`invalid type: map, expected a
       string`). `core/wasm-crypto-poc/package.json` is therefore *deliberately* a bare map, so
       `npm ci` installs nothing there -- use `npm install --no-save --no-package-lock
-      libsodium-wrappers@0.7.16`. `core/turtl-core-rs/package.json` will hit the same wall at
-      the `--target web` step. (e) Every native `cargo test` of `turtl_core` rewrites the tracked
+      libsodium-wrappers@0.7.16`. **Resolved for `core/turtl-core-rs` in Step 4b-4:** its production
+      build has no JS snippets (libsodium is injected), so wasm-bindgen never reads that
+      `package.json` (verified: `wasm-pack build --target web` succeeds with it); only the PoC,
+      which does ship a snippet, still needs the bare-map workaround. (e) Every native `cargo test` of `turtl_core` rewrites the tracked
       `core/wasm-crypto-poc/test/golden_vectors.json` (`generate_wasm_golden_vectors`); `git
       checkout` it before committing.
 - [ ] Step 4b-2: async `reqwest`/`fetch` into `api.rs` (decision 2.3) -- the whole call chain
@@ -519,9 +552,52 @@ Networking and concurrency are unified on async/await across both native and web
       `poll()`.
 - [ ] Step 4b-3: the real single-threaded-async concurrency rewrite (2.4) replacing `Thredder`'s
       synchronous-inline placeholder.
-- [ ] Step 4b-4: `wasm-pack build --target web` producing a loadable module end to end (only
-      `wasm-pack test --node` and the PoC's `--target nodejs` build have run so far); see
-      follow-up (d) above for the `package.json` trap.
+- [x] Step 4b-4 (`wasm-pack build --target web`, with libsodium injected) -- **done**
+      (2026-10-05), following the "inject libsodium" refinement under decision 2.1. New
+      `src/crypto/wasm_sodium.rs` holds the whole mechanism: typed wasm-bindgen bindings for the ten
+      libsodium.js functions the core calls, the injected object in a thread-local, and
+      `initWasmCrypto(sodium)`. Init awaits `sodium.ready`, then refuses an object that lacks any of
+      those functions with a message naming them and saying to pass the sumo build (so handing in
+      the standard `libsodium-wrappers` fails at startup, not inside a login); a failed init leaves
+      a previously injected libsodium in place. `low.rs`'s wasm twins now call `with_sodium(..)`;
+      `js/sodium_bridge.js` and the `wasm_bridge` module are gone, so the crate has no production
+      JS. The AEAD twins also now validate key/nonce lengths like native (they used to surface
+      libsodium.js's error as `OperationFailed` where native gives `BadData`).
+
+      `cryptoSelfTest()` is a second export: a fast known-answer check (`crypto/selftest.rs`:
+      FIPS 180 SHA, the RFC 8439 ChaCha20-Poly1305 vector, HMAC, scrypt, a sealed box made by the
+      original JS client, `secure_compare`, random) that hosts can run at startup to assert the
+      injected libsodium is the right build. The same function is a native unit test, which
+      independently validates its expected values against sodiumoxide (the RFC vector was recalled
+      from the standard, then matched against libsodium in two builds before being embedded).
+
+      **Verified:** native `turtl_core` 68/68; wasm32 36/36 (+2 self-test, +2 init-rejection
+      tests, with `js/test_support.js` playing the host) against libsodium.js **0.7.16 (libsodium
+      1.0.20) and 0.8.4 (1.0.22)**, so injection is version-agnostic in practice. The production
+      `wasm-pack build --target web` takes about 2.5 minutes and gives a 2.9 MB wasm (after
+      `wasm-opt`, SQLite included) and 28 KB of glue; the generated `.d.ts` shows the entire JS API
+      of the core today is `initWasmCrypto(sodium)`, `cryptoSelfTest()` and the loader. The
+      documented smoke test loads it as an ES module in Node and checks that the package has no
+      snippets and its glue loads no modules, that crypto before injection fails clearly, that bad
+      injections are rejected with named problems, that the real thing passes the self-test, that
+      a failed re-init keeps the working libsodium, and that re-init is harmless:
+
+      ```bash
+      cd core/turtl-core-rs
+      wasm-pack build --target web && node js/web_smoke_test.mjs
+      ```
+
+      The same core also works from `--target nodejs` (CommonJS) with the same injection (checked
+      ad hoc, 35 s build), which is the module-system independence the design was chosen for.
+      **Not verified:** `--target bundler` (needs a bundler) and a real browser (Vite + headless
+      Chrome); that comes with the persistence step, which needs a browser anyway.
+
+      **Packaging note for the web app:** `libsodium-wrappers-sumo` **0.7.x** cannot be imported as
+      an ES module at all (its `.mjs` entry imports `./libsodium-sumo.mjs`, a file that exists only
+      in the sibling `libsodium-sumo` package), so a bundler would need an alias. **0.8.x fixes it**
+      (the entry imports the bare `libsodium-sumo` and ships TypeScript types). This crate's npm
+      dependency, used only by the tests and the smoke test, is now `^0.8.4`; the CommonJS entry
+      works in both.
 - [x] Step 4b-5a (the remaining crypto surface) -- **done** (2026-10-05). `sha256`/`sha512`,
       `hmac` (HMAC-SHA512-256 via `crypto_auth`), `secure_compare`, `random_salt`, `gen_key`
       (**scrypt**), and `asym::{keygen,encrypt,decrypt}` (sealed boxes) now run for real on wasm32

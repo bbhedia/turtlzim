@@ -28,6 +28,9 @@ macro_rules! crypto_test {
 
 mod low;
 mod key;
+mod selftest;
+#[cfg(target_arch = "wasm32")]
+mod wasm_sodium;
 
 pub use ::crypto::error::{
     CResult,
@@ -48,10 +51,10 @@ pub use ::crypto::low::{
 };
 pub use ::crypto::low::chacha20poly1305::{random_nonce, random_key, noncelen, keylen};
 pub use ::crypto::key::Key;
-// Must be called and awaited exactly once before any other crypto:: function
-// is used on wasm32 -- see `low::init_wasm_crypto`'s doc comment.
+// The host must call and await `initWasmCrypto(sodium)` exactly once before any other crypto::
+// function is used on wasm32 -- see `wasm_sodium::init_wasm_crypto`'s doc comment.
 #[cfg(target_arch = "wasm32")]
-pub use ::crypto::low::init_wasm_crypto;
+pub use ::crypto::wasm_sodium::init_wasm_crypto;
 
 /// Stores our current crypto version. This gets encoded into a header in the
 /// ciphertext and lets the crypto module know how to handle the message.
@@ -740,13 +743,17 @@ mod wasm_parity_tests {
 
 
 /// Test-only support shared by every wasm32 test that needs real crypto: this file's own
-/// `wasm_parity_tests` and, e.g., the encrypted-model round trips in `storage.rs`.
+/// `wasm_parity_tests`, the encrypted-model round trips in `storage.rs`, and everything declared
+/// with `crypto_test!`.
+///
+/// libsodium reaches the core by injection (`wasm_sodium`, `initWasmCrypto(sodium)`), so a test
+/// plays the host: `load_sodium()` (a four-line CommonJS snippet, `js/test_support.js`, compiled
+/// into test builds only) `require`s the sumo package from `node_modules` the way a real host app
+/// would import it, and `ThenReady` hands it to `init_wasm_crypto` and waits for it.
 ///
 /// `turtl_core` is a Rust 2015-edition crate, so `async fn`/`.await` aren't available (see
-/// `wasm_parity_tests`'s doc comment and `low::InitCryptoFuture`), and libsodium.js needs a
-/// one-time async init before any crypto call. `ThenReady` is the small hand-written `Future`
-/// that bridges the two: it awaits the real `init_wasm_crypto()` Promise and then runs an
-/// ordinary synchronous closure. A test uses it with `wasm-bindgen-test`'s `(async)` form:
+/// `wasm_sodium`); `ThenReady` is the small hand-written `Future` that bridges the two. A test uses
+/// it with `wasm-bindgen-test`'s `(async)` form:
 ///
 /// ```ignore
 /// #[wasm_bindgen_test(async)]
@@ -755,9 +762,19 @@ mod wasm_parity_tests {
 #[cfg(all(test, target_arch = "wasm32"))]
 pub mod wasm_test_support {
     use ::std::future::Future;
+    use ::wasm_bindgen::prelude::*;
+    use ::wasm_bindgen::JsCast;
     use super::init_wasm_crypto;
 
-    /// Awaits the real `crypto::init_wasm_crypto()` Promise, then runs a synchronous closure.
+    #[wasm_bindgen(module = "/js/test_support.js")]
+    extern "C" {
+        /// `require('libsodium-wrappers-sumo')`, the way a host app would import libsodium.
+        #[wasm_bindgen(js_name = loadSodium)]
+        pub fn load_sodium() -> JsValue;
+    }
+
+    /// Injects libsodium through the real `init_wasm_crypto`, awaits it, then runs a synchronous
+    /// closure.
     pub struct ThenReady {
         ready: ::wasm_bindgen_futures::JsFuture,
         body: Option<Box<dyn FnOnce()>>,
@@ -766,7 +783,7 @@ pub mod wasm_test_support {
     impl ThenReady {
         pub fn new<F: FnOnce() + 'static>(body: F) -> ThenReady {
             ThenReady {
-                ready: ::wasm_bindgen_futures::JsFuture::from(init_wasm_crypto()),
+                ready: ::wasm_bindgen_futures::JsFuture::from(init_wasm_crypto(load_sodium())),
                 body: Some(Box::new(body)),
             }
         }
@@ -787,5 +804,70 @@ pub mod wasm_test_support {
                 ::std::task::Poll::Pending => ::std::task::Poll::Pending,
             }
         }
+    }
+
+    /// Awaits a Promise that is *expected to reject*, then runs `check` on the error's message.
+    pub struct ExpectRejection {
+        promise: ::wasm_bindgen_futures::JsFuture,
+        check: Option<Box<dyn FnOnce(String)>>,
+    }
+
+    impl ExpectRejection {
+        pub fn new<F: FnOnce(String) + 'static>(promise: ::js_sys::Promise, check: F) -> ExpectRejection {
+            ExpectRejection {
+                promise: ::wasm_bindgen_futures::JsFuture::from(promise),
+                check: Some(Box::new(check)),
+            }
+        }
+    }
+
+    impl Future for ExpectRejection {
+        type Output = ();
+
+        fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context) -> ::std::task::Poll<()> {
+            let this = self.get_mut();
+            match ::std::pin::Pin::new(&mut this.promise).poll(cx) {
+                ::std::task::Poll::Ready(Err(err)) => {
+                    let message = match err.dyn_into::<::js_sys::Error>() {
+                        Ok(error) => String::from(error.message()),
+                        Err(other) => format!("{:?}", other),
+                    };
+                    let check = this.check.take().expect("ExpectRejection polled after completion");
+                    check(message);
+                    ::std::task::Poll::Ready(())
+                }
+                ::std::task::Poll::Ready(Ok(_)) => panic!("expected the promise to reject, but it resolved"),
+                ::std::task::Poll::Pending => ::std::task::Poll::Pending,
+            }
+        }
+    }
+}
+
+/// `initWasmCrypto(sodium)` must refuse anything that isn't a usable libsodium, with a message that
+/// names the problem, rather than failing deep inside a login later.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_injection_tests {
+    use ::wasm_bindgen::prelude::*;
+    use ::wasm_bindgen_test::*;
+    use super::init_wasm_crypto;
+    use super::wasm_test_support::ExpectRejection;
+
+    #[wasm_bindgen_test(async)]
+    fn init_rejects_a_non_object() -> ExpectRejection {
+        ExpectRejection::new(init_wasm_crypto(JsValue::UNDEFINED), |message| {
+            assert!(message.contains("expected the libsodium.js object"), "unexpected message: {}", message);
+        })
+    }
+
+    #[wasm_bindgen_test(async)]
+    fn init_rejects_a_libsodium_lacking_what_the_core_needs() -> ExpectRejection {
+        // Looks like libsodium (it has a `ready` promise) but has none of the functions: what the
+        // standard, non-sumo libsodium-wrappers would be missing is a subset of this.
+        let fake = ::js_sys::Object::new();
+        ::js_sys::Reflect::set(&fake, &JsValue::from_str("ready"), &::js_sys::Promise::resolve(&JsValue::UNDEFINED)).unwrap();
+        ExpectRejection::new(init_wasm_crypto(fake.into()), |message| {
+            assert!(message.contains("crypto_pwhash_scryptsalsa208sha256"), "unexpected message: {}", message);
+            assert!(message.contains("sumo"), "the message should say which build to pass: {}", message);
+        })
     }
 }
