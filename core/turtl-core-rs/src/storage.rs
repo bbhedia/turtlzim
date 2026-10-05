@@ -30,6 +30,52 @@ pub fn db_location(db_name: &String) -> TResult<String> {
     Ok(db_location)
 }
 
+/// Delete the database file at `location` (what `db_location()` gave out). Close the connection to it
+/// first. `:memory:` has no file.
+pub fn delete_db(location: &String) -> TResult<()> {
+    if location == ":memory:" {
+        return Ok(());
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        info!("storage::delete_db() -- removing {}", location);
+        ::std::fs::remove_file(location)?;
+        Ok(())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::wasm_host::delete_db(location.as_str())
+    }
+}
+
+/// Delete every database file of ours in `data_folder` (the `turtl-*` ones: the kv store and each
+/// user's).
+pub fn delete_all_dbs(data_folder: &String) -> TResult<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use ::std::fs;
+        fs::create_dir_all(data_folder)?;
+        for entry in fs::read_dir(data_folder)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() { continue; }
+            let filename = entry.file_name();
+            let filename_str = match filename.to_str() {
+                Some(x) => x,
+                None => return TErr!(crate::error::TError::Msg(format!("error converting OsString into &str"))),
+            };
+            if &filename_str[0..6] != "turtl-" { continue; }
+            fs::remove_file(&path)?;
+            info!("storage::delete_all_dbs() -- removing {}", path.display());
+        }
+        Ok(())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::wasm_host::delete_all_dbs(data_folder.as_str())
+    }
+}
+
 /// Make sure we have a client ID, and sync it with the model system
 pub fn setup_client_id(storage: Arc<RwLock<Storage>>) -> TResult<()> {
     let storage_guard = lockr!(storage);

@@ -14,11 +14,12 @@
 //!     outgoing messages queue up in the same in-process channels native uses, and `pollMessage` /
 //!     `pollEvent` read them without blocking (the native `recv_nb` / `recv_event_nb`).
 //!
-//! The order a host does things in (all of it is synchronous except `initWasmCrypto`):
+//! The order a host does things in (only `init`, `initWasmCrypto` and `enablePersistence` are async):
 //!
 //! ```text
 //!   await init({ module_or_path })      // load the wasm (wasm-bindgen's own init)
 //!   await initWasmCrypto(sodium)        // inject libsodium.js (src/crypto/wasm_sodium.rs)
+//!   await enablePersistence(dir)        // optional, Worker only: keep the databases in OPFS
 //!   initCore(configJson)                // config + logging; configJson is runtime config, e.g.
 //!                                       //   {"api": {"endpoint": "https://..."}, "logging": {"level": "info"}}
 //!   setMessageHandler((channel, message) => ...)
@@ -28,17 +29,35 @@
 //!   stopCore()                          // or send the `app:shutdown` command
 //! ```
 //!
-//! There is one core per wasm instance. Nothing persists yet (the databases are in memory until
-//! step 4b-5b), and attachments and the other filesystem features are native-only.
+//! There is one core per wasm instance. **Persistence:** without `enablePersistence()` the databases
+//! live in memory and are gone with the page. With it they are kept in the origin-private file system
+//! (OPFS) through SQLite's SAHPool VFS, which needs a dedicated Worker, so the core has to run in
+//! one (js/browser/core_worker.js is the reference), and which lets one worker use a given
+//! `directory` at a time: a second tab (or a worker that hasn't died yet) is told so. `data_folder`
+//! then names the folder inside it (default `turtl`). Attachments and the other filesystem features
+//! are native-only for now.
 
 use ::std::cell::RefCell;
 use ::std::sync::Arc;
 use ::jedi::{self, Value};
 use ::js_sys::Function;
+use ::sqlite_wasm_vfs::sahpool::{self, OpfsSAHError, OpfsSAHPoolCfgBuilder, OpfsSAHPoolUtil};
 use ::wasm_bindgen::prelude::*;
 use crate::dispatch;
 use crate::error::{TResult, TError};
 use crate::turtl::Turtl;
+use crate::util::exec;
+
+/// The OPFS directory the databases go in unless the host names another.
+const DEFAULT_PERSISTENCE_DIRECTORY: &str = "turtl-core";
+
+/// The folder inside that directory (`data_folder` in the config) when persistence is on and the host
+/// doesn't choose one.
+const DEFAULT_DATA_FOLDER: &str = "turtl";
+
+/// How many files the pool can hold at once. Every database takes one, and so does its journal while
+/// a write is in flight; the pool does not grow by itself.
+const POOL_CAPACITY: u32 = 16;
 
 /// The config the core needs to run, wherever a host's runtime config leaves a hole. The same keys
 /// as config.yaml, except that nothing here may point at a file (`data_folder` is `:memory:` until
@@ -78,6 +97,8 @@ struct Host {
 thread_local! {
     // (wasm32 has one thread, so a thread-local is the instance's global.)
     static HOST: RefCell<Host> = RefCell::new(Host::default());
+    /// The OPFS file pool, once `enablePersistence()` has set it up.
+    static POOL: RefCell<Option<OpfsSAHPoolUtil>> = RefCell::new(None);
 }
 
 /// Set up the config (defaults, then the host's runtime config laid over them) and the logger. This
@@ -95,6 +116,10 @@ pub fn init(config_str: &str) -> TResult<()> {
     let defaults: Value = jedi::parse(&String::from(DEFAULT_CONFIG))?;
     ::config::merge(&defaults)?;
     ::config::merge(&runtime_config)?;
+    // with persistence on, the databases go in a folder of the pool unless the host says otherwise
+    if persistence_enabled() && jedi::get_opt::<String>(&["data_folder"], &runtime_config).is_none() {
+        ::config::set(&["data_folder"], &String::from(DEFAULT_DATA_FOLDER))?;
+    }
 
     match crate::util::logger::setup_logger() {
         Ok(_) => {}
@@ -155,6 +180,76 @@ fn to_js(e: TError) -> JsValue {
     JsValue::from_str(&format!("{}", e))
 }
 
+/// Whether `enablePersistence()` has set up the OPFS file pool.
+pub fn persistence_enabled() -> bool {
+    POOL.with(|pool| pool.borrow().is_some())
+}
+
+/// Delete the database file `location` (a path like the native ones: `<data_folder>/<name>.sqlite`)
+/// from the file pool. In-memory databases, and a core without persistence, have nothing to delete.
+pub fn delete_db(location: &str) -> TResult<()> {
+    POOL.with(|pool| match pool.borrow().as_ref() {
+        Some(pool) => match pool.delete_db(location) {
+            Ok(_) => Ok(()),
+            Err(e) => TErr!(TError::Msg(format!("couldn't delete {}: {}", location, e))),
+        },
+        None => Ok(()),
+    })
+}
+
+/// Delete every database file in `folder` whose name starts with `turtl-`, like the native wipe.
+pub fn delete_all_dbs(folder: &str) -> TResult<()> {
+    let prefix = format!("{}/turtl-", folder);
+    let names: Vec<String> = POOL.with(|pool| match pool.borrow().as_ref() {
+        Some(pool) => pool.list().into_iter().filter(|name| name.starts_with(&prefix)).collect(),
+        None => Vec::new(),
+    });
+    for name in names {
+        info!("wasm_host::delete_all_dbs() -- removing {}", name);
+        delete_db(&name)?;
+    }
+    Ok(())
+}
+
+/// Keep the core's databases in the browser's origin-private file system from now on, in the
+/// OPFS directory `directory` (default `turtl-core`). Call it once, in the Worker the core runs in,
+/// after `initWasmCrypto()` and before `initCore()`. Calling it again is harmless.
+///
+/// It fails when OPFS isn't there (not a dedicated Worker, or not a secure context) or when another
+/// tab or worker has the directory open; a worker that is just being replaced is given a few
+/// seconds to let go of it first.
+#[wasm_bindgen(js_name = enablePersistence)]
+pub async fn enable_persistence(directory: Option<String>) -> Result<(), JsValue> {
+    if persistence_enabled() {
+        return Ok(());
+    }
+    let config = OpfsSAHPoolCfgBuilder::new()
+        .directory(directory.as_deref().unwrap_or(DEFAULT_PERSISTENCE_DIRECTORY))
+        .initial_capacity(POOL_CAPACITY)
+        .build();
+    let mut attempts = 0;
+    let pool = loop {
+        match sahpool::install::<::sqlite_wasm_rs::WasmOsCallback>(&config, true).await {
+            Ok(pool) => break pool,
+            // the files are held by another worker. if that one is on its way out (a reload) it lets go
+            // in a moment; if it is another tab it won't, and we say so
+            Err(OpfsSAHError::CreateSyncAccessHandle(e)) => {
+                attempts += 1;
+                if attempts >= 30 {
+                    return Err(JsValue::from_str(&format!(
+                        "the stored data is in use by another tab or worker (close it and try again): {:?}", e
+                    )));
+                }
+                exec::sleep(100).await;
+            }
+            Err(e) => return Err(JsValue::from_str(&format!("couldn't set up persistent storage: {}", e))),
+        }
+    };
+    POOL.with(|slot| *slot.borrow_mut() = Some(pool));
+    info!("wasm_host::enable_persistence() -- databases are kept in OPFS");
+    Ok(())
+}
+
 /// Set up the config and logging. `config` is the host's runtime config as a JSON string (`"{}"` for
 /// the defaults); see the module docs. Call it once, before `startCore()`.
 #[wasm_bindgen(js_name = initCore)]
@@ -168,6 +263,15 @@ pub fn init_core(config: &str) -> Result<(), JsValue> {
 pub fn start_core() -> Result<(), JsValue> {
     if HOST.with(|host| host.borrow().turtl.is_some()) {
         return Err(JsValue::from_str("the core is already started"));
+    }
+    // a data folder only means something with a file pool behind it: anything else would quietly keep
+    // the data in memory, which is the one way to lose it without being told
+    let data_folder: String = ::config::get(&["data_folder"]).map_err(|e| to_js(From::from(e)))?;
+    if data_folder != ":memory:" && !persistence_enabled() {
+        return Err(JsValue::from_str(&format!(
+            "data_folder is \"{}\" but persistence isn't enabled: await enablePersistence() first, or leave data_folder as \":memory:\"",
+            data_folder
+        )));
     }
     let turtl = Turtl::new().map_err(to_js)?;
     HOST.with(|host| host.borrow_mut().turtl = Some(Arc::new(turtl)));

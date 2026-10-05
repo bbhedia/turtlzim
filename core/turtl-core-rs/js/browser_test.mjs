@@ -76,7 +76,7 @@ function serveStatic(req, res, pathname) {
     return false;
 }
 
-const apiHandler = testSupport.createFlowHandler();
+const apiHandler = testSupport.createFlowHandler({ note: false });
 const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (req.method === 'GET' && serveStatic(req, res, pathname)) return;

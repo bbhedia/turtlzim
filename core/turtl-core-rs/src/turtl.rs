@@ -827,22 +827,8 @@ impl Turtl {
         kv_guard.close()?;
         let data_folder = data_folder()?;
         debug!("turtl.wipe_app_data() -- wiping everything in {}", data_folder);
-        fs::create_dir_all(&data_folder)?;
-        let paths = fs::read_dir(&data_folder)?;
         // wipe all databases
-        for entry in paths {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() { continue; }
-            let filename = entry.file_name();
-            let filename_str = match filename.to_str() {
-                Some(x) => x,
-                None => return TErr!(TError::Msg(format!("error converting OsString into &str"))),
-            };
-            if &filename_str[0..6] != "turtl-" { continue; }
-            fs::remove_file(&path)?;
-            info!("turtl.wipe_app_data() -- removing {}", path.display());
-        }
+        storage::delete_all_dbs(&data_folder)?;
 
         // wipe all note files
         let files = FileData::file_finder_all(None, None)?;
@@ -863,10 +849,7 @@ impl Turtl {
         self.logout()?;
 
         let db_loc = self.get_user_db_location(&user_id)?;
-        if db_loc != ":memory:" {
-            info!("turtl.wipe_user_data() -- removing {}", db_loc);
-            fs::remove_file(&db_loc)?;
-        }
+        storage::delete_db(&db_loc)?;
 
         let files = FileData::file_finder_all(Some(&user_id), None)?;
         for file in files {

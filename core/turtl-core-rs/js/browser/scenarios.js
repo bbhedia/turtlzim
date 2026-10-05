@@ -42,4 +42,129 @@ export const scenarios = {
     },
 };
 
+/**
+ * Join in one Worker, "reload" (stop the core, kill the Worker, start a new one) and log in again:
+ * the account lives on the stand-in server, the profile that joining made (three spaces and three
+ * boards) only in the Worker's local database. Returns the profile the second run sees.
+ */
+async function profileAfterReload({ CoreClient, workerUrl, origin }, name, persistence) {
+    const config = { api: { endpoint: origin }, logging: { level: 'warn' } };
+    const username = `${name}@test.com`;
+
+    let core = new CoreClient(workerUrl);
+    await core.boot(config, persistence);
+    const joined = await core.request('user:join', username, 'reloadpassphrase');
+    assertEqual(joined.e, 0, `join: ${JSON.stringify(joined)}`);
+    const first = await core.request('sync:start');
+    assertEqual(first.e, 0, `sync:start: ${JSON.stringify(first)}`);
+    const before = (await core.request('profile:load')).d;
+    assertEqual([before.spaces.length, before.boards.length], [3, 3], 'the profile joining made');
+    await core.request('sync:shutdown', true);
+    await core.stop();
+    core.terminate();
+
+    core = new CoreClient(workerUrl);
+    await core.boot(config, persistence);
+    const login = await core.request('user:login', username, 'reloadpassphrase');
+    assertEqual(login.e, 0, `login: ${JSON.stringify(login)}`);
+    const started = await core.request('sync:start');
+    assertEqual(started.e, 0, `sync:start: ${JSON.stringify(started)}`);
+    const after = (await core.request('profile:load')).d;
+    await core.request('sync:shutdown', true);
+    await core.stop();
+    core.terminate();
+    return { before, after };
+}
+
+scenarios.persistence = async (ctx) => {
+    const { before, after } = await profileAfterReload(ctx, 'persist', { directory: 'turtl-test' });
+    // the same spaces and boards, read back from the database in OPFS
+    assertEqual(after.spaces.map((s) => s.id).sort(), before.spaces.map((s) => s.id).sort(), 'spaces survive a reload');
+    assertEqual(after.boards.map((b) => b.id).sort(), before.boards.map((b) => b.id).sort(), 'boards survive a reload');
+};
+
+// The control for the scenario above: without persistence the reloaded core starts empty, which is
+// what shows that the scenario above would notice if persistence did nothing.
+scenarios.in_memory_control = async (ctx) => {
+    const { after } = await profileAfterReload(ctx, 'control', undefined);
+    assertEqual([after.spaces.length, after.boards.length], [0, 0], 'nothing survives a reload in memory');
+};
+
+async function assertRejects(promise, pattern, message) {
+    try {
+        await promise;
+    } catch (e) {
+        if (!pattern.test(String(e && e.message || e))) {
+            throw new Error(`${message || 'rejected'}, but with the wrong error: ${e && e.message || e}`);
+        }
+        return;
+    }
+    throw new Error(`${message || 'expected a rejection'}, but it resolved`);
+}
+
+// A data folder with nothing to persist into would quietly keep the data in memory: refuse that.
+scenarios.data_folder_needs_persistence = async ({ CoreClient, workerUrl, origin }) => {
+    const core = new CoreClient(workerUrl);
+    await assertRejects(
+        core.boot({ api: { endpoint: origin }, data_folder: 'turtl' }),
+        /persistence isn't enabled/,
+        'booting with a data_folder and no persistence',
+    );
+    core.terminate();
+};
+
+// One worker at a time holds the stored data. A second tab is told so; once the first is gone, the
+// data is there for the next.
+scenarios.second_tab_is_refused = async ({ CoreClient, workerUrl, origin }) => {
+    const config = { api: { endpoint: origin }, logging: { level: 'error' } };
+    const persistence = { directory: 'turtl-shared' };
+    const first = new CoreClient(workerUrl);
+    await first.boot(config, persistence);
+
+    const second = new CoreClient(workerUrl);
+    await assertRejects(second.boot(config, persistence), /in use by another tab or worker/, 'a second worker');
+    second.terminate();
+
+    await first.stop();
+    first.terminate();
+    const third = new CoreClient(workerUrl);
+    await third.boot(config, persistence);
+    assertEqual((await third.request('ping')).d, 'pong', 'the third worker can use the data');
+    await third.stop();
+    third.terminate();
+};
+
+// Wiping a user's data (and then all of the app's) removes the databases from OPFS: a user who logs
+// in again afterwards finds an empty profile.
+scenarios.wipe = async ({ CoreClient, workerUrl, origin }) => {
+    const config = { api: { endpoint: origin }, logging: { level: 'error' } };
+    const persistence = { directory: 'turtl-wipe' };
+    const username = 'wipe@test.com';
+    const spaces = async (core) => {
+        assertEqual((await core.request('sync:start')).e, 0, 'sync:start');
+        const profile = (await core.request('profile:load')).d;
+        await core.request('sync:shutdown', true);
+        return profile.spaces.length;
+    };
+
+    let core = new CoreClient(workerUrl);
+    await core.boot(config, persistence);
+    assertEqual((await core.request('user:join', username, 'wipepassphrase')).e, 0, 'join');
+    assertEqual(await spaces(core), 3, 'the profile joining made');
+    // (the wipe waits for the sync system to wind down, which takes a few seconds)
+    assertEqual((await core.request('app:wipe-user-data')).e, 0, 'wipe-user-data');
+    await core.stop();
+    core.terminate();
+
+    core = new CoreClient(workerUrl);
+    await core.boot(config, persistence);
+    assertEqual((await core.request('user:login', username, 'wipepassphrase')).e, 0, 'login after the wipe');
+    assertEqual(await spaces(core), 0, 'the wiped profile is gone');
+    assertEqual((await core.request('app:wipe-app-data')).e, 0, 'wipe-app-data');
+    // the core still works afterwards (it has made itself a fresh kv store)
+    assertEqual((await core.request('ping')).d, 'pong', 'ping after wiping everything');
+    await core.stop();
+    core.terminate();
+};
+
 export { assert, assertEqual };

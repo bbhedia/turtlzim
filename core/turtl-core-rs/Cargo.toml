@@ -1,4 +1,8 @@
 [workspace]
+# Resolver 2 keeps the features of target-specific dependencies apart: native `tokio` (rt-multi-thread,
+# plus `net` from hyper) must not leak into the wasm32 graph, where `sqlite-wasm-vfs` brings its own
+# `tokio` (just `sync`) and mio refuses to build. (Edition 2018 defaults to resolver 1.)
+resolver = "2"
 members = ["carrier", "clippo", "config", "clouseau", "dumpy", "jedi", "migrate"]
 exclude = ["integration-tests", "cwrap", "client", "sock"]
 
@@ -91,6 +95,12 @@ reqwest = { version = "0.13.5", default-features = false }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
+# Persistence: the OPFS "SAHPool" VFS for the SQLite that rusqlite already links on wasm32 (a
+# separate crate from `sqlite-wasm-rs` since that one's 0.5 line; 0.2.x is the one built against
+# it). `sqlite-wasm-rs` is named here only for the OS callbacks the VFS wants. See
+# src/wasm_host.rs (`enablePersistence`) and docs/wasm-port-plan.md decision 2.2.1.
+sqlite-wasm-rs = { version = "0.5", default-features = false }
+sqlite-wasm-vfs = "0.2"
 
 # wasm-bindgen-test drives real wasm32 execution (via `wasm-pack test --node`)
 # for the crypto bridge's golden-vector parity tests in src/crypto/mod.rs.

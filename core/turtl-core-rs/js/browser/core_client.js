@@ -14,9 +14,12 @@ export class CoreClient {
         this.lifecycle = new Map();    // 'booted' / 'stopped' -> { resolve, reject }
     }
 
-    /** Start the core. `config` is the runtime config (see wasm_host.rs); resolves once it is up. */
-    boot(config) {
-        return this.lifecycleStep('booted', { op: 'boot', config });
+    /**
+     * Start the core. `config` is the runtime config (see wasm_host.rs); `persistence`, if given
+     * ({ directory }), keeps the databases in OPFS. Resolves once the core is up.
+     */
+    boot(config, persistence) {
+        return this.lifecycleStep('booted', { op: 'boot', config, persistence });
     }
 
     /** Stop the core (the worker stays; `terminate()` ends that). */

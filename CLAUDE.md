@@ -47,7 +47,7 @@ the Zim editor once (CodeMirror 6) and reuse it in Tauri (desktop), a Capacitor/
 |---|---|
 | Shared core | Rust (`core-rs`), libsodium, storage abstraction |
 | Web crypto | `libsodium.js` (real libsodium C source, Emscripten-built) loaded by the host app as its own wasm module and *injected* into the core (`initWasmCrypto(sodium)`), which calls it through typed wasm-bindgen bindings — byte-identical to native by construction, not a separate implementation. See `docs/wasm-port-plan.md`. |
-| Web storage | `sqlite-wasm-rs` (real `libsqlite3` compiled straight to `wasm32-unknown-unknown`, linked directly into the core's own wasm binary, `sahpool`/OPFS-SAHPool feature for persistence) — **not** IndexedDB; core-rs's storage/search layer is real SQL + SQLite FTS4, which IndexedDB can't represent without rebuilding full-text search from scratch. See `docs/wasm-port-plan.md`. |
+| Web storage | `sqlite-wasm-rs` (real `libsqlite3` compiled straight to `wasm32-unknown-unknown`, linked directly into the core's own wasm binary; the OPFS-SAHPool VFS from `sqlite-wasm-vfs` for persistence, in a dedicated Worker) — **not** IndexedDB; core-rs's storage/search layer is real SQL + SQLite FTS4, which IndexedDB can't represent without rebuilding full-text search from scratch. See `docs/wasm-port-plan.md`. |
 | Web networking | `reqwest` upgraded to its async API (already wasm32-native via `fetch` under the hood) — applies to both native and web so the core's public interface stays identical across targets. |
 | Editor / UI | CodeMirror 6 with live Zim-syntax formatting (shared web UI) |
 | Desktop shell | Tauri (Rust host → links the core as a crate) |

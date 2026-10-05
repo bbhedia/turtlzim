@@ -170,6 +170,16 @@ impl FileData {
     }
 
     /// Find the PathBuf for a file, given the pieces that build the filename
+    ///
+    /// (There are no attachment files on wasm32 yet: they stream to the filesystem, and the browser's
+    /// file store for them doesn't exist.)
+    #[cfg(target_arch = "wasm32")]
+    pub fn file_finder_all(_user_id: Option<&String>, _note_id: Option<&String>) -> TResult<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
+    /// Find the PathBuf for a file, given the pieces that build the filename
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn file_finder_all(user_id: Option<&String>, note_id: Option<&String>) -> TResult<Vec<PathBuf>> {
         let mut filepath = PathBuf::from(file_folder()?);
         filepath.push(FileData::filebuilder(user_id, note_id));

@@ -245,9 +245,9 @@ binary):
   separate `sqlite-wasm-vfs` crate (default VFS is in-memory in both). Either way it needs a
   secure context and a dedicated Worker, and does not support concurrent connections to the same
   database — consistent with decision 2.4. cargo resolved `sqlite-wasm-rs` **0.5.5** (in-memory
-  VFS only, which is what every test uses); the matching SAHPool VFS crate version still has to
-  be chosen when persistence is wired (a later step: it needs a real browser to test, Node has no
-  OPFS).
+  VFS only). *Chosen when persistence was wired (step 4b-5b):* `sqlite-wasm-vfs` **0.2.x**, the
+  line built against `sqlite-wasm-rs` 0.5 (0.3.x pairs with 0.6); it needs a real browser to test,
+  since Node has no OPFS.
 - **Build requirements (not just Rust).** `sqlite-wasm-rs` compiles SQLite's C source for
   `wasm32-unknown-unknown`, so the machine needs a wasm32-capable `clang` (the `cc` crate
   defaults to clang for wasm32: "Compiling WASM is not currently supported by GCC") plus
@@ -803,5 +803,40 @@ Networking and concurrency are unified on async/await across both native and web
       assertions bite on wasm: changing the wasm-only `KEYGEN_OPS_DEFAULT` to 1048576 (which
       doubles scrypt's `p`) makes exactly the two scrypt tests fail. (Nudging it to 524289 does
       *not*: scrypt quantizes its cost parameters, so that mutation is equivalent.)
-- [ ] Step 4b-5b: persistence (OPFS-SAHPool in a dedicated Worker, browser-tested).
+- [x] Step 4b-5b: persistence (OPFS-SAHPool in a dedicated Worker, browser-tested) -- **done
+      (2026-10-05)**; attachments are the part still open (below).
+      * **The VFS.** `sqlite-wasm-rs` 0.5.x (the line rusqlite 0.40 uses) carries no OPFS VFS; it lives
+        in the separate `sqlite-wasm-vfs` crate, and **0.2.x is the line built against `sqlite-wasm-rs`
+        0.5 and its `rsqlite-vfs` 0.1** (0.3.x pairs with `sqlite-wasm-rs` 0.6, which would put two
+        SQLites in the binary). Adding it brought `tokio` (just `sync`) into the wasm graph, where
+        Cargo's old feature resolver then merged in the native-only `tokio/net` and mio refused to
+        build; the workspace is now on `resolver = "2"`, which keeps target-specific features apart.
+      * **The host API.** `await enablePersistence(directory?)` (src/wasm_host.rs), in the Worker the
+        core runs in, after `initWasmCrypto` and before `initCore`, installs the `opfs-sahpool` VFS as
+        SQLite's default and keeps the databases in that OPFS directory (default `turtl-core`; the pool
+        holds 16 files and does not grow). `data_folder` becomes the folder name inside it (default
+        `turtl`) and is what `storage::db_location` already builds paths from, so nothing else in the
+        core changed to use it. `startCore()` refuses a `data_folder` with no persistence behind it,
+        because that would silently keep the data in memory. The pool is held by one worker at a time:
+        a worker that is being replaced (a reload) gets three seconds to let go; a live second tab is
+        told "in use by another tab or worker". (The pool never closes handles after a partial
+        failure, so only the "handle is busy" error is retried.) Multi-tab sharing would be the
+        pool's pause/unpause handshake, not done.
+      * **Wipes.** `storage::delete_db` / `delete_all_dbs` replace the `fs` calls in
+        `Turtl::wipe_user_data` / `wipe_app_data` (native: the same `fs` calls; wasm32: the pool), and
+        `FileData::file_finder_all` is empty on wasm32.
+      * **Browser tests.** Node has no OPFS, so `js/browser_test.mjs` runs the production package in a
+        dedicated Worker in headless Chromium (js/browser/: `core_worker.js` is the reference Worker,
+        `core_client.js` the page's side). Setup needs no root: `scripts/setup-browser-tests.sh`
+        installs Playwright's headless shell and the few system libraries it lacks (fetched with
+        `apt-get download`, unpacked under `~/.cache/turtlzim-browser-libs`). Scenarios: the basics
+        (join, logout, bad login, login, profile) in a Worker; **persistence** (join, sync, reload
+        the Worker, log in, and the same three spaces and boards come back from OPFS) with an
+        in-memory **control** (the same flow, nothing comes back, so the first would notice if
+        persistence did nothing); a `data_folder` with no persistence is refused; a second worker on
+        the same directory is refused until the first is gone; and wiping a user's and then all
+        data. Native `turtl_core` 80/80, wasm32 (Node) 48/48, browser 6/6, the production smoke test.
+      * **Still open:** attachments (the file-sync tasks are native-only; they want an OPFS file store
+        of their own), and the Worker bridge for the page is the app's: `core_worker.js` /
+        `core_client.js` are the reference for it.
 - [ ] Step 5: full parity pass before calling the port done.

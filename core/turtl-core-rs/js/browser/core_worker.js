@@ -5,7 +5,9 @@
 // It is a module Worker, started with `new Worker(url, { type: 'module' })`, and speaks a small
 // protocol with the page (see core_client.js, which is the page's side of it):
 //
-//   page -> worker   { op: 'boot', config, persistence }   load the core and start it
+//   page -> worker   { op: 'boot', config, persistence }   load the core and start it. `persistence`
+//                                                            (optional) is { directory } of the OPFS
+//                                                            directory to keep the databases in
 //                    { op: 'send', message }                 hand the core a message (JSON string)
 //                    { op: 'stop' }                          stop the core
 //   worker -> page   { type: 'booted' } | { type: 'stopped' }
@@ -17,7 +19,7 @@
 // imports `turtl_core` and `libsodium-wrappers-sumo` by name instead. Everything else here is
 // exactly what an app has to do, in this order.
 import init, {
-    initWasmCrypto, initCore, startCore, stopCore, sendMessage, setMessageHandler,
+    initWasmCrypto, enablePersistence, initCore, startCore, stopCore, sendMessage, setMessageHandler,
 } from '../../pkg/turtl_core.js';
 import sodium from '../../vendor/libsodium-wrappers.mjs';
 
@@ -28,6 +30,7 @@ self.onmessage = async (event) => {
             case 'boot':
                 await init({ module_or_path: new URL('../../pkg/turtl_core_bg.wasm', import.meta.url) });
                 await initWasmCrypto(sodium);
+                if (request.persistence) await enablePersistence(request.persistence.directory);
                 initCore(JSON.stringify(request.config || {}));
                 setMessageHandler((channel, message) => self.postMessage({ type: 'message', channel, message }));
                 startCore();

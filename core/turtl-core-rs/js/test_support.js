@@ -65,7 +65,12 @@ const flowServers = [];
 // `(req, res, body) => void` that answers one request. Every call makes a handler with an empty
 // account list of its own, so tests can't see each other's state. (js/browser_test.mjs serves the
 // same handler next to the static files of the browser tests, to stay on one origin.)
-function createFlowHandler() {
+//
+// `options.note` (default true) is whether the first sync poll reports the one fake note, n1, that the
+// Rust tests look for; the browser tests turn it off, because a note with a made-up body only makes
+// the real core log that it can't decrypt it.
+function createFlowHandler(options = {}) {
+    const withNote = options.note !== false;
     let account = null;
     let polls = 0;
     const log = [];
@@ -111,7 +116,7 @@ function createFlowHandler() {
         }
         if (req.method === 'GET' && req.url.startsWith('/sync?')) {
             polls += 1;
-            const records = polls === 1 ? [{
+            const records = withNote && polls === 1 ? [{
                 id: '1001', type: 'note', action: 'add', item_id: 'n1', user_id: 42,
                 data: { id: 'n1', space_id: 's1', user_id: 42, board_id: null, body: 'AAYBAAw=' },
             }] : [];
