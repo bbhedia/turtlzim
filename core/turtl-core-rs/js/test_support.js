@@ -61,67 +61,75 @@ module.exports.startServer = function startServer() {
 
 const flowServers = [];
 
-// Starts a fresh stand-in Turtl server (see src/flow_tests.rs for the routes) on an ephemeral
-// localhost port and resolves to the port. Every call makes a server of its own, with an empty
-// account list, so tests can't see each other's state.
+// The stand-in Turtl server's logic (see src/flow_tests.rs for the routes): returns a function
+// `(req, res, body) => void` that answers one request. Every call makes a handler with an empty
+// account list of its own, so tests can't see each other's state. (js/browser_test.mjs serves the
+// same handler next to the static files of the browser tests, to stay on one origin.)
+function createFlowHandler() {
+    let account = null;
+    let polls = 0;
+    const log = [];
+    return function handle(req, res, body) {
+        const json = (status, obj) => {
+            res.writeHead(status, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(obj));
+        };
+        if (req.method === 'GET' && req.url === '/requests') {
+            return json(200, log);
+        }
+        log.push(`${req.method} ${req.url}`);
+        if (req.method === 'POST' && req.url === '/users') {
+            const posted = JSON.parse(body);
+            account = { username: posted.username, auth: posted.auth, data: posted.data };
+            return json(200, { id: '42', data: posted.data });
+        }
+        if (req.method === 'POST' && req.url === '/auth') {
+            const expected = account && 'Basic ' + Buffer.from(`${account.username}:${account.auth}`).toString('base64');
+            if (account && req.headers['authorization'] === expected) {
+                return json(200, '42');
+            }
+            return json(401, { error: 'bad login' });
+        }
+        if (req.method === 'GET' && req.url === '/users/42' && account) {
+            return json(200, Object.assign({}, account.data, { id: '42' }));
+        }
+        if (req.method === 'PUT' && req.url === '/users/42') {
+            const posted = JSON.parse(body);
+            account = { username: posted.user.username, auth: posted.auth, data: posted.user };
+            return json(200, { sync_ids: [102] });
+        }
+        if (req.method !== 'GET' && req.url.startsWith('/spaces/')) {
+            return json(200, {});
+        }
+        if (req.method === 'POST' && req.url === '/sync') {
+            const records = JSON.parse(body);
+            if (records.length > 0) { records[0].sync_ids = [101]; }
+            return json(200, { success: records, failures: [], blocked: [] });
+        }
+        if (req.method === 'GET' && req.url === '/sync/full') {
+            return json(200, { records: [], sync_id: 7 });
+        }
+        if (req.method === 'GET' && req.url.startsWith('/sync?')) {
+            polls += 1;
+            const records = polls === 1 ? [{
+                id: '1001', type: 'note', action: 'add', item_id: 'n1', user_id: 42,
+                data: { id: 'n1', space_id: 's1', user_id: 42, board_id: null, body: 'AAYBAAw=' },
+            }] : [];
+            return json(200, { records: records, sync_id: 9 });
+        }
+        return json(404, { error: 'unknown route' });
+    };
+}
+module.exports.createFlowHandler = createFlowHandler;
+
+// Starts a fresh stand-in Turtl server on an ephemeral localhost port and resolves to the port.
 module.exports.startFlowServer = function startFlowServer() {
     return new Promise((resolve) => {
-        let account = null;
-        let polls = 0;
-        const log = [];
+        const handle = createFlowHandler();
         const flowServer = http.createServer((req, res) => {
             let body = '';
             req.on('data', (chunk) => (body += chunk));
-            req.on('end', () => {
-                const json = (status, obj) => {
-                    res.writeHead(status, { 'content-type': 'application/json' });
-                    res.end(JSON.stringify(obj));
-                };
-                if (req.method === 'GET' && req.url === '/requests') {
-                    return json(200, log);
-                }
-                log.push(`${req.method} ${req.url}`);
-                if (req.method === 'POST' && req.url === '/users') {
-                    const posted = JSON.parse(body);
-                    account = { username: posted.username, auth: posted.auth, data: posted.data };
-                    return json(200, { id: '42', data: posted.data });
-                }
-                if (req.method === 'POST' && req.url === '/auth') {
-                    const expected = account && 'Basic ' + Buffer.from(`${account.username}:${account.auth}`).toString('base64');
-                    if (account && req.headers['authorization'] === expected) {
-                        return json(200, '42');
-                    }
-                    return json(401, { error: 'bad login' });
-                }
-                if (req.method === 'GET' && req.url === '/users/42' && account) {
-                    return json(200, Object.assign({}, account.data, { id: '42' }));
-                }
-                if (req.method === 'PUT' && req.url === '/users/42') {
-                    const posted = JSON.parse(body);
-                    account = { username: posted.user.username, auth: posted.auth, data: posted.user };
-                    return json(200, { sync_ids: [102] });
-                }
-                if (req.method !== 'GET' && req.url.startsWith('/spaces/')) {
-                    return json(200, {});
-                }
-                if (req.method === 'POST' && req.url === '/sync') {
-                    const records = JSON.parse(body);
-                    if (records.length > 0) { records[0].sync_ids = [101]; }
-                    return json(200, { success: records, failures: [], blocked: [] });
-                }
-                if (req.method === 'GET' && req.url === '/sync/full') {
-                    return json(200, { records: [], sync_id: 7 });
-                }
-                if (req.method === 'GET' && req.url.startsWith('/sync?')) {
-                    polls += 1;
-                    const records = polls === 1 ? [{
-                        id: '1001', type: 'note', action: 'add', item_id: 'n1', user_id: 42,
-                        data: { id: 'n1', space_id: 's1', user_id: 42, board_id: null, body: 'AAYBAAw=' },
-                    }] : [];
-                    return json(200, { records: records, sync_id: 9 });
-                }
-                return json(404, { error: 'unknown route' });
-            });
+            req.on('end', () => handle(req, res, body));
         });
         flowServers.push(flowServer);
         flowServer.listen(0, '127.0.0.1', () => resolve(flowServer.address().port));

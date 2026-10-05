@@ -1,8 +1,11 @@
 {
   "name": "turtl-core-rs-wasm-crypto",
   "private": true,
-  "description": "npm dependency for the wasm32 test harness (js/test_support.js plays the host that injects libsodium) and the web smoke test (js/web_smoke_test.mjs). The core itself imports no JS: hosts pass libsodium to initWasmCrypto(sodium), and it must be the *sumo* build (only it has scrypt, which native gen_key uses). See docs/wasm-port-plan.md decision 2.1.",
+  "description": "npm dependency for the wasm32 test harness (js/test_support.js plays the host that injects libsodium) and the web smoke test (js/web_smoke_test.mjs). The core itself imports no JS: hosts pass libsodium to initWasmCrypto(sodium), and it must be the *sumo* build (only it has scrypt, which native gen_key uses). See docs/wasm-port-plan.md decision 2.1. Also the browser tests (js/browser_test.mjs): playwright-core drives a headless Chromium that scripts/setup-browser-tests.sh installs.",
   "dependencies": {
     "libsodium-wrappers-sumo": "^0.8.4"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0"
   }
 }
