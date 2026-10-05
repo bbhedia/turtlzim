@@ -100,3 +100,38 @@ natively; `sqlite-wasm-rs` on wasm32), so the storage layer runs the same source
 target. The only API migration was the removed `NO_PARAMS` (now `[]`). Details, the FTS4 build
 flag, and the verification are in `docs/wasm-port-plan.md` (decision 2.2.1 and the Step 4b-1
 status entry).
+
+## Update (2026-10-05): the WASM port exists, and how to run every test suite
+
+The "WASM port has not been started" gap above is closed: `turtl_core` now builds and runs on
+`wasm32-unknown-unknown` with the same async code as native (edition 2018, `async fn` all the way
+up, reqwest 0.13, `rusqlite` 0.40 on SQLite compiled to wasm, libsodium.js injected by the host,
+OPFS persistence). What it does, what differs from native and why, and the evidence are in
+`docs/wasm-port-plan.md` (Status, and the table at Step 5). The one open feature there is note
+attachments on wasm32.
+
+Everything below runs from `core/turtl-core-rs`, after the one-time setup in `CLAUDE.md`:
+
+```bash
+# native: the crate and its member crates
+cargo test --features sqlite-static -p turtl_core -p dumpy -p clouseau -p jedi
+git checkout -- ../wasm-crypto-poc/test/golden_vectors.json   # native tests rewrite this tracked file
+
+# wasm32 under Node (the same tests, run for real; NODE_PATH finds libsodium for the test host)
+NODE_PATH=$(pwd)/node_modules wasm-pack test --node
+NODE_PATH=$(pwd)/node_modules wasm-pack test --node dumpy
+NODE_PATH=$(pwd)/node_modules wasm-pack test --node clouseau
+
+# the production package: loaded the way a web app loads it, from Node...
+wasm-pack build --target web && node js/web_smoke_test.mjs
+
+# ...and from a Worker in a real browser (OPFS persistence needs one); no root needed for the setup
+scripts/setup-browser-tests.sh        # once: Playwright's headless Chromium and the libraries it lacks
+node js/browser_test.mjs
+
+# the native release library
+cargo build --release --features sqlite-static
+```
+
+`TURTL_WRITE_FIXTURES=1` on a native or wasm test run regenerates that target's interoperability
+fixture in `test-fixtures/` (see `src/interop_tests.rs`); leave it unset otherwise.
