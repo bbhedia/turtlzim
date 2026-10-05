@@ -31,20 +31,14 @@
 //!   startup that the object it injected behaves like libsodium; that catches a wrong build or a
 //!   version mismatch, not a malicious host.
 //!
-//! # Why init is a Promise, and why it is written without `async`
+//! # Why init is a Promise
 //!
 //! libsodium-wrappers needs an async `sodium.ready` before any of its calls work, and wasm32 in a
 //! browser is single-threaded (a sync fn cannot block on a JS Promise without deadlocking). So
 //! `initWasmCrypto` returns a Promise the host awaits once; afterwards every crypto function stays
-//! a plain synchronous fn with native's exact signature. `turtl_core` is a Rust 2015-edition crate
-//! where `async fn`/`.await` are rejected (bumping the edition broke ~600 unrelated call sites), so
-//! the Promise is driven by a small hand-written `Future` (`InitCryptoFuture`): implementing the
-//! `Future` *trait* has no edition restriction, only the `async`/`.await` *syntax* does.
+//! a plain synchronous fn with native's exact signature.
 
 use ::std::cell::RefCell;
-use ::std::future::Future;
-use ::std::pin::Pin;
-use ::std::task::{Context, Poll};
 
 use ::js_sys::{Error as JsError, Promise, Reflect, Uint8Array};
 use ::wasm_bindgen::prelude::*;
@@ -171,33 +165,23 @@ fn missing_functions(sodium: &JsValue) -> Vec<&'static str> {
 
 /// Awaits `sodium.ready`, then checks the object has everything we need and keeps it. A failed
 /// init leaves any previously injected libsodium untouched.
-struct InitCryptoFuture {
-    ready: JsFuture,
-    sodium: Option<Sodium>,
-}
-
-impl Future for InitCryptoFuture {
-    type Output = Result<JsValue, JsValue>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        match Pin::new(&mut this.ready).poll(cx) {
-            Poll::Ready(Ok(_)) => {
-                let sodium = this.sodium.take().expect("InitCryptoFuture polled after completion");
-                let missing = missing_functions(&sodium);
-                if !missing.is_empty() {
-                    return Poll::Ready(Err(JsError::new(&format!(
-                        "initWasmCrypto(sodium): the libsodium object you passed lacks {} -- pass the *sumo* build (`import sodium from 'libsodium-wrappers-sumo'`); the standard libsodium-wrappers has no password hashing",
-                        missing.join(", ")
-                    )).into()));
-                }
-                SODIUM.with(|cell| *cell.borrow_mut() = Some(sodium));
-                Poll::Ready(Ok(JsValue::UNDEFINED))
-            }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Pending => Poll::Pending,
-        }
+async fn init(sodium: JsValue) -> Result<JsValue, JsValue> {
+    if !sodium.is_object() {
+        return Err(JsError::new(
+            "initWasmCrypto(sodium): expected the libsodium.js object (`import sodium from 'libsodium-wrappers-sumo'`)"
+        ).into());
     }
+    let sodium: Sodium = sodium.unchecked_into();
+    JsFuture::from(Promise::resolve(&sodium.ready())).await?;
+    let missing = missing_functions(&sodium);
+    if !missing.is_empty() {
+        return Err(JsError::new(&format!(
+            "initWasmCrypto(sodium): the libsodium object you passed lacks {} -- pass the *sumo* build (`import sodium from 'libsodium-wrappers-sumo'`); the standard libsodium-wrappers has no password hashing",
+            missing.join(", ")
+        )).into());
+    }
+    SODIUM.with(|cell| *cell.borrow_mut() = Some(sodium));
+    Ok(JsValue::UNDEFINED)
 }
 
 /// Hand the core its libsodium (see the module docs for the host contract). Must be called and
@@ -212,14 +196,7 @@ impl Future for InitCryptoFuture {
 /// good object is harmless and replaces the stored one.
 #[wasm_bindgen(js_name = initWasmCrypto)]
 pub fn init_wasm_crypto(sodium: JsValue) -> Promise {
-    if !sodium.is_object() {
-        return Promise::reject(&JsError::new(
-            "initWasmCrypto(sodium): expected the libsodium.js object (`import sodium from 'libsodium-wrappers-sumo'`)"
-        ).into());
-    }
-    let sodium: Sodium = sodium.unchecked_into();
-    let ready = JsFuture::from(Promise::resolve(&sodium.ready()));
-    ::wasm_bindgen_futures::future_to_promise(InitCryptoFuture { ready: ready, sodium: Some(sodium) })
+    ::wasm_bindgen_futures::future_to_promise(init(sodium))
 }
 
 /// Run the crypto known-answer self-test (`selftest::run`) against the injected libsodium and

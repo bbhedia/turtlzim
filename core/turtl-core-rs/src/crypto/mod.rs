@@ -19,9 +19,10 @@ macro_rules! crypto_test {
         fn $name() { $body() }
 
         #[cfg(target_arch = "wasm32")]
-        #[::wasm_bindgen_test::wasm_bindgen_test(async)]
-        fn $name() -> crate::crypto::wasm_test_support::ThenReady {
-            crate::crypto::wasm_test_support::ThenReady::new($body)
+        #[::wasm_bindgen_test::wasm_bindgen_test]
+        async fn $name() {
+            $crate::crypto::wasm_test_support::init().await;
+            $body()
         }
     };
 }
@@ -583,9 +584,8 @@ mod tests {
 /// `crypto::decrypt()` -- this file's actual public encryption API, used
 /// throughout the whole crate for real notes/boards/keychain, NOT a
 /// reimplementation of it -- produce byte-identical ciphertext to native
-/// `sodiumoxide` when run for real on `wasm32-unknown-unknown`, via the real
-/// `libsodium-wrappers` JS bridge (`crypto::low`'s `wasm_bridge`/
-/// `init_wasm_crypto()`, see low.rs). Run with:
+/// `sodiumoxide` when run for real on `wasm32-unknown-unknown`, through the libsodium.js the test
+/// injects (`wasm_sodium`'s `init_wasm_crypto()`). Run with:
 ///
 ///   cd core/turtl-core-rs && wasm-pack test --node
 ///
@@ -599,21 +599,9 @@ mod tests {
 /// and wasm32 has no filesystem to read a JSON file from in a real browser
 /// context anyway.
 ///
-/// NOTE on why these tests look the way they do: `turtl_core` is a Rust
-/// 2015-edition crate (see `crypto::low::InitCryptoFuture`'s doc comment for
-/// why bumping the edition to get `async fn`/`.await` sugar isn't a safe,
-/// narrow change here), so plain `#[wasm_bindgen_test] async fn ...` tests
-/// (which need that syntax) aren't available. `wasm-bindgen-test` also
-/// supports `#[wasm_bindgen_test(async)]` on an ordinary (non-`async`) `fn`
-/// that *returns* a `Future`-implementing value -- its runtime awaits that
-/// value itself (inside `wasm-bindgen-test`'s own, differently-edition'd
-/// crate), so no `async`/`.await` syntax is needed on our side at all. Each
-/// test below returns a `ThenReady` (below), a tiny hand-written `Future`
-/// that awaits the real `crypto::init_wasm_crypto()` (this file's actual
-/// public wasm32 init entry point, not a reimplementation) and then runs a
-/// plain synchronous assertion closure -- since every crypto:: call after
-/// init is itself synchronous, that's the only `Future` needed anywhere in
-/// this module.
+/// Each test is a `#[wasm_bindgen_test] async fn` that first awaits `wasm_test_support::init()`,
+/// i.e. the real `init_wasm_crypto()` fed a real libsodium.js the way a host app would feed it;
+/// every crypto:: call after that is synchronous.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_parity_tests {
     use super::*;
@@ -623,9 +611,8 @@ mod wasm_parity_tests {
     // `wasm-pack test --node`) is the default target when neither
     // `run_in_browser` nor `run_in_worker`/`run_in_dedicated_worker` is set.
 
-    // The hand-written `Future` this module's doc comment describes lives in
-    // `wasm_test_support` (below) so other wasm32 tests that need real crypto can reuse it.
-    use super::wasm_test_support::ThenReady;
+    // Shared with every other wasm32 test that needs real crypto (see `wasm_test_support`, below).
+    use super::wasm_test_support;
 
     /// (name, key_hex, plaintext_hex, envelope_hex). Covers an empty
     /// plaintext (edge case: zero-length AEAD input), a plain ASCII short
@@ -658,54 +645,52 @@ mod wasm_parity_tests {
     ///      EXACT SAME envelope bytes as real native `crypto::encrypt()` did.
     ///   2. `crypto::decrypt()` on wasm32 recovers the exact original
     ///      plaintext bytes from that real native envelope.
-    #[wasm_bindgen_test(async)]
-    fn wasm_matches_native_golden_vectors() -> ThenReady {
-        ThenReady::new(|| {
-            for &(name, key_hex, plaintext_hex, envelope_hex) in GOLDEN_VECTORS {
-                let key = Key::new(from_hex(&String::from(key_hex)).unwrap());
-                let plaintext = from_hex(&String::from(plaintext_hex)).unwrap();
-                let native_envelope = from_hex(&String::from(envelope_hex)).unwrap();
+    #[wasm_bindgen_test]
+    async fn wasm_matches_native_golden_vectors() {
+        wasm_test_support::init().await;
+        for &(name, key_hex, plaintext_hex, envelope_hex) in GOLDEN_VECTORS {
+            let key = Key::new(from_hex(&String::from(key_hex)).unwrap());
+            let plaintext = from_hex(&String::from(plaintext_hex)).unwrap();
+            let native_envelope = from_hex(&String::from(envelope_hex)).unwrap();
 
-                // pull the nonce native encrypt() picked at random back out of
-                // its own envelope, so we can force wasm's encrypt() to reuse
-                // it for a fair byte-for-byte comparison.
-                let parsed = deserialize(native_envelope.clone())
-                    .unwrap_or_else(|e| panic!("[{}] failed to parse native envelope: {}", name, e));
-                let nonce = parsed.nonce.clone();
+            // pull the nonce native encrypt() picked at random back out of
+            // its own envelope, so we can force wasm's encrypt() to reuse
+            // it for a fair byte-for-byte comparison.
+            let parsed = deserialize(native_envelope.clone())
+                .unwrap_or_else(|e| panic!("[{}] failed to parse native envelope: {}", name, e));
+            let nonce = parsed.nonce.clone();
 
-                let op = CryptoOp::new_with_nonce("chacha20poly1305", nonce)
-                    .unwrap_or_else(|e| panic!("[{}] CryptoOp::new_with_nonce failed: {}", name, e));
-                let wasm_envelope = encrypt(&key, plaintext.clone(), op)
-                    .unwrap_or_else(|e| panic!("[{}] wasm crypto::encrypt() failed: {}", name, e));
-                assert_eq!(
-                    wasm_envelope, native_envelope,
-                    "[{}] wasm-produced envelope does not byte-match the real native envelope", name
-                );
+            let op = CryptoOp::new_with_nonce("chacha20poly1305", nonce)
+                .unwrap_or_else(|e| panic!("[{}] CryptoOp::new_with_nonce failed: {}", name, e));
+            let wasm_envelope = encrypt(&key, plaintext.clone(), op)
+                .unwrap_or_else(|e| panic!("[{}] wasm crypto::encrypt() failed: {}", name, e));
+            assert_eq!(
+                wasm_envelope, native_envelope,
+                "[{}] wasm-produced envelope does not byte-match the real native envelope", name
+            );
 
-                let wasm_plaintext = decrypt(&key, native_envelope.clone())
-                    .unwrap_or_else(|e| panic!("[{}] wasm crypto::decrypt() of native envelope failed: {}", name, e));
-                assert_eq!(
-                    wasm_plaintext, plaintext,
-                    "[{}] wasm-decrypted plaintext does not byte-match the original", name
-                );
-            }
-        })
+            let wasm_plaintext = decrypt(&key, native_envelope.clone())
+                .unwrap_or_else(|e| panic!("[{}] wasm crypto::decrypt() of native envelope failed: {}", name, e));
+            assert_eq!(
+                wasm_plaintext, plaintext,
+                "[{}] wasm-decrypted plaintext does not byte-match the original", name
+            );
+        }
     }
 
     /// Full round trip using wasm32's own random nonce (i.e. `rand_bytes()`
     /// via the real libsodium.js bridge, not a forced/extracted one):
     /// encrypt-then-decrypt recovers the original plaintext exactly.
-    #[wasm_bindgen_test(async)]
-    fn wasm_round_trip_with_random_nonce() -> ThenReady {
-        ThenReady::new(|| {
-            let key = Key::random().expect("Key::random() failed");
-            let plaintext = Vec::from("Zim wiki notes, encrypted end-to-end, on wasm32.".as_bytes());
+    #[wasm_bindgen_test]
+    async fn wasm_round_trip_with_random_nonce() {
+        wasm_test_support::init().await;
+        let key = Key::random().expect("Key::random() failed");
+        let plaintext = Vec::from("Zim wiki notes, encrypted end-to-end, on wasm32.".as_bytes());
 
-            let op = CryptoOp::new("chacha20poly1305").unwrap();
-            let envelope = encrypt(&key, plaintext.clone(), op).expect("wasm crypto::encrypt() failed");
-            let decrypted = decrypt(&key, envelope).expect("wasm crypto::decrypt() failed");
-            assert_eq!(decrypted, plaintext);
-        })
+        let op = CryptoOp::new("chacha20poly1305").unwrap();
+        let envelope = encrypt(&key, plaintext.clone(), op).expect("wasm crypto::encrypt() failed");
+        let decrypted = decrypt(&key, envelope).expect("wasm crypto::decrypt() failed");
+        assert_eq!(decrypted, plaintext);
     }
 
     /// Tamper check (mirrors `core/wasm-crypto-poc/test/run_test.js`'s tamper
@@ -713,31 +698,30 @@ mod wasm_parity_tests {
     /// ciphertext/tag byte, must make `crypto::decrypt()` fail authentication
     /// -- proving the AAD binding is genuinely enforced by the real wasm
     /// bridge, not just "decryption happens to work on well-formed input."
-    #[wasm_bindgen_test(async)]
-    fn wasm_rejects_tampered_envelope() -> ThenReady {
-        ThenReady::new(|| {
-            let (_, key_hex, _, envelope_hex) = GOLDEN_VECTORS[1]; // short_ascii: non-empty ciphertext
-            let key = Key::new(from_hex(&String::from(key_hex)).unwrap());
-            let envelope = from_hex(&String::from(envelope_hex)).unwrap();
+    #[wasm_bindgen_test]
+    async fn wasm_rejects_tampered_envelope() {
+        wasm_test_support::init().await;
+        let (_, key_hex, _, envelope_hex) = GOLDEN_VECTORS[1]; // short_ascii: non-empty ciphertext
+        let key = Key::new(from_hex(&String::from(key_hex)).unwrap());
+        let envelope = from_hex(&String::from(envelope_hex)).unwrap();
 
-            // sanity: the untampered envelope must still decrypt fine.
-            decrypt(&key, envelope.clone()).expect("untampered envelope failed to decrypt");
+        // sanity: the untampered envelope must still decrypt fine.
+        decrypt(&key, envelope.clone()).expect("untampered envelope failed to decrypt");
 
-            let mut tampered_header = envelope.clone();
-            tampered_header[0] ^= 0xff; // flip a byte inside the AAD-covered header
-            match decrypt(&key, tampered_header) {
-                Err(CryptoError::Authentication(..)) => {}
-                other => panic!("tampered header was not rejected as an authentication failure: {:?}", other),
-            }
+        let mut tampered_header = envelope.clone();
+        tampered_header[0] ^= 0xff; // flip a byte inside the AAD-covered header
+        match decrypt(&key, tampered_header) {
+            Err(CryptoError::Authentication(..)) => {}
+            other => panic!("tampered header was not rejected as an authentication failure: {:?}", other),
+        }
 
-            let mut tampered_ciphertext = envelope.clone();
-            let last = tampered_ciphertext.len() - 1;
-            tampered_ciphertext[last] ^= 0xff; // flip the last ciphertext/tag byte
-            match decrypt(&key, tampered_ciphertext) {
-                Err(CryptoError::Authentication(..)) => {}
-                other => panic!("tampered ciphertext was not rejected as an authentication failure: {:?}", other),
-            }
-        })
+        let mut tampered_ciphertext = envelope.clone();
+        let last = tampered_ciphertext.len() - 1;
+        tampered_ciphertext[last] ^= 0xff; // flip the last ciphertext/tag byte
+        match decrypt(&key, tampered_ciphertext) {
+            Err(CryptoError::Authentication(..)) => {}
+            other => panic!("tampered ciphertext was not rejected as an authentication failure: {:?}", other),
+        }
     }
 }
 
@@ -749,21 +733,18 @@ mod wasm_parity_tests {
 /// libsodium reaches the core by injection (`wasm_sodium`, `initWasmCrypto(sodium)`), so a test
 /// plays the host: `load_sodium()` (a four-line CommonJS snippet, `js/test_support.js`, compiled
 /// into test builds only) `require`s the sumo package from `node_modules` the way a real host app
-/// would import it, and `ThenReady` hands it to `init_wasm_crypto` and waits for it.
-///
-/// `turtl_core` is a Rust 2015-edition crate, so `async fn`/`.await` aren't available (see
-/// `wasm_sodium`); `ThenReady` is the small hand-written `Future` that bridges the two. A test uses
-/// it with `wasm-bindgen-test`'s `(async)` form:
+/// would import it, and `init()` hands it to `init_wasm_crypto` and waits for it. A test just
+/// awaits that first:
 ///
 /// ```ignore
-/// #[wasm_bindgen_test(async)]
-/// fn my_test() -> ThenReady { ThenReady::new(|| { /* plain sync body */ }) }
+/// #[wasm_bindgen_test]
+/// async fn my_test() { wasm_test_support::init().await; /* plain sync body */ }
 /// ```
 #[cfg(all(test, target_arch = "wasm32"))]
 pub mod wasm_test_support {
-    use ::std::future::Future;
     use ::wasm_bindgen::prelude::*;
     use ::wasm_bindgen::JsCast;
+    use ::wasm_bindgen_futures::JsFuture;
     use super::init_wasm_crypto;
 
     #[wasm_bindgen(module = "/js/test_support.js")]
@@ -773,72 +754,20 @@ pub mod wasm_test_support {
         pub fn load_sodium() -> JsValue;
     }
 
-    /// Injects libsodium through the real `init_wasm_crypto`, awaits it, then runs a synchronous
-    /// closure.
-    pub struct ThenReady {
-        ready: ::wasm_bindgen_futures::JsFuture,
-        body: Option<Box<dyn FnOnce()>>,
+    /// Inject libsodium through the real `init_wasm_crypto` and wait for it, as a host does at
+    /// startup.
+    pub async fn init() {
+        JsFuture::from(init_wasm_crypto(load_sodium())).await.expect("init_wasm_crypto() promise rejected");
     }
 
-    impl ThenReady {
-        pub fn new<F: FnOnce() + 'static>(body: F) -> ThenReady {
-            ThenReady {
-                ready: ::wasm_bindgen_futures::JsFuture::from(init_wasm_crypto(load_sodium())),
-                body: Some(Box::new(body)),
-            }
-        }
-    }
-
-    impl Future for ThenReady {
-        type Output = ();
-
-        fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context) -> ::std::task::Poll<()> {
-            let this = self.get_mut();
-            match ::std::pin::Pin::new(&mut this.ready).poll(cx) {
-                ::std::task::Poll::Ready(result) => {
-                    result.expect("init_wasm_crypto() promise rejected");
-                    let body = this.body.take().expect("ThenReady polled after completion");
-                    body();
-                    ::std::task::Poll::Ready(())
-                }
-                ::std::task::Poll::Pending => ::std::task::Poll::Pending,
-            }
-        }
-    }
-
-    /// Awaits a Promise that is *expected to reject*, then runs `check` on the error's message.
-    pub struct ExpectRejection {
-        promise: ::wasm_bindgen_futures::JsFuture,
-        check: Option<Box<dyn FnOnce(String)>>,
-    }
-
-    impl ExpectRejection {
-        pub fn new<F: FnOnce(String) + 'static>(promise: ::js_sys::Promise, check: F) -> ExpectRejection {
-            ExpectRejection {
-                promise: ::wasm_bindgen_futures::JsFuture::from(promise),
-                check: Some(Box::new(check)),
-            }
-        }
-    }
-
-    impl Future for ExpectRejection {
-        type Output = ();
-
-        fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context) -> ::std::task::Poll<()> {
-            let this = self.get_mut();
-            match ::std::pin::Pin::new(&mut this.promise).poll(cx) {
-                ::std::task::Poll::Ready(Err(err)) => {
-                    let message = match err.dyn_into::<::js_sys::Error>() {
-                        Ok(error) => String::from(error.message()),
-                        Err(other) => format!("{:?}", other),
-                    };
-                    let check = this.check.take().expect("ExpectRejection polled after completion");
-                    check(message);
-                    ::std::task::Poll::Ready(())
-                }
-                ::std::task::Poll::Ready(Ok(_)) => panic!("expected the promise to reject, but it resolved"),
-                ::std::task::Poll::Pending => ::std::task::Poll::Pending,
-            }
+    /// Await a Promise that is *expected to reject* and return the error's message.
+    pub async fn rejection_message(promise: ::js_sys::Promise) -> String {
+        match JsFuture::from(promise).await {
+            Err(err) => match err.dyn_into::<::js_sys::Error>() {
+                Ok(error) => String::from(error.message()),
+                Err(other) => format!("{:?}", other),
+            },
+            Ok(_) => panic!("expected the promise to reject, but it resolved"),
         }
     }
 }
@@ -850,24 +779,22 @@ mod wasm_injection_tests {
     use ::wasm_bindgen::prelude::*;
     use ::wasm_bindgen_test::*;
     use super::init_wasm_crypto;
-    use super::wasm_test_support::ExpectRejection;
+    use super::wasm_test_support;
 
-    #[wasm_bindgen_test(async)]
-    fn init_rejects_a_non_object() -> ExpectRejection {
-        ExpectRejection::new(init_wasm_crypto(JsValue::UNDEFINED), |message| {
-            assert!(message.contains("expected the libsodium.js object"), "unexpected message: {}", message);
-        })
+    #[wasm_bindgen_test]
+    async fn init_rejects_a_non_object() {
+        let message = wasm_test_support::rejection_message(init_wasm_crypto(JsValue::UNDEFINED)).await;
+        assert!(message.contains("expected the libsodium.js object"), "unexpected message: {}", message);
     }
 
-    #[wasm_bindgen_test(async)]
-    fn init_rejects_a_libsodium_lacking_what_the_core_needs() -> ExpectRejection {
+    #[wasm_bindgen_test]
+    async fn init_rejects_a_libsodium_lacking_what_the_core_needs() {
         // Looks like libsodium (it has a `ready` promise) but has none of the functions: what the
         // standard, non-sumo libsodium-wrappers would be missing is a subset of this.
         let fake = ::js_sys::Object::new();
         ::js_sys::Reflect::set(&fake, &JsValue::from_str("ready"), &::js_sys::Promise::resolve(&JsValue::UNDEFINED)).unwrap();
-        ExpectRejection::new(init_wasm_crypto(fake.into()), |message| {
-            assert!(message.contains("crypto_pwhash_scryptsalsa208sha256"), "unexpected message: {}", message);
-            assert!(message.contains("sumo"), "the message should say which build to pass: {}", message);
-        })
+        let message = wasm_test_support::rejection_message(init_wasm_crypto(fake.into())).await;
+        assert!(message.contains("crypto_pwhash_scryptsalsa208sha256"), "unexpected message: {}", message);
+        assert!(message.contains("sumo"), "the message should say which build to pass: {}", message);
     }
 }

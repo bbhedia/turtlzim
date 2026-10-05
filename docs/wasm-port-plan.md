@@ -445,7 +445,9 @@ Networking and concurrency are unified on async/await across both native and web
       the crate stays on (implicit) edition 2015. **[Superseded in Step 4b-2a: that diagnosis was
       wrong about the cause and the cost. The ~600 errors were almost all 2015-style absolute
       paths to the crate's own modules, and a mechanical rewrite fixed them; the crate now builds
-      as edition 2018 with every test green, so `async fn`/`.await` is available.]**
+      as edition 2018 with every test green, so `async fn`/`.await` is available. The hand-written
+      `Future`s this entry describes (`InitCryptoFuture`, the tests' `ThenReady`) were then replaced
+      with plain `async fn`s, and the wasm tests are ordinary `#[wasm_bindgen_test] async fn`s.]**
 
       Instead, `crypto::init_wasm_crypto()` is a **plain synchronous fn returning `js_sys::
       Promise`**, built from a hand-written `Future` impl (`low.rs`'s `InitCryptoFuture` --
