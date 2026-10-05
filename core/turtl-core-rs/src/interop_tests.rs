@@ -23,7 +23,7 @@
 //! ```
 
 use ::jedi::{self, Value};
-use crate::flow_tests::{start_server, test_turtl, Server};
+use crate::flow_tests::{seed, start_server, test_turtl, Server};
 use crate::models::model::Model;
 use crate::models::sync_record::SyncRecord;
 use crate::models::user;
@@ -73,13 +73,6 @@ fn profile_titles(turtl: &crate::turtl::Turtl) -> (Vec<String>, Vec<String>) {
     spaces.sort();
     boards.sort();
     (spaces, boards)
-}
-
-/// Seed the stand-in server with an account and the records it should hand out as the full profile.
-async fn seed(server: &Server, account: Value, full_sync: Value) {
-    let api = crate::api::Api::new();
-    api.set_endpoint(Some(server.url.clone()));
-    let _: Value = api.post("/seed").unwrap().json(&json!({"account": account, "full_sync": full_sync})).call().await.unwrap();
 }
 
 /// Make an account with this build, put a note in it, and write down what a server would hold and

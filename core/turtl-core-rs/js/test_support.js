@@ -74,8 +74,9 @@ function createFlowHandler(options = {}) {
     let account = null;
     let polls = 0;
     let fullSync = [];
+    const attachments = new Map();
     const log = [];
-    return function handle(req, res, body) {
+    return function handle(req, res, body, raw) {
         const json = (status, obj) => {
             res.writeHead(status, { 'content-type': 'application/json' });
             res.end(JSON.stringify(obj));
@@ -107,6 +108,21 @@ function createFlowHandler(options = {}) {
         if (req.method !== 'GET' && req.url.startsWith('/spaces/')) {
             return json(200, {});
         }
+        const attachment = /^\/notes\/([^/]+)\/(attachment|file)$/.exec(req.url);
+        if (attachment) {
+            const id = attachment[1];
+            if (req.method === 'PUT' && attachment[2] === 'attachment') {
+                attachments.set(id, raw);
+                return json(200, {});
+            }
+            if (req.method === 'GET' && attachment[2] === 'attachment') {
+                return json(200, `http://${req.headers.host}/notes/${id}/file`);
+            }
+            if (req.method === 'GET' && attachment[2] === 'file' && attachments.has(id)) {
+                res.writeHead(200, { 'content-type': 'application/octet-stream' });
+                return res.end(attachments.get(id));
+            }
+        }
         if (req.method === 'POST' && req.url === '/sync') {
             const records = JSON.parse(body);
             if (records.length > 0) { records[0].sync_ids = [101]; }
@@ -134,15 +150,22 @@ function createFlowHandler(options = {}) {
 }
 module.exports.createFlowHandler = createFlowHandler;
 
+// Collect a request's body, and hand `handle` the text of it and the bytes of it.
+function serveBody(handle, req, res) {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        handle(req, res, raw.toString('utf8'), raw);
+    });
+}
+module.exports.serveBody = serveBody;
+
 // Starts a fresh stand-in Turtl server on an ephemeral localhost port and resolves to the port.
 module.exports.startFlowServer = function startFlowServer() {
     return new Promise((resolve) => {
         const handle = createFlowHandler();
-        const flowServer = http.createServer((req, res) => {
-            let body = '';
-            req.on('data', (chunk) => (body += chunk));
-            req.on('end', () => handle(req, res, body));
-        });
+        const flowServer = http.createServer((req, res) => serveBody(handle, req, res));
         flowServers.push(flowServer);
         flowServer.listen(0, '127.0.0.1', () => resolve(flowServer.address().port));
     });

@@ -559,7 +559,8 @@ Networking and concurrency are unified on async/await across both native and web
       wasm drives the same fns with `spawn_local`; (3) **scope**: the JSON API, user flows, sync
       engine, dispatch and the space/invite APIs; **file attachments stay native-only** (stubbed on
       wasm) because they stream to the filesystem and need a browser file-storage backend, which
-      belongs with persistence (4b-5b).
+      belongs with persistence (4b-5b). (Done after that: the backend is a table of the user's
+      database, see "Attachments" under Step 5.)
 
       Research behind it: the HTTP layer is small (`api.rs` is 298 lines with one blocking choke
       point, `ApiCaller::call`; about 40 call sites in a dozen files, mostly `models/user.rs`); the
@@ -669,7 +670,7 @@ Networking and concurrency are unified on async/await across both native and web
         `cargo build --release --features sqlite-static`; the production `--target web` build (3.29 MB)
         and its smoke test.
 
-        **Still open when 4b-2c was done** (4b-3 below resolved all but the filesystem item):
+        **Still open when 4b-2c was done** (4b-3 below resolved most of it, 4b-5b and Step 5 the filesystem item):
         `lib.rs::start()` is still the native thread plus the blocking `carrier::recv` loop, so wasm has no message entry point yet
         (4b-3: push messages in, `spawn_local` the `process` call); `Thredder` is still the
         synchronous-inline placeholder on wasm; `init()` reads a config *file* (the wasm tests set the
@@ -804,7 +805,7 @@ Networking and concurrency are unified on async/await across both native and web
       doubles scrypt's `p`) makes exactly the two scrypt tests fail. (Nudging it to 524289 does
       *not*: scrypt quantizes its cost parameters, so that mutation is equivalent.)
 - [x] Step 4b-5b: persistence (OPFS-SAHPool in a dedicated Worker, browser-tested) -- **done
-      (2026-10-05)**; attachments are the part still open (below).
+      (2026-10-05)**; note attachments, the part this step left open, followed the same day (below).
       * **The VFS.** `sqlite-wasm-rs` 0.5.x (the line rusqlite 0.40 uses) carries no OPFS VFS; it lives
         in the separate `sqlite-wasm-vfs` crate, and **0.2.x is the line built against `sqlite-wasm-rs`
         0.5 and its `rsqlite-vfs` 0.1** (0.3.x pairs with `sqlite-wasm-rs` 0.6, which would put two
@@ -836,12 +837,10 @@ Networking and concurrency are unified on async/await across both native and web
         persistence did nothing); a `data_folder` with no persistence is refused; a second worker on
         the same directory is refused until the first is gone; and wiping a user's and then all
         data. Native `turtl_core` 80/80, wasm32 (Node) 48/48, browser 6/6, the production smoke test.
-      * **Still open:** attachments (the file-sync tasks are native-only; they want an OPFS file store
-        of their own), and the Worker bridge for the page is the app's: `core_worker.js` /
-        `core_client.js` are the reference for it.
-- [x] Step 5: full parity pass -- **done (2026-10-05)** for everything but attachments, which are
-      the one open feature (below). "Parity" is checked layer by layer, each by the *same* test code
-      on both targets:
+      * **Not this step's:** the Worker bridge for the page is the app's: `core_worker.js` /
+        `core_client.js` are the reference for it. (Attachments: see Step 5.)
+- [x] Step 5: full parity pass -- **done (2026-10-05)**, attachments included (below). "Parity" is
+      checked layer by layer, each by the *same* test code on both targets:
 
       | Layer | Evidence |
       |---|---|
@@ -849,7 +848,7 @@ Networking and concurrency are unified on async/await across both native and web
       | **Whole accounts** | `src/interop_tests.rs` + `test-fixtures/`: an account made by the native build and one made by the wasm32 build (user record, auth token, keychain, spaces, boards, a note: what a server would store), each read by native, by wasm32 under Node and by the production package in a Chromium Worker: passphrase to key (the auth token must come out equal), user record, the key-unwrapping chain down to the note, the sync-record ingestion, and full-text search over the decrypted note |
       | Storage and search | `dumpy`, `clouseau`, `storage`, `search` tests, unchanged, on both |
       | Networking | the `Api` scenarios, one suite, both servers (step 4b-2b) |
-      | Flows | join, login, dispatcher, outgoing and incoming sync, the sync engine, the incoming hold, space operations, passphrase change, saved login: `src/flow_tests.rs` |
+      | Flows | join, login, dispatcher, outgoing and incoming sync, the sync engine, the incoming hold, space operations, passphrase change, saved login, attachments (one device uploads a note's file, another downloads and decrypts it): `src/flow_tests.rs` |
       | Persistence | OPFS in a real browser (step 4b-5b): survives a reload, the in-memory control doesn't, wipes, a second tab is refused |
 
       The fixtures are made once and checked in; `TURTL_WRITE_FIXTURES=1` on either target
@@ -872,9 +871,18 @@ Networking and concurrency are unified on async/await across both native and web
       | Data-folder lockfile | `fs2` lock | none: one core per Worker, and the OPFS pool has one holder |
       | Web clipper (`clip`) | `clippo` | `NotImplemented` |
       | Import from Turtl 0.6 (`user:can-migrate`, `user:join-migrate`, `user:migrate-auth-debug`) | `migrate` crate | `can-migrate` says no, the others `NotImplemented` |
-      | **Note attachments** (`file` on a note, `profile:note:get-file`, the two file sync loops) | the filesystem | **not supported yet**: saving one fails, and the file syncers aren't started |
+      | Note attachments (`file` on a note, `profile:note:get-file`, the two file sync loops) | one encrypted file per note in the files folder | one row per note in a table of the user's database (so they persist and are wiped with it); the sync loops run unchanged on top, and a download is held in memory until it is whole |
 
-      **Attachments are the open item.** They stream to and from files, so the browser needs a store
-      of its own (OPFS files, or blobs in the user database) behind `FileData`, and the two file sync
-      loops need to run on it; the stand-in server would grow `PUT/GET /notes/:id/attachment`. That is
-      a feature-sized step of its own, not a parity check, and nothing else depends on it.
+      **Attachments** (added after the rest of this step): all file I/O of `FileData` and the two file
+      sync loops goes through `FileData::store_put/get/delete`, which are the same filesystem calls as
+      before natively and `Storage::attachment_*` (a lazily created `attachments` table: `user_id`,
+      `note_id`, `data` BLOB) on wasm32. The loops now run on both targets (the proxy setting is the one
+      native-only line, and a download takes the whole body with `bytes()` because reqwest's wasm
+      `Response` has no `chunk()`, which also means a download that fails halfway leaves nothing
+      behind). The stand-in servers learned `PUT /notes/<id>/attachment`, `GET /notes/<id>/attachment`
+      (the URL to fetch) and `GET /notes/<id>/file` (binary-safe in both). **Verified** by one flow, run
+      natively and on wasm32: a note with a (non-text) file is saved, read back, uploaded by the file
+      loop, forgotten by the first device, and a second device that learns of it from the server
+      downloads it and decrypts it to the original bytes; plus the same save, read and upload in the
+      browser Worker, and a storage test of the blob helpers. Now: native `turtl_core` 86, wasm32 under
+      Node 54, browser 9 scenarios.

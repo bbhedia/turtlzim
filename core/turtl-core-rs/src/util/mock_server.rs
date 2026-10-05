@@ -17,7 +17,10 @@ pub struct Request {
     pub method: String,
     pub path: String,
     pub headers: Vec<(String, String)>,
+    /// The body as text (invalid UTF-8 replaced), for the JSON routes...
     pub body: String,
+    /// ...and as it came, for the ones that take binary data.
+    pub body_bytes: Vec<u8>,
 }
 
 impl Request {
@@ -33,18 +36,23 @@ impl Request {
 pub struct Response {
     pub status: u16,
     pub content_type: &'static str,
-    pub body: String,
+    pub body: Vec<u8>,
     /// Wait this long before answering (to exercise client timeouts).
     pub delay_ms: u64,
 }
 
 impl Response {
     pub fn json(status: u16, body: &str) -> Response {
-        Response { status: status, content_type: "application/json", body: String::from(body), delay_ms: 0 }
+        Response { status: status, content_type: "application/json", body: Vec::from(body.as_bytes()), delay_ms: 0 }
     }
 
     pub fn text(status: u16, body: &str) -> Response {
-        Response { status: status, content_type: "text/plain", body: String::from(body), delay_ms: 0 }
+        Response { status: status, content_type: "text/plain", body: Vec::from(body.as_bytes()), delay_ms: 0 }
+    }
+
+    /// Binary data
+    pub fn bytes(status: u16, content_type: &'static str, body: Vec<u8>) -> Response {
+        Response { status: status, content_type: content_type, body: body, delay_ms: 0 }
     }
 
     pub fn delayed(mut self, delay_ms: u64) -> Response {
@@ -125,16 +133,23 @@ fn handle<F: Fn(&Request) -> Response>(stream: TcpStream, route: &F) -> ::std::i
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body)?;
 
-    let res = route(&Request { method: method, path: path, headers: headers, body: String::from_utf8_lossy(&body).into_owned() });
+    let res = route(&Request {
+        method: method,
+        path: path,
+        headers: headers,
+        body: String::from_utf8_lossy(&body).into_owned(),
+        body_bytes: body,
+    });
     if res.delay_ms > 0 {
         thread::sleep(Duration::from_millis(res.delay_ms));
     }
     let mut out = stream;
     write!(
         out,
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        res.status, reason(res.status), res.content_type, res.body.len(), res.body
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        res.status, reason(res.status), res.content_type, res.body.len()
     )?;
+    out.write_all(&res.body)?;
     out.flush()
 }
 

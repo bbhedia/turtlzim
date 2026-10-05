@@ -81,9 +81,7 @@ const apiHandler = testSupport.createFlowHandler({ note: false });
 const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (req.method === 'GET' && serveStatic(req, res, pathname)) return;
-    let body = '';
-    req.on('data', (chunk) => (body += chunk));
-    req.on('end', () => apiHandler(req, res, body));
+    testSupport.serveBody(apiHandler, req, res);
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;

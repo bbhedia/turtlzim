@@ -8,6 +8,7 @@ use crate::models::file::{File, FileData};
 use crate::models::sync_record::{SyncRecord, SyncAction};
 use crate::crypto::Key;
 use crate::sync::sync_model::{self, SyncModel, MemorySaver};
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::fs;
 use crate::models::storable::Storable;
 
@@ -80,7 +81,8 @@ impl Validate for Note {
 
 impl Note {
     /// Remove the files attached to this note, if any.
-    fn clear_files(&self) -> TResult<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn clear_files(&self, _turtl: &Turtl) -> TResult<()> {
         // delete all local file(s) associated with this note
         let note_id = self.id_or_else()?;
         let files = FileData::file_finder_all(Some(&self.user_id), Some(&note_id))?;
@@ -88,6 +90,17 @@ impl Note {
             fs::remove_file(&file)?;
         }
         Ok(())
+    }
+
+    /// Remove the files attached to this note, if any. (On wasm32 they are rows of the user's db.)
+    #[cfg(target_arch = "wasm32")]
+    fn clear_files(&self, turtl: &Turtl) -> TResult<()> {
+        let note_id = self.id_or_else()?;
+        let mut db_guard = lock!(turtl.db);
+        match db_guard.as_mut() {
+            Some(db) => FileData::store_delete(db, Some(&self.user_id), Some(&note_id)),
+            None => Ok(()),
+        }
     }
 
     /// Move a note to a different space
@@ -213,14 +226,16 @@ impl MemorySaver for Note {
                 }
             }
             SyncAction::Delete => {
-                let mut search_guard = lock!(turtl.search);
-                match search_guard.as_mut() {
-                    Some(ref mut search) => search.unindex_note(&self)?,
-                    // i COULD throw an error here. i'm choosing not to...
-                    None => {},
-                };
+                {
+                    let mut search_guard = lock!(turtl.search);
+                    match search_guard.as_mut() {
+                        Some(ref mut search) => search.unindex_note(&self)?,
+                        // i COULD throw an error here. i'm choosing not to...
+                        None => {},
+                    };
+                }
 
-                self.clear_files()?;
+                self.clear_files(turtl)?;
             }
             _ => {}
         }

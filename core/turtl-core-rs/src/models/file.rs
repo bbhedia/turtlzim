@@ -10,13 +10,19 @@ use crate::sync::sync_model::{self, SyncModel, MemorySaver};
 use crate::turtl::Turtl;
 use ::std::mem;
 use crate::crypto;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::util;
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::io::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use ::glob;
 
-/// Return the location where we store files
+/// Return the location where we store files (natively: wasm32 keeps them in the database)
+#[cfg(not(target_arch = "wasm32"))]
 pub fn file_folder() -> TResult<String> {
     util::file_folder(Some("files"))
 }
@@ -80,23 +86,11 @@ impl SyncModel for FileData {
     }
 
     // remove the file
-    fn db_delete(&self, _db: &mut Storage, _sync_item: Option<&SyncRecord>) -> TResult<()> {
+    fn db_delete(&self, db: &mut Storage, _sync_item: Option<&SyncRecord>) -> TResult<()> {
         let id = self.id_or_else()?;
-
-        // we could use FileData::file_finder here, but we actually do want to
-        // find ALL files with this note ID and remove them. just a paranoid
+        // we want to remove ALL files with this note ID (whichever user saved them). just a paranoid
         // precaution.
-        let mut filepath = PathBuf::from(file_folder()?);
-        filepath.push(FileData::filebuilder(None, Some(&id)));
-        let pathstr = match filepath.to_str() {
-            Some(x) => x,
-            None => return TErr!(TError::BadValue(format!("invalid path: {:?}", filepath))),
-        };
-        let files = glob::glob(&pathstr)?;
-        for file in files {
-            fs::remove_file(&file?)?;
-        }
-        Ok(())
+        FileData::store_delete(db, None, Some(&id))
     }
 
     // override the sync model's outgoing default fn. we need to set our sync
@@ -159,6 +153,7 @@ impl MemorySaver for FileData {
 
 impl FileData {
     /// Builds a standard filename
+    #[cfg(not(target_arch = "wasm32"))]
     fn filebuilder(user_id: Option<&String>, note_id: Option<&String>) -> String {
         // wildcard, bitches. YEEEEEEEEHAWW!!!
         let wildcard = String::from("*");
@@ -167,15 +162,6 @@ impl FileData {
             user_id.unwrap_or(&wildcard),
             note_id.unwrap_or(&wildcard),
         )
-    }
-
-    /// Find the PathBuf for a file, given the pieces that build the filename
-    ///
-    /// (There are no attachment files on wasm32 yet: they stream to the filesystem, and the browser's
-    /// file store for them doesn't exist.)
-    #[cfg(target_arch = "wasm32")]
-    pub fn file_finder_all(_user_id: Option<&String>, _note_id: Option<&String>) -> TResult<Vec<PathBuf>> {
-        Ok(Vec::new())
     }
 
     /// Find the PathBuf for a file, given the pieces that build the filename
@@ -196,6 +182,7 @@ impl FileData {
     }
 
     /// Find the PathBuf for a file, given the pieces that build the filename
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn file_finder(user_id: Option<&String>, note_id: Option<&String>) -> TResult<PathBuf> {
         let mut files = FileData::file_finder_all(user_id, note_id)?;
         if files.len() < 1 {
@@ -204,12 +191,63 @@ impl FileData {
         Ok(files.swap_remove(0))
     }
 
-    /// Given a user_id/note_id, return the PathBuf to a location the file
-    /// should be saved.
-    pub fn new_file(user_id: &String, note_id: &String) -> TResult<PathBuf> {
-        let mut filepath = PathBuf::from(file_folder()?);
-        filepath.push(FileData::filebuilder(Some(user_id), Some(note_id)));
-        Ok(filepath)
+    // Where a note's (encrypted) file lives. Natively that is a file in the files folder; wasm32 has no
+    // filesystem, so there it is a row of the user's database (so it lives and dies with the account's
+    // local data, and is deleted with it). Everything that stores, loads or removes a file goes
+    // through these three, the file sync loops included.
+
+    /// Store the encrypted file of a note.
+    pub(crate) fn store_put(db: &mut Storage, user_id: &String, note_id: &String, enc: &[u8]) -> TResult<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = &db;
+            let mut filepath = PathBuf::from(file_folder()?);
+            util::create_dir(&filepath)?;
+            filepath.push(FileData::filebuilder(Some(user_id), Some(note_id)));
+            let mut fs_file = fs::File::create(&filepath)?;
+            fs_file.write_all(enc)?;
+            Ok(())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            db.attachment_put(user_id, note_id, enc)
+        }
+    }
+
+    /// The encrypted file of a note (whichever user's, when `user_id` is None), or a NotFound error.
+    pub(crate) fn store_get(db: &mut Storage, user_id: Option<&String>, note_id: &String) -> TResult<Vec<u8>> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = &db;
+            let filename = FileData::file_finder(user_id, Some(note_id))?;
+            let mut file = fs::File::open(filename)?;
+            let mut enc = Vec::new();
+            file.read_to_end(&mut enc)?;
+            Ok(enc)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            match db.attachment_get(user_id, note_id)? {
+                Some(enc) => Ok(enc),
+                None => TErr!(TError::NotFound(format!("file not found"))),
+            }
+        }
+    }
+
+    /// Remove stored files. `None` matches any user, or any note.
+    pub(crate) fn store_delete(db: &mut Storage, user_id: Option<&String>, note_id: Option<&String>) -> TResult<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = &db;
+            for file in FileData::file_finder_all(user_id, note_id)? {
+                fs::remove_file(&file)?;
+            }
+            Ok(())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            db.attachment_delete(user_id, note_id)
+        }
     }
 
     /// Load a note's file, if we have one.
@@ -217,12 +255,13 @@ impl FileData {
         let note_id = note.id_or_else()?;
         let note_key = note.key_or_else()?;
 
-        let filename = FileData::file_finder(None, Some(&note_id))?;
         let enc = {
-            let mut file = fs::File::open(filename)?;
-            let mut enc = Vec::new();
-            file.read_to_end(&mut enc)?;
-            enc
+            let mut db_guard = lock!(turtl.db);
+            let db = match db_guard.as_mut() {
+                Some(x) => x,
+                None => return TErr!(TError::MissingField(format!("Turtl.db"))),
+            };
+            FileData::store_get(db, None, &note_id)?
         };
 
         // decrypt the file using the turtl standard serialization format
@@ -261,33 +300,25 @@ impl FileData {
                 .map_err(|e| From::from(e))
         })?;
 
-        // now, save the encrypted file data to disk
-        let mut filepath = PathBuf::from(file_folder()?);
-        util::create_dir(&filepath)?;
-        filepath.push(FileData::filebuilder(Some(&user_id), Some(&note_id)));
-        let mut fs_file = fs::File::create(&filepath)?;
-        fs_file.write_all(enc.as_slice())?;
+        let mut db_guard = lock!(turtl.db);
+        let db = match db_guard.as_mut() {
+            Some(x) => x,
+            None => return TErr!(TError::MissingField(format!("Turtl.db"))),
+        };
+
+        // now, save the encrypted file data
+        FileData::store_put(db, &user_id, &note_id, enc.as_slice())?;
 
         // phew, now that all went smoothly, create a sync record for the saved
-        // file (which will let the sync system know to upload our heroic file)
-        let create_sync = move || -> TResult<()> {
-            let mut db_guard = lock!(turtl.db);
-            let db = match db_guard.as_mut() {
-                Some(x) => x,
-                None => return TErr!(TError::MissingField(format!("Turtl.db"))),
-            };
-
-            // run the sync. this would normally write an object to the "files"
-            // table, but since we've overwritten db_save() to do NOTHING we can
-            // rest easy here knowing we won't get random records in tables that
-            // shouldn't exist.
-            self.outgoing(SyncAction::Add, &user_id, db, false)?;
-            Ok(())
-        };
-        match create_sync() {
+        // file (which will let the sync system know to upload our heroic file).
+        //
+        // this would normally write an object to the "files" table, but since
+        // we've overwritten db_save() to do NOTHING we can rest easy here knowing
+        // we won't get random records in tables that shouldn't exist.
+        match self.outgoing(SyncAction::Add, &user_id, db, false) {
             Ok(_) => (),
             Err(e) => {
-                match fs::remove_file(&filepath) {
+                match FileData::store_delete(db, Some(&user_id), Some(&note_id)) {
                     Ok(_) => {},
                     Err(e) => {
                         error!("FileData.save() -- error removing saved file: {}", e);
@@ -350,9 +381,12 @@ mod tests {
         // see if the file contents match after decryption
         assert_eq!(String::from_utf8(loaded).unwrap(), r#"{"age":42,"dislikes":"slappy","likes":"slippy","lives":{"city":"santa cruz brahhhh"},"name":"flippy"}"#);
 
-        let mut db_guard = lock!(turtl.db);
-        let db = db_guard.as_mut().unwrap();
-        file.db_delete(db, None).unwrap();
+        // (load_file() takes the db lock itself, so this one must be let go of first)
+        {
+            let mut db_guard = lock!(turtl.db);
+            let db = db_guard.as_mut().unwrap();
+            file.db_delete(db, None).unwrap();
+        }
 
         match FileData::load_file(&turtl, &note) {
             Ok(_) => panic!("Found file for note {}, should be deleted", note.id().as_ref().unwrap()),

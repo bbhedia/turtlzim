@@ -5,6 +5,7 @@
 use ::std::sync::{Arc, RwLock, Mutex};
 use ::std::sync::atomic::{AtomicBool, Ordering};
 use ::std::ops::Drop;
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::fs;
 #[cfg(not(target_arch = "wasm32"))]
 use ::regex::Regex;
@@ -28,6 +29,7 @@ use crate::models::board::Board;
 use crate::models::invite::Invite;
 use crate::models::keychain::KeychainEntry;
 use crate::models::note::Note;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::models::file::FileData;
 use crate::models::sync_record::{SyncRecord, SyncAction};
 use crate::messaging::{self, Messenger, Response};
@@ -830,11 +832,14 @@ impl Turtl {
         // wipe all databases
         storage::delete_all_dbs(&data_folder)?;
 
-        // wipe all note files
-        let files = FileData::file_finder_all(None, None)?;
-        for file in files {
-            fs::remove_file(&file)?;
-            info!("turtl.wipe_app_data() -- removing {}", file.display());
+        // wipe all note files (on wasm32 they are rows of the databases deleted above)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let files = FileData::file_finder_all(None, None)?;
+            for file in files {
+                fs::remove_file(&file)?;
+                info!("turtl.wipe_app_data() -- removing {}", file.display());
+            }
         }
 
         (*kv_guard) = Turtl::open_kv()?;
@@ -851,10 +856,14 @@ impl Turtl {
         let db_loc = self.get_user_db_location(&user_id)?;
         storage::delete_db(&db_loc)?;
 
-        let files = FileData::file_finder_all(Some(&user_id), None)?;
-        for file in files {
-            fs::remove_file(&file)?;
-            info!("turtl.wipe_user_data() -- removing {}", file.display());
+        // (on wasm32 the files are rows of the database deleted above)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let files = FileData::file_finder_all(Some(&user_id), None)?;
+            for file in files {
+                fs::remove_file(&file)?;
+                info!("turtl.wipe_user_data() -- removing {}", file.display());
+            }
         }
 
         Ok(())

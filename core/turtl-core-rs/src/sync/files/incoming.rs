@@ -8,10 +8,7 @@ use crate::error::{TResult, TError};
 use crate::models::sync_record::{SyncType, SyncRecord};
 use crate::models::file::FileData;
 use ::std::time::Duration;
-use ::std::fs;
-use ::std::io::Write;
 use ::jedi::{self, Value};
-use crate::util;
 use ::config;
 use ::reqwest;
 
@@ -77,41 +74,35 @@ impl FileSyncIncoming {
         // define a container that grabs our file and runs the download. if
         // anything in here fails, we mark the sync record as failed below
         let download = async {
-            // generate the filename we'll save to, and open the file (we should
-            // test if the file can be created before we run off blasting API
-            // calls in every direction)
-            let file = FileData::new_file(&user_id, note_id)?;
-            let parent = match file.parent() {
-                Some(path) => path.clone(),
-                None => return TErr!(TError::BadValue(format!("bad file path: {:?}", file))),
-            };
-            util::create_dir(parent)?;
-            let mut file = fs::File::create(&file)?;
-
             // start our API call to the note file attachment endpoint
             let url = format!("/notes/{}/attachment", note_id);
             // grab the location of the file we'll be downloading
             let file_url: String = self.api.get(&url[..])?.call().await?;
             info!("FileSyncIncoming.download_file() -- grabbing file at URL {}", file_url);
 
-            let mut client_builder = reqwest::Client::builder()
-                .timeout(Duration::new(30, 0));
-            match config::get::<Option<String>>(&["api", "proxy"]) {
-                Ok(Some(proxy_cfg)) => {
-                    client_builder = client_builder.proxy(reqwest::Proxy::http(format!("http://{}", proxy_cfg).as_str())?);
+            // (`mut` is only needed by the native-only proxy setting below)
+            #[allow(unused_mut)]
+            let mut client_builder = reqwest::Client::builder();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                match config::get::<Option<String>>(&["api", "proxy"]) {
+                    Ok(Some(proxy_cfg)) => {
+                        client_builder = client_builder.proxy(reqwest::Proxy::http(format!("http://{}", proxy_cfg).as_str())?);
+                    }
+                    Ok(None) => {}
+                    Err(_) => {}
                 }
-                Ok(None) => {}
-                Err(_) => {}
             }
             let client = client_builder.build()?;
-            let req = client.request(Method::GET, reqwest::Url::parse(file_url.as_str())?);
+            let req = client.request(Method::GET, reqwest::Url::parse(file_url.as_str())?)
+                .timeout(Duration::new(30, 0));
             // only add our auth junk if we're calling back to the turtl api!
             let turtl_api_url: String = config::get(&["api", "endpoint"])?;
             let req = match self.api.auth_header() {
                 Some(auth) if file_url.contains(turtl_api_url.as_str()) => req.header("Authorization", auth),
                 _ => req,
             };
-            let mut res = client.execute(req.build()?).await?;
+            let res = client.execute(req.build()?).await?;
             let status = res.status().clone();
             if status.as_u16() >= 400 {
                 let errstr = res.text().await?;
@@ -121,10 +112,10 @@ impl FileSyncIncoming {
                 };
                 return TErr!(TError::Api(status, val));
             }
-            // stream our API call into the file, a chunk at a time
-            while let Some(chunk) = res.chunk().await? {
-                file.write_all(&chunk[..])?;
-            }
+            // take the whole body, and store it only once it is all here (so a download that fails
+            // halfway leaves nothing behind)
+            let body = res.bytes().await?;
+            with_db!{ db, self.db, FileData::store_put(db, &user_id, note_id, &body[..])? };
             Ok(())
         };
 

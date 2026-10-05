@@ -34,8 +34,8 @@
 //! (OPFS) through SQLite's SAHPool VFS, which needs a dedicated Worker, so the core has to run in
 //! one (js/browser/core_worker.js is the reference), and which lets one worker use a given
 //! `directory` at a time: a second tab (or a worker that hasn't died yet) is told so. `data_folder`
-//! then names the folder inside it (default `turtl`). Attachments and the other filesystem features
-//! are native-only for now.
+//! then names the folder inside it (default `turtl`). Note attachments are kept in that same database
+//! (a table of encrypted blobs), so they persist, and are wiped, with it.
 
 use ::std::cell::RefCell;
 use ::std::sync::Arc;
@@ -81,8 +81,8 @@ const DEFAULT_CONFIG: &str = r#"{
     "sync": {
         "enable_incoming": true,
         "enable_outgoing": true,
-        "enable_files_incoming": false,
-        "enable_files_outgoing": false,
+        "enable_files_incoming": true,
+        "enable_files_outgoing": true,
         "poll_timeout": 25
     }
 }"#;

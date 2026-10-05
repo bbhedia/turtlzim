@@ -16,12 +16,11 @@
 #[macro_use]
 mod macros;
 // The sync engine is the same code on every target: its loops are async fns that `util::exec` runs
-// (a thread each natively, a task on the host's event loop on wasm32). Only file attachments are
-// native-only for now, until the browser has a file store to put them in (docs/wasm-port-plan.md
-// step 4b-5b).
+// (a thread each natively, a task on the host's event loop on wasm32). That includes the two file
+// loops: where a file is kept is `FileData`'s business (a file natively, a row of the user's
+// database on wasm32).
 pub mod incoming;
 pub mod outgoing;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod files;
 #[macro_use]
 pub mod sync_model;
@@ -31,9 +30,7 @@ use ::futures_channel::oneshot;
 use ::config;
 use crate::sync::outgoing::SyncOutgoing;
 use crate::sync::incoming::SyncIncoming;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::sync::files::outgoing::FileSyncOutgoing;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::sync::files::incoming::FileSyncIncoming;
 use crate::models::sync_record::SyncRecord;
 use crate::util::exec::{self, TaskHandle};
@@ -271,11 +268,8 @@ pub async fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex
     // the macro!
     sync_starter!(SyncOutgoing::new);
     sync_starter!(SyncIncoming::new);
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        sync_starter!(FileSyncOutgoing::new);
-        sync_starter!(FileSyncIncoming::new);
-    }
+    sync_starter!(FileSyncOutgoing::new);
+    sync_starter!(FileSyncIncoming::new);
 
     // define some callbacks Turtl can use to control the sync processes. turtl
     // could manage this junk itself, but it's nicer to have a single object

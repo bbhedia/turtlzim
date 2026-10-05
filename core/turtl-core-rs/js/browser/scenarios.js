@@ -190,6 +190,40 @@ scenarios.saved_login_survives_reload = async ({ CoreClient, workerUrl, origin }
     core.terminate();
 };
 
+// A note's file, in the browser: saved encrypted under the note's key into the database, read back
+// decrypted, and uploaded by the file sync loop (fetch, with a binary body, to the stand-in server).
+scenarios.attachments = async ({ CoreClient, workerUrl, origin }) => {
+    const core = new CoreClient(workerUrl);
+    await core.boot({ api: { endpoint: origin }, logging: { level: 'error' } });
+    assertEqual((await core.request('user:join', 'files@test.com', 'filespassphrase')).e, 0, 'join');
+    const profile = (await core.request('profile:load')).d;
+
+    const bytes = [72, 105, 0, 255, 254, 13, 10, 65, 66, 67, 0, 200, 100, 50];
+    const base64 = btoa(String.fromCharCode(...bytes));
+    const added = await core.request('profile:sync:model', 'add', 'note', {
+        space_id: profile.spaces[0].id, user_id: '0', type: 'file', title: 'with a file',
+        file: { name: 'hi.bin', type: 'application/octet-stream', filedata: { data: base64 } },
+    });
+    assertEqual(added.e, 0, `add: ${JSON.stringify(added)}`);
+    const noteId = added.d.id;
+
+    const read = await core.request('profile:note:get-file', noteId);
+    assertEqual([read.e, read.d], [0, base64], 'the file reads back');
+
+    assertEqual((await core.request('sync:start')).e, 0, 'sync:start');
+    const upload = `PUT /notes/${noteId}/attachment`;
+    let uploaded = false;
+    for (let i = 0; i < 150 && !uploaded; i++) {
+        uploaded = (await (await fetch('/requests')).json()).includes(upload);
+        if (!uploaded) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert(uploaded, 'the file loop uploaded the file');
+
+    await core.request('sync:shutdown', true);
+    await core.stop();
+    core.terminate();
+};
+
 // The interoperability fixtures (src/interop_tests.rs): an account made by the native build and one
 // made by the wasm32 build under Node. Here the production package, in a Worker in a real browser,
 // logs in to each, loads the profile from the ciphertext the other build stored and decrypts it.

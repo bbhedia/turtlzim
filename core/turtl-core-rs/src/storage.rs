@@ -206,6 +206,55 @@ impl Storage {
         Ok(self.dumpy.kv_delete(&self.conn, key)?)
     }
 
+    /// Make sure the table that holds attachments exists. (Made on first use, not by the dumpy schema:
+    /// only builds that keep attachments in the database need it, see `FileData::store_put`.)
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    fn ensure_attachments_table(&self) -> TResult<()> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS attachments (user_id TEXT NOT NULL, note_id TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY (user_id, note_id))",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Store the (encrypted) file of a note, replacing any it has.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn attachment_put(&self, user_id: &String, note_id: &String, data: &[u8]) -> TResult<()> {
+        self.ensure_attachments_table()?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO attachments (user_id, note_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params![user_id, note_id, data],
+        )?;
+        Ok(())
+    }
+
+    /// The stored file of a note: any user's if `user_id` is None.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn attachment_get(&self, user_id: Option<&String>, note_id: &String) -> TResult<Option<Vec<u8>>> {
+        self.ensure_attachments_table()?;
+        let res = self.conn.query_row(
+            "SELECT data FROM attachments WHERE note_id = ?1 AND (?2 IS NULL OR user_id = ?2) LIMIT 1",
+            rusqlite::params![note_id, user_id],
+            |row| row.get::<_, Vec<u8>>(0),
+        );
+        match res {
+            Ok(data) => Ok(Some(data)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(From::from(e)),
+        }
+    }
+
+    /// Delete stored files. `None` matches any user, or any note.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub fn attachment_delete(&self, user_id: Option<&String>, note_id: Option<&String>) -> TResult<()> {
+        self.ensure_attachments_table()?;
+        self.conn.execute(
+            "DELETE FROM attachments WHERE (?1 IS NULL OR user_id = ?1) AND (?2 IS NULL OR note_id = ?2)",
+            rusqlite::params![user_id, note_id],
+        )?;
+        Ok(())
+    }
+
     /// Close the db connection
     pub fn close(&mut self) -> TResult<()> {
         let mut conn = Connection::open_in_memory()?;
@@ -256,6 +305,30 @@ mod tests {
         let schema_str = r#"{"notes":{"indexes":[{"fields":["user_id"]},{"fields":["boards"]}]}}"#;
         let schema: Value = jedi::parse(&String::from(schema_str)).unwrap();
         Storage::new(&String::from(":memory:"), schema).unwrap()
+    }
+
+    #[test]
+    fn stores_attachments() {
+        let storage = pretest();
+        let (u1, u2, note) = (String::from("u1"), String::from("u2"), String::from("n1"));
+        assert_eq!(storage.attachment_get(None, &note).unwrap(), None);
+
+        // bytes that aren't text survive, and a second put replaces the first
+        storage.attachment_put(&u1, &note, &[0, 1, 255, 254]).unwrap();
+        assert_eq!(storage.attachment_get(Some(&u1), &note).unwrap(), Some(vec![0, 1, 255, 254]));
+        storage.attachment_put(&u1, &note, &[9, 9]).unwrap();
+        assert_eq!(storage.attachment_get(None, &note).unwrap(), Some(vec![9, 9]));
+        // another user's file for the same note is a different file
+        storage.attachment_put(&u2, &note, &[7]).unwrap();
+        assert_eq!(storage.attachment_get(Some(&u2), &note).unwrap(), Some(vec![7]));
+        assert_eq!(storage.attachment_get(Some(&u1), &note).unwrap(), Some(vec![9, 9]));
+
+        // deleting by user, then by note
+        storage.attachment_delete(Some(&u2), None).unwrap();
+        assert_eq!(storage.attachment_get(Some(&u2), &note).unwrap(), None);
+        assert_eq!(storage.attachment_get(Some(&u1), &note).unwrap(), Some(vec![9, 9]));
+        storage.attachment_delete(None, Some(&note)).unwrap();
+        assert_eq!(storage.attachment_get(None, &note).unwrap(), None);
     }
 
     #[test]

@@ -15,6 +15,9 @@
 //! GET  /users/42                          -> 200 {"id": "42", ...<the stored data>}
 //! PUT  /users/42  {user, auth, keychain}  -> 200 {"sync_ids": [102]}                replaces the account
 //! POST|PUT|DELETE /spaces/...             -> 200 {}
+//! PUT  /notes/<id>/attachment  <bytes>    -> 200 {}   stores a note's file
+//! GET  /notes/<id>/attachment             -> 200 "http://<host>/notes/<id>/file"   where to download it
+//! GET  /notes/<id>/file                   -> 200 <the stored bytes>, or 404
 //! POST /seed {account, full_sync}         -> 200 {}   test-only: preloads the account ({username, auth,
 //!                                                     data}) and the records GET /sync/full answers with
 //! POST /sync      [records]               -> 200 {"success": <the records, the first one with
@@ -79,6 +82,7 @@ struct Account {
 struct ServerState {
     account: Option<Account>,
     full_sync: Vec<Value>,
+    attachments: ::std::collections::HashMap<String, Vec<u8>>,
     log: Vec<String>,
     polls: usize,
 }
@@ -131,6 +135,24 @@ fn flow_route(state: &Mutex<ServerState>, req: &Request) -> Response {
             Response::json(200, r#"{"sync_ids":[102]}"#)
         }
         (method, path) if method != "GET" && path.starts_with("/spaces/") => Response::json(200, "{}"),
+        (method, path) if path.starts_with("/notes/") && (path.ends_with("/attachment") || path.ends_with("/file")) => {
+            let id = String::from(path.trim_start_matches("/notes/").trim_end_matches("/attachment").trim_end_matches("/file"));
+            match (method, path.ends_with("/attachment")) {
+                ("PUT", true) => {
+                    state.attachments.insert(id, req.body_bytes.clone());
+                    Response::json(200, "{}")
+                }
+                ("GET", true) => {
+                    let url = format!("http://{}/notes/{}/file", req.header("host").unwrap_or("localhost"), id);
+                    Response::json(200, &json!(url).to_string())
+                }
+                ("GET", false) => match state.attachments.get(&id) {
+                    Some(bytes) => Response::bytes(200, "application/octet-stream", bytes.clone()),
+                    None => Response::json(404, r#"{"error":"no such file"}"#),
+                },
+                _ => Response::json(404, r#"{"error":"unknown route"}"#),
+            }
+        }
         ("POST", "/sync") => {
             let mut records: Value = jedi::parse(&req.body).unwrap();
             if let Some(first) = records.get_mut(0) {
@@ -185,6 +207,13 @@ extern "C" {
 pub(crate) async fn start_server() -> Server {
     let port = JsFuture::from(start_flow_server()).await.unwrap().as_f64().unwrap() as u16;
     Server { url: format!("http://127.0.0.1:{}", port) }
+}
+
+/// Seed the stand-in server with an account and the records it should hand out as the full profile.
+pub(crate) async fn seed(server: &Server, account: Value, full_sync: Value) {
+    let api = Api::new();
+    api.set_endpoint(Some(server.url.clone()));
+    let _: Value = api.post("/seed").unwrap().json(&json!({"account": account, "full_sync": full_sync})).call().await.unwrap();
 }
 
 /// What the server has been asked so far (`"<METHOD> <path>"`, oldest first).
@@ -465,6 +494,90 @@ async fn saved_login() {
     assert_eq!(ask(&turtl, json!(["l6", "user:login-from-saved", "99", key])).await["e"], json!(1));
 }
 async_test!(saved_login_flow, saved_login());
+
+/// A note's file: saved encrypted under the note's key, uploaded by the file sync loop, then downloaded
+/// and decrypted by a second device that knows the account only from the server.
+async fn attachments() {
+    let server = start_server().await;
+    let first = test_turtl(&server);
+    first.join(String::from("Files@Test.com"), String::from("filespassphrase")).await.unwrap();
+
+    // a note with a file attached, the way the UI makes one (bytes that aren't text, on purpose)
+    let space_id = lockr!(first.profile).spaces[0].id().unwrap().clone();
+    let original: Vec<u8> = vec![72, 105, 0, 255, 254, 13, 10, 65, 66, 67, 0, 200, 100, 50];
+    let added = ask(&first, json!(["f1", "profile:sync:model", "add", "note", {
+        "space_id": space_id, "user_id": "0", "type": "file", "title": "with a file",
+        "file": {"name": "hi.bin", "type": "application/octet-stream", "filedata": {"data": crypto::to_base64(&original).unwrap()}},
+    }])).await;
+    assert_eq!(added["e"], json!(0), "{}", added);
+    let note_id = String::from(added["d"]["id"].as_str().unwrap());
+
+    // it can be read back right away
+    let read = ask(&first, json!(["f2", "profile:note:get-file", note_id])).await;
+    assert_eq!(read["e"], json!(0), "{}", read);
+    assert_eq!(crypto::from_base64(&String::from(read["d"].as_str().unwrap())).unwrap(), original);
+
+    // what a server would hand a second device: the profile's records, and a `file` record for the note
+    let mut for_second_device: Vec<Value> = {
+        let db_guard = lock!(first.db);
+        let records: Vec<SyncRecord> = db_guard.as_ref().unwrap().all("sync").unwrap();
+        records.iter()
+            .filter(|record| record.ty != crate::models::sync_record::SyncType::FileOutgoing)
+            .map(|record| jedi::to_val(record).unwrap())
+            .collect()
+    };
+    for_second_device.push(json!({
+        "id": "file-sync-1", "type": "file", "action": "add", "item_id": note_id, "user_id": 42, "data": {"id": note_id},
+    }));
+
+    // the file loop uploads it
+    first.sync_start().await.unwrap();
+    let upload = format!("PUT /notes/{}/attachment", note_id);
+    let mut tries = 0;
+    while !requests(&server).await.contains(&upload) {
+        tries += 1;
+        assert!(tries < 150, "the file was never uploaded");
+        exec::sleep(100).await;
+    }
+    first.sync_shutdown(true).await.unwrap();
+
+    // the first device forgets its copy (natively the two "devices" would otherwise share the file)
+    {
+        let mut db_guard = lock!(first.db);
+        crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&note_id)).unwrap();
+    }
+    let gone = ask(&first, json!(["f3", "profile:note:get-file", note_id])).await;
+    assert_eq!(gone["e"], json!(1), "the file is gone from the first device: {}", gone);
+
+    // the second device logs in, syncs, and downloads the file
+    let (username, passphrase) = (String::from("files@test.com"), String::from("filespassphrase"));
+    let (_, auth) = crate::models::user::generate_auth(&username, &passphrase, 0).unwrap();
+    let account_data: Value = {
+        let api = Api::new();
+        api.set_endpoint(Some(server.url.clone()));
+        api.get("/users/42").unwrap().call().await.unwrap()
+    };
+    seed(&server, json!({"username": username, "auth": auth, "data": account_data}), json!(for_second_device)).await;
+    let second = test_turtl(&server);
+    second.login(username, passphrase).await.unwrap();
+    second.sync_start().await.unwrap();
+    let download = format!("GET /notes/{}/file", note_id);
+    let mut tries = 0;
+    loop {
+        let read = ask(&second, json!(["f4", "profile:note:get-file", note_id])).await;
+        if read["e"] == json!(0) {
+            // it decrypts to the original, bytes and all
+            assert_eq!(crypto::from_base64(&String::from(read["d"].as_str().unwrap())).unwrap(), original);
+            break;
+        }
+        tries += 1;
+        assert!(tries < 150, "the file was never downloaded: {}", read);
+        exec::sleep(100).await;
+    }
+    assert!(requests(&server).await.contains(&download));
+    second.sync_shutdown(true).await.unwrap();
+}
+async_test!(attachments_flow, attachments());
 
 /// While `sync_start()` holds incoming syncs back, applying them waits; once the hold is released it
 /// goes through with what was queued.

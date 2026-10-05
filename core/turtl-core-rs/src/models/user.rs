@@ -10,6 +10,7 @@ use crate::models::protected::{Keyfinder, Protected};
 use crate::models::sync_record::{SyncType, SyncAction, SyncRecord};
 use crate::models::validate::{self, Validate};
 use crate::turtl::Turtl;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::util;
 use crate::util::exec;
 use crate::sync::sync_model::{self, SyncModel, MemorySaver};
@@ -21,8 +22,11 @@ use ::migrate::MigrateResult;
 // a wasm32 dependency; docs/wasm-port-plan.md).
 #[cfg(target_arch = "wasm32")]
 use crate::turtl::MigrateResult;
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::io::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use ::std::fs;
 
 pub const CURRENT_AUTH_VERSION: u16 = 0;
