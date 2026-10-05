@@ -1,20 +1,31 @@
 //! The Api system is responsible for talking to our Turtl server, and manages
 //! our user authentication.
+//!
+//! The client is async and the same on every target: reqwest's hyper-backed client natively and its
+//! `fetch` backend on wasm32 (docs/wasm-port-plan.md decision 2.3). Callers `.await` `call_async()`
+//! / `call_opt_async()`. Code that has not been converted to async yet can use the blocking
+//! `call()` / `call_opt()` bridge, which exists on native only (see `util::exec`).
 
 use ::std::sync::{RwLock, Mutex};
-use ::std::io::Read;
 use ::std::time::Duration;
 use ::std::collections::HashMap;
 use ::config;
 use ::jedi::{self, Value, DeserializeOwned, Serialize};
 use crate::error::{TResult, TError};
 use crate::crypto;
-use ::reqwest::{self, blocking::RequestBuilder, blocking::Client, Url, Proxy};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::util::exec;
+use ::reqwest::{Body, Client, Url};
+use ::reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 pub use ::reqwest::Method;
 pub use ::reqwest::StatusCode;
 
 /// Pull out our crate version to send to the api
 const CORE_VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
+/// How long a request may take unless the caller says otherwise with `ApiReq`. (This is what
+/// reqwest's old blocking client defaulted to.)
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 lazy_static! {
     /// A hash table that holds HTTP clients. we used to just create/destroy
@@ -27,6 +38,8 @@ lazy_static! {
 /// needs to build URLs or make decisions.
 struct ApiConfig {
     auth: Option<String>,
+    /// Overrides the `api.endpoint` config value when set (see `Api::set_endpoint`).
+    endpoint: Option<String>,
 }
 
 impl ApiConfig {
@@ -34,6 +47,7 @@ impl ApiConfig {
     fn new() -> ApiConfig {
         ApiConfig {
             auth: None,
+            endpoint: None,
         }
     }
 }
@@ -58,132 +72,182 @@ impl ApiReq {
     }
 }
 
+/// Get the HTTP client for the current config, creating (and caching) it the first time. Native
+/// clients can be configured with a proxy and with invalid-certificate acceptance; the browser's
+/// fetch has neither knob, so there is just the one client on wasm32.
+fn get_client() -> TResult<Client> {
+    // (`mut` is only needed by the native-only proxy/ssl settings below)
+    #[allow(unused_mut)]
+    let mut cachekey: Vec<String> = Vec::with_capacity(2);
+    #[allow(unused_mut)]
+    let mut client_builder = Client::builder();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        match config::get::<Option<String>>(&["api", "proxy"]) {
+            Ok(Some(proxy_cfg)) => {
+                debug!("api::call() -- req: using proxy: {}", proxy_cfg);
+                cachekey.push(format!("proxy-{}", proxy_cfg));
+                client_builder = client_builder.proxy(::reqwest::Proxy::all(proxy_cfg.as_str())?);
+            }
+            _ => {}
+        }
+        match config::get::<Option<bool>>(&["api", "allow_invalid_ssl"]) {
+            Ok(Some(true)) => {
+                debug!("api::call() -- req: allow invalid ssl");
+                cachekey.push(String::from("allow-invalid-ssl"));
+                client_builder = client_builder.danger_accept_invalid_certs(true);
+            }
+            _ => {}
+        }
+    }
+    let cachekey_string: String = cachekey.join("///");
+    let mut client_guard = lock!((*CLIENTS));
+    if !client_guard.contains_key(&cachekey_string) {
+        let client = client_builder.build()?;
+        debug!("api::call() -- creating new client with cachekey {}", cachekey_string);
+        client_guard.insert(cachekey_string.clone(), client);
+    }
+    // notice we clone here...the client lets us clone without messing
+    // up the pooling. very nice!
+    Ok(client_guard.get(&cachekey_string).unwrap().clone())
+}
+
 /// Wraps calling the Turtl API in an object
 pub struct ApiCaller {
-    req: RequestBuilder,
+    method: Method,
+    url: Url,
+    headers: HeaderMap,
+    body: Option<Body>,
+    /// A problem found while building the request (a bad header, an unserializable body); `call`
+    /// reports it instead of sending anything.
+    error: Option<TError>,
 }
 
 impl ApiCaller {
-    fn from_req(req: RequestBuilder) -> ApiCaller {
-        ApiCaller { req: req }
-    }
-
-    pub fn header<T: Into<String>>(self, name: &str, val: T) -> Self {
-        ApiCaller::from_req(self.req.header(name, val.into()))
-    }
-
-    pub fn body<T: Into<reqwest::blocking::Body>>(self, body: T) -> Self {
-        ApiCaller::from_req(self.req.body(body))
-    }
-
-    pub fn json<T: Serialize + ?Sized>(self, json: &T) -> Self {
-        ApiCaller::from_req(self.req.json(json))
-    }
-
-    #[allow(dead_code)]
-    pub fn query<T: Serialize + ?Sized>(self, query: &T) -> Self {
-        ApiCaller::from_req(self.req.query(query))
-    }
-
-    #[allow(dead_code)]
-    pub fn form<T: Serialize + ?Sized>(self, form: &T) -> Self {
-        ApiCaller::from_req(self.req.form(form))
-    }
-
-    pub fn call<T: DeserializeOwned>(self) -> TResult<T> {
-        self.call_opt_impl(None)
-    }
-
-    pub fn call_opt<T: DeserializeOwned>(self, apireq: ApiReq) -> TResult<T> {
-        self.call_opt_impl(Some(apireq))
-    }
-
-    pub fn call_opt_impl<T: DeserializeOwned>(self, builder_maybe: Option<ApiReq>) -> TResult<T> {
-        let mut cachekey: Vec<String> = Vec::with_capacity(2);
-        let mut client_builder = Client::builder();
-        if let Some(builder) = builder_maybe {
-            let ApiReq { timeout } = builder;
-            client_builder = client_builder.timeout(timeout);
-            cachekey.push(format!("timeout-{}", timeout.as_secs()));
+    fn new(method: Method, url: Url) -> ApiCaller {
+        ApiCaller {
+            method: method,
+            url: url,
+            headers: HeaderMap::new(),
+            body: None,
+            error: None,
         }
-        match config::get::<Option<String>>(&["api", "proxy"]) {
-            Ok(x) => {
-                if let Some(proxy_cfg) = x {
-                    debug!("api::call() -- req: using proxy: {}", proxy_cfg);
-                    let proxystr = format!("{}", proxy_cfg);
-                    cachekey.push(format!("proxy-{}", proxystr));
-                    client_builder = client_builder.proxy(Proxy::all(proxystr.as_str())?);
+    }
+
+    fn fail(&mut self, err: TError) {
+        if self.error.is_none() {
+            self.error = Some(err);
+        }
+    }
+
+    pub fn header<T: Into<String>>(mut self, name: &str, val: T) -> Self {
+        let val: String = val.into();
+        match (HeaderName::from_bytes(name.as_bytes()), HeaderValue::from_str(val.as_str())) {
+            (Ok(hname), Ok(hval)) => { self.headers.append(hname, hval); }
+            _ => self.fail(TError::Msg(format!("api::header() -- invalid header `{}`", name))),
+        }
+        self
+    }
+
+    pub fn body<T: Into<Body>>(mut self, body: T) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    pub fn json<T: Serialize + ?Sized>(mut self, json: &T) -> Self {
+        match ::serde_json::to_vec(json) {
+            Ok(bytes) => {
+                if !self.headers.contains_key(CONTENT_TYPE) {
+                    self.headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
                 }
+                self.body = Some(Body::from(bytes));
             }
-            Err(_) => {}
+            Err(e) => self.fail(TError::Msg(format!("api::json() -- could not serialize the request body: {}", e))),
         }
-        match config::get::<Option<bool>>(&["api", "allow_invalid_ssl"]) {
-            Ok(x) => {
-                if let Some(allow_invalid_ssl) = x {
-                    if allow_invalid_ssl {
-                        debug!("api::call() -- req: allow invalid ssl");
-                        cachekey.push(String::from("allow-invalid-ssl"));
-                        client_builder = client_builder.danger_accept_invalid_certs(true);
-                    }
-                }
-            }
-            Err(_) => {}
+        self
+    }
+
+    /// Make the call and parse the (JSON) response.
+    pub async fn call_async<T: DeserializeOwned>(self) -> TResult<T> {
+        self.call_impl(None).await
+    }
+
+    /// Make the call with per-request options (a timeout) and parse the (JSON) response.
+    pub async fn call_opt_async<T: DeserializeOwned>(self, apireq: ApiReq) -> TResult<T> {
+        self.call_impl(Some(apireq)).await
+    }
+
+    async fn call_impl<T: DeserializeOwned>(self, builder_maybe: Option<ApiReq>) -> TResult<T> {
+        let ApiCaller { method, url, headers, body, error } = self;
+        if let Some(err) = error {
+            return Err(err);
         }
-        let cachekey_string: String = cachekey.join("///");
-        let client = {
-            let mut client_guard = lock!((*CLIENTS));
-            if !client_guard.contains_key(&cachekey_string) {
-                let client = client_builder.build()?;
-                debug!("api::call() -- creating new client with cachekey {}", cachekey_string);
-                client_guard.insert(cachekey_string.clone(), client);
-            }
-            // notice we clone here...the client lets us clone without messing
-            // up the pooling. very nice!
-            client_guard.get(&cachekey_string).unwrap().clone()
+        let timeout = match builder_maybe {
+            Some(ApiReq { timeout }) => timeout,
+            None => DEFAULT_TIMEOUT,
         };
-        let ApiCaller { req: reqb } = self;
-        let req = reqb.build()?;
-        let callinfo = CallInfo::new(req.method().clone(), String::from(req.url().as_str()));
-        debug!("api::call() -- req: {} {}", req.method(), req.url());
-        let res = client.execute(req);
-        res
-            .map_err(|e| { toterr!(e) })
-            .and_then(|mut res| {
-                let mut out = String::new();
-                let str_res = res.read_to_string(&mut out)
-                    .map_err(|e| toterr!(e))
-                    .and_then(move |_| Ok(out));
-                if !res.status().is_success() {
-                    let errstr = match str_res {
-                        Ok(x) => x,
-                        Err(e) => {
-                            error!("api::call() -- problem grabbing error message: {}", e);
-                            String::from("<unknown>")
-                        }
-                    };
-                    let val = match jedi::parse(&errstr) {
-                        Ok(x) => x,
-                        Err(_) => Value::String(errstr),
-                    };
-                    return TErr!(TError::Api(res.status(), val));
+        let client = get_client()?;
+        let callinfo = CallInfo::new(method.clone(), String::from(url.as_str()));
+        debug!("api::call() -- req: {} {}", method, url);
+        let mut req = client.request(method, url).headers(headers).timeout(timeout);
+        if let Some(body) = body {
+            req = req.body(body);
+        }
+        let res = req.send().await.map_err(|e| {
+            debug!("api::call() -- call error: {}", e);
+            toterr!(e)
+        })?;
+        let status = res.status();
+        let text_res = res.text().await.map_err(|e| toterr!(e));
+        if !status.is_success() {
+            let errstr = match text_res {
+                Ok(x) => x,
+                Err(e) => {
+                    error!("api::call() -- problem grabbing error message: {}", e);
+                    String::from("<unknown>")
                 }
-                str_res.map(move |x| (x, res))
-            })
-            .map(|(out, res)| {
-                info!("api::call() -- res({}): {:?} {} {}", out.len(), res.status().as_u16(), &callinfo.method, &callinfo.resource);
-                trace!("  api::call() -- body: {}", out);
-                out
-            })
-            .map_err(|err| {
-                debug!("api::call() -- call error: {}", err);
-                err
-            })
-            .and_then(|out| {
-                jedi::parse(&out).map_err(|e| {
-                    warn!("api::call() -- JSON parse error: {}", out);
-                    toterr!(e)
-                })
-            })
+            };
+            let val = match jedi::parse(&errstr) {
+                Ok(x) => x,
+                Err(_) => Value::String(errstr),
+            };
+            debug!("api::call() -- call error: {} {}", status.as_u16(), val);
+            return TErr!(TError::Api(status, val));
+        }
+        let out = text_res?;
+        info!("api::call() -- res({}): {:?} {} {}", out.len(), status.as_u16(), &callinfo.method, &callinfo.resource);
+        trace!("  api::call() -- body: {}", out);
+        jedi::parse(&out).map_err(|e| {
+            warn!("api::call() -- JSON parse error: {}", out);
+            toterr!(e)
+        })
+    }
+
+    /// Blocking `call_async()`, for code that has not been converted to async yet. Native only.
+    /// Must not be called from inside a future that `util::exec::block_on` is driving (tokio forbids
+    /// nested runtimes): convert the caller to async instead.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn call<T: DeserializeOwned>(self) -> TResult<T> {
+        exec::block_on(self.call_async())
+    }
+
+    /// Blocking `call_opt_async()`; see `call()`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn call_opt<T: DeserializeOwned>(self, apireq: ApiReq) -> TResult<T> {
+        exec::block_on(self.call_opt_async(apireq))
+    }
+
+    /// Until the callers are converted to async, the blocking bridge has nothing to block on on
+    /// wasm32 (there is no thread to park), so it reports the call as not implemented there.
+    #[cfg(target_arch = "wasm32")]
+    pub fn call<T: DeserializeOwned>(self) -> TResult<T> {
+        TErr!(TError::NotImplemented)
+    }
+
+    /// See `call()`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn call_opt<T: DeserializeOwned>(self, _apireq: ApiReq) -> TResult<T> {
+        TErr!(TError::NotImplemented)
     }
 }
 
@@ -216,6 +280,14 @@ impl Api {
         }
     }
 
+    /// Use `endpoint` instead of the `api.endpoint` config value (`None` goes back to the config).
+    /// For tests and for embedders that have no config file to read the endpoint from.
+    #[allow(dead_code)]
+    pub fn set_endpoint(&self, endpoint: Option<String>) {
+        let ref mut config_guard = lockw!(self.config);
+        config_guard.endpoint = endpoint;
+    }
+
     /// Set the API's authentication
     pub fn set_auth(&self, username: String, auth: String) -> TResult<()> {
         let auth_str = format!("{}:{}", username, auth);
@@ -231,48 +303,49 @@ impl Api {
         config_guard.auth = None;
     }
 
-    /// Write our auth headers into a header collection
-    pub fn set_auth_headers(&self, req: RequestBuilder) -> RequestBuilder {
-        let auth = {
-            let ref guard = lockr!(self.config);
-            guard.auth.clone()
-        };
-        match auth {
-            Some(x) => {
-                req.header("Authorization", x)
-            },
-            None => req
-        }
+    /// The `Authorization` header value for the current auth, if there is any.
+    pub fn auth_header(&self) -> Option<String> {
+        let ref guard = lockr!(self.config);
+        guard.auth.clone()
     }
 
-    /// Set our standard auth header into a Headers set
-    fn set_standard_headers(&self, req: RequestBuilder) -> RequestBuilder {
-        let req = self.set_auth_headers(req);
+    /// Set our standard auth header into a request
+    fn set_standard_headers(&self, caller: ApiCaller) -> ApiCaller {
+        let caller = match self.auth_header() {
+            Some(x) => caller.header("Authorization", x),
+            None => caller,
+        };
         match config::get::<String>(&["api", "client_version_string"]) {
             Ok(version) => {
                 let header_val = format!("{}/{}", version, CORE_VERSION);
-                req.header("X-Turtl-Client", header_val)
+                caller.header("X-Turtl-Client", header_val)
             }
-            Err(_) => req,
+            Err(_) => caller,
         }
     }
 
     /// Build a full URL given a resource
     fn build_url(&self, resource: &str) -> TResult<String> {
-        let endpoint = config::get::<String>(&["api", "endpoint"])?;
+        let overridden = {
+            let ref guard = lockr!(self.config);
+            guard.endpoint.clone()
+        };
+        let endpoint = match overridden {
+            Some(x) => x,
+            None => config::get::<String>(&["api", "endpoint"])?,
+        };
         let mut url = String::with_capacity(endpoint.len() + resource.len());
         url.push_str(endpoint.trim_end_matches('/'));
         url.push_str(resource);
         Ok(url)
     }
 
-    /// Given a method an url, return a Reqwest RequestBuilder
+    /// Given a method and a resource, return an ApiCaller to finish building and send
     pub fn req(&self, method: Method, resource: &str) -> TResult<ApiCaller> {
         debug!("api::req() -- begin: {} {}", method, resource);
         let url = self.build_url(resource)?;
-        let req = Client::builder().build()?.request(method, Url::parse(url.as_str())?);
-        trace!("api::req() -- made client, got req: {:?}", req);
-        Ok(ApiCaller::from_req(self.set_standard_headers(req)))
+        let caller = ApiCaller::new(method, Url::parse(url.as_str())?);
+        Ok(self.set_standard_headers(caller))
     }
 
     /// Convenience function for api.call(GET)
@@ -296,3 +369,163 @@ impl Api {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::util::mock_server::{MockServer, Request, Response};
+    #[cfg(target_arch = "wasm32")]
+    use ::wasm_bindgen::prelude::*;
+    #[cfg(target_arch = "wasm32")]
+    use ::wasm_bindgen_futures::JsFuture;
+
+    // The test server on wasm32 is a Node `http` server (js/test_support.js); the native one is
+    // util/mock_server.rs. Their routes must stay identical:
+    //
+    //   /hello       -> 200 {"hello":"world","client":<X-Turtl-Client|null>,"auth":<Authorization|null>}
+    //   /echo        -> 200 {"method":..,"auth":..,"content_type":..,"custom":<X-Custom|null>,"body":<parsed JSON|null>}
+    //   /missing     -> 404 {"error":"nope"}
+    //   /plain-error -> 500 text/plain "server on fire"
+    //   /not-json    -> 200 text/plain "definitely not json"
+    //   /slow        -> 200 {"slow":true} after 3 seconds
+    #[cfg(not(target_arch = "wasm32"))]
+    fn route(req: &Request) -> Response {
+        let json_or_null = |v: Option<&str>| match v {
+            Some(x) => json!(x),
+            None => Value::Null,
+        };
+        match req.path.as_str() {
+            "/hello" => Response::json(200, &json!({
+                "hello": "world",
+                "client": json_or_null(req.header("x-turtl-client")),
+                "auth": json_or_null(req.header("authorization")),
+            }).to_string()),
+            "/echo" => Response::json(200, &json!({
+                "method": req.method,
+                "auth": json_or_null(req.header("authorization")),
+                "content_type": json_or_null(req.header("content-type")),
+                "custom": json_or_null(req.header("x-custom")),
+                "body": jedi::parse::<Value>(&req.body).unwrap_or(Value::Null),
+            }).to_string()),
+            "/missing" => Response::json(404, r#"{"error":"nope"}"#),
+            "/plain-error" => Response::text(500, "server on fire"),
+            "/not-json" => Response::text(200, "definitely not json"),
+            "/slow" => Response::json(200, r#"{"slow":true}"#).delayed(3000),
+            _ => Response::json(404, r#"{"error":"unknown route"}"#),
+        }
+    }
+
+    /// Everything the Api layer promises, run against whichever server the target provides.
+    /// One sequential test on purpose: it never touches global state (the endpoint is set on the
+    /// `Api` itself), but a single test keeps the scenario order obvious.
+    async fn scenarios(base: String) {
+        let api = Api::new();
+        api.set_endpoint(Some(base.clone()));
+
+        // a plain GET, JSON in the response
+        let v: Value = api.get("/hello").unwrap().call_async().await.unwrap();
+        assert_eq!(jedi::get::<String>(&["hello"], &v).unwrap(), "world");
+        assert_eq!(v["auth"], Value::Null);
+
+        // set_auth puts a Basic Authorization header on every request until it is cleared
+        api.set_auth(String::from("user"), String::from("pass")).unwrap();
+        let v: Value = api.get("/hello").unwrap().call_async().await.unwrap();
+        assert_eq!(v["auth"], json!("Basic dXNlcjpwYXNz"));
+        assert_eq!(api.auth_header(), Some(String::from("Basic dXNlcjpwYXNz")));
+        api.clear_auth();
+        let v: Value = api.get("/hello").unwrap().call_async().await.unwrap();
+        assert_eq!(v["auth"], Value::Null);
+        assert_eq!(api.auth_header(), None);
+
+        // a POST with a JSON body and a custom header
+        let v: Value = api.post("/echo").unwrap()
+            .header("X-Custom", "yes")
+            .json(&json!({"a": 1, "b": ["x", "y"]}))
+            .call_async().await.unwrap();
+        assert_eq!(v["method"], json!("POST"));
+        assert_eq!(v["content_type"], json!("application/json"));
+        assert_eq!(v["custom"], json!("yes"));
+        assert_eq!(v["body"], json!({"a": 1, "b": ["x", "y"]}));
+
+        // a raw body
+        let v: Value = api.put("/echo").unwrap().body(String::from(r#"{"raw":true}"#)).call_async().await.unwrap();
+        assert_eq!(v["method"], json!("PUT"));
+        assert_eq!(v["body"], json!({"raw": true}));
+
+        // a failing status keeps the status and the (JSON) error body (callers `shed()` the wrapper
+        // `TErr!` puts around errors before matching on them)
+        match api.get("/missing").unwrap().call_async::<Value>().await.map_err(|e| e.shed()) {
+            Err(TError::Api(status, val)) => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert_eq!(val, json!({"error": "nope"}));
+            }
+            other => panic!("expected TError::Api(404, ..), got {:?}", other),
+        }
+
+        // ...and a body that isn't JSON comes through as a string
+        match api.get("/plain-error").unwrap().call_async::<Value>().await.map_err(|e| e.shed()) {
+            Err(TError::Api(status, val)) => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(val, json!("server on fire"));
+            }
+            other => panic!("expected TError::Api(500, ..), got {:?}", other),
+        }
+
+        // a successful status with a body that isn't JSON is an error, not a panic
+        assert!(api.get("/not-json").unwrap().call_async::<Value>().await.is_err());
+
+        // a per-request timeout fires
+        let err = api.get("/slow").unwrap()
+            .call_opt_async::<Value>(ApiReq::new().timeout(1)).await
+            .unwrap_err()
+            .shed();
+        match err {
+            TError::Boxed(ref inner) => match inner.downcast_ref::<::reqwest::Error>() {
+                Some(re) => assert!(re.is_timeout(), "expected a timeout, got: {:?}", re),
+                None => panic!("expected a reqwest error, got: {}", inner),
+            },
+            other => panic!("expected a boxed reqwest error, got {:?}", other),
+        }
+
+        // an unusable header is reported when the call is made, without sending anything
+        assert!(api.get("/hello").unwrap().header("bad header name", "x").call_async::<Value>().await.is_err());
+
+        // a server that isn't there is an error, not a panic or a hang
+        api.set_endpoint(Some(String::from("http://127.0.0.1:1")));
+        assert!(api.get("/hello").unwrap().call_async::<Value>().await.is_err());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn api_scenarios() {
+        let server = MockServer::start(route);
+        exec::block_on(scenarios(server.url()));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(module = "/js/test_support.js")]
+    extern "C" {
+        /// Starts the Node test server and resolves to its port.
+        #[wasm_bindgen(js_name = startServer)]
+        fn start_server() -> ::js_sys::Promise;
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[::wasm_bindgen_test::wasm_bindgen_test]
+    async fn api_scenarios() {
+        let port = JsFuture::from(start_server()).await.unwrap().as_f64().unwrap() as u16;
+        scenarios(format!("http://127.0.0.1:{}", port)).await;
+    }
+
+    #[test]
+    fn blocking_bridge_matches_async() {
+        // sanity for the temporary native bridge: no server needed, a bad endpoint is an error
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let api = Api::new();
+            api.set_endpoint(Some(String::from("http://127.0.0.1:1")));
+            assert!(api.get("/hello").unwrap().call::<Value>().is_err());
+        }
+    }
+}

@@ -289,7 +289,6 @@ from_err!(::std::sync::mpsc::RecvError);
 from_err!(::glob::PatternError);
 from_err!(::glob::GlobError);
 from_err!(::log::SetLoggerError);
-#[cfg(not(target_arch = "wasm32"))]
 from_err!(::reqwest::Error);
 from_err!(::url::ParseError);
 

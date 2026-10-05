@@ -36,8 +36,11 @@ macro_rules! lockw {
     ($lockable:expr) => { do_lock!($lockable.write()) }
 }
 
+pub mod exec;
 pub mod logger;
 pub mod thredder;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub mod mock_server;
 #[macro_use]
 pub mod ser;
 #[macro_use]

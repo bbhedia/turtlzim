@@ -580,9 +580,33 @@ Networking and concurrency are unified on async/await across both native and web
         derive chokes and everything cascades (that cascade is the old "~600 errors"). Verified:
         native `turtl_core` 68/68, `dumpy` 6, `clouseau` 3, `jedi` 3; wasm32 36/36, `dumpy` 6,
         `clouseau` 3; the production `--target web` build and its smoke test.
-      - [ ] 4b-2b: async `Api` on reqwest 0.13 for both targets (replacing `api_wasm.rs`), the
-        execution helpers (`block_on` on a shared runtime natively, `spawn_local` and a JS timer on
-        wasm), and tests against a mock server on both targets.
+      - [x] **4b-2b: the async `Api`** (done). `api.rs` is one implementation for both targets
+        (reqwest 0.13: hyper plus the OS TLS natively, the fetch backend on wasm32); `api_wasm.rs`
+        and the wasm-only `http` dependency are gone, and `reqwest::Error` converts into `TError` on
+        both targets. The builder API is unchanged apart from three things: the unused `query`/
+        `form` were dropped, `header()` records a bad header and reports it when the call is made,
+        and `set_auth_headers` became `auth_header()`. Calls are `call_async()`/`call_opt_async()`;
+        until their callers are async there is a *temporary* blocking `call()`/`call_opt()` bridge
+        (native: `block_on`; wasm32: `NotImplemented`), so every commit still builds. Requests get
+        the 30 s default timeout reqwest's old blocking client had, set per request. A new
+        `Api::set_endpoint()` lets tests and embedders without a config file bypass `api.endpoint`.
+        `util/exec.rs` holds the one place the targets differ: `block_on` on a shared two-worker
+        tokio runtime natively, `spawn_local` and a JS-timer `sleep` on wasm32.
+
+        **Verified:** one scenario suite (GET; the Basic auth header on and off; a JSON POST with a
+        custom header; a raw body; a failing status keeping its JSON body, and a plain-text one;
+        a successful status with a non-JSON body; a per-request timeout, asserted through
+        `reqwest::Error::is_timeout()`; a bad header; a refused connection) runs *unchanged*
+        against a thread-based mock server natively (`util/mock_server.rs`) and against a Node
+        `http` server on wasm32 (`js/test_support.js`). Native `turtl_core` 70/70, wasm32 37/37,
+        and the production `--target web` build (now 3.14 MB, about 0.2 MB more with reqwest's
+        fetch backend) still passes its smoke test. Note that `TErr!` wraps errors, so callers
+        (and tests) `shed()` an error before matching on it.
+
+        Still temporary: native file upload reads the file into memory (the async body wants an
+        owned body), and reqwest's `blocking` feature stays enabled for `sync/files/*` until 4b-2c
+        converts them. Both reqwest versions are in the native tree until `clippo` and `migrate`
+        (native-only, still on 0.10) move.
       - [ ] 4b-2c: convert the callers (user flows, space/invite/feedback APIs, `Syncer`, the sync
         engine, dispatch) to `async fn`, with `block_on` only at the thread entry points.
 - [ ] Step 4b-3: the real single-threaded-async concurrency rewrite (2.4) replacing `Thredder`'s

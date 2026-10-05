@@ -107,10 +107,9 @@ impl FileSyncIncoming {
             let req = client.request(Method::GET, reqwest::Url::parse(file_url.as_str())?);
             // only add our auth junk if we're calling back to the turtl api!
             let turtl_api_url: String = config::get(&["api", "endpoint"])?;
-            let req = if file_url.contains(turtl_api_url.as_str()) {
-                self.api.set_auth_headers(req)
-            } else {
-                req
+            let req = match self.api.auth_header() {
+                Some(auth) if file_url.contains(turtl_api_url.as_str()) => req.header("Authorization", auth),
+                _ => req,
             };
             let mut res = client.execute(req.build()?)?;
             let status = res.status().clone();

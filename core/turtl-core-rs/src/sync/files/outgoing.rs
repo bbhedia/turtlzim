@@ -9,6 +9,7 @@ use crate::error::{TResult, TError};
 use crate::models::file::FileData;
 use crate::models::sync_record::{SyncType, SyncRecord};
 use ::std::fs;
+use ::std::io::Read;
 
 /// Holds the state for outgoing files (uploads)
 pub struct FileSyncOutgoing {
@@ -89,14 +90,16 @@ impl FileSyncOutgoing {
         let upload = |note_id| -> TResult<UploadRes> {
             let file = FileData::file_finder(Some(&user_id), Some(note_id))?;
             info!("FileSyncOutgoing.upload_file() -- syncing file {:?}", file);
-            // open our local file. we should test if it's readable/exists
-            // before making API calls
-            let file = fs::File::open(&file)?;
+            // read our local file. we should test if it's readable/exists
+            // before making API calls. The async client wants an owned body, so the file is read
+            // into memory for now (streaming comes with this module's own async port).
+            let mut data: Vec<u8> = Vec::new();
+            fs::File::open(&file)?.read_to_end(&mut data)?;
             // start our API call to the note file attachment endpoint
             let url = format!("/notes/{}/attachment", note_id);
             self.api.put(&url[..])?
                 .header("Content-Type", "application/octet-stream")
-                .body(file)
+                .body(data)
                 .call_opt(ApiReq::new().timeout(60))
         };
 

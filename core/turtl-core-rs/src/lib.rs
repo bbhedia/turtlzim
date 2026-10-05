@@ -37,14 +37,8 @@ extern crate protected_derive;
 extern crate quick_error;
 #[cfg(not(target_arch = "wasm32"))]
 extern crate regex;
-#[cfg(not(target_arch = "wasm32"))]
-extern crate reqwest;
-// TODO(wasm): reqwest's non-blocking API does resolve for wasm32 (it swaps to a fetch-backed
-// client there), but this crate only uses the `blocking` API today (see src/api.rs) -- porting
-// to async reqwest/fetch everywhere is docs/wasm-port-plan.md decision 2.3, a separate milestone.
-#[cfg(target_arch = "wasm32")]
-extern crate http;
-// Real-libsodium.js JS bridge deps for crypto/low.rs (docs/wasm-port-plan.md decision 2.1).
+// Deps for the injected-libsodium crypto (crypto/wasm_sodium.rs) and the JS timer/task helpers
+// (util/exec.rs).
 #[cfg(target_arch = "wasm32")]
 extern crate wasm_bindgen;
 #[cfg(target_arch = "wasm32")]
@@ -72,15 +66,7 @@ mod util;
 #[macro_use]
 mod crypto;
 mod messaging;
-// TODO(wasm): api.rs is built entirely on reqwest's *blocking* client, which has no wasm32
-// build story (needs a tokio runtime + real OS threads) -- see docs/wasm-port-plan.md decision
-// 2.3 (async reqwest/fetch everywhere), a separate future milestone. Swapped for a same-public-
-// API stub on wasm32 (src/api_wasm.rs) so callers (turtl.rs, models/user.rs, error.rs) keep
-// compiling unchanged.
-#[cfg(not(target_arch = "wasm32"))]
-mod api;
-#[cfg(target_arch = "wasm32")]
-#[path = "api_wasm.rs"]
+// The HTTP client is async and the same on every target (reqwest: hyper natively, fetch on wasm32).
 mod api;
 #[macro_use]
 mod sync;

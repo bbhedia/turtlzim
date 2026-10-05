@@ -54,14 +54,13 @@ url = "2.1.1"
 # --- native-only dependencies ---
 # These either have no wasm32-unknown-unknown build story at all (native C
 # libraries via a build.rs: sodiumoxide/libsodium-sys, rust-crypto via the
-# `migrate` crate) or pull in a transitive dependency that doesn't support
+# `migrate` crate), pull in a transitive dependency that doesn't support
 # wasm32 (regex 0.1.x -> thread-id/memchr 0.1, clippo -> regex +
-# scraper/html5ever + blocking reqwest). Each is a separate, already-decided
-# future milestone per docs/wasm-port-plan.md (§2.1 crypto, §2.3 networking)
-# or, for clippo/migrate, out of scope for the port entirely for now. See the
-# matching `#[cfg(target_arch = "wasm32")]` stubs at each crate's call sites
-# (src/api_wasm.rs, src/crypto/low.rs, etc). SQLite is deliberately NOT here:
-# rusqlite/dumpy/clouseau build for wasm32 too (see [dependencies] above).
+# scraper/html5ever + blocking reqwest 0.10), or only make sense with real OS
+# threads (the tokio runtime that drives async fns on native). See the matching
+# `#[cfg(target_arch = "wasm32")]` stubs at each crate's call sites. SQLite and
+# HTTP are deliberately NOT here: rusqlite/dumpy/clouseau and reqwest build for
+# wasm32 too (see [dependencies] above and the wasm32 table below).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 clippo = { path = "clippo" }
 fs2 = "0.4.3"
@@ -69,20 +68,23 @@ migrate = { path = "migrate" }
 num_cpus = "1.8.0"
 futures-cpupool = "0.1.5"
 regex = "0.1.77"
-reqwest = { version = "0.10.4", features = ["blocking", "json"] }
+# reqwest 0.13: async HTTP (docs/wasm-port-plan.md decision 2.3). Same API on both targets; this is
+# the hyper-backed client with the OS TLS library. `blocking` stays only until sync/files/* are
+# converted to async (Step 4b-2c), then it goes away.
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "blocking"] }
 sodiumoxide = "0.0.16"
+# The runtime reqwest's I/O needs, shared by every thread that drives an async fn (util/exec.rs).
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time"] }
 
 # wasm32-only dependencies
-# `http` is what reqwest re-exports its own `Method`/`StatusCode` types from
-# (`pub use http::{Method, StatusCode}` in reqwest 0.10.x) -- depending on it
-# directly for wasm32 keeps api.rs's wasm32 stub using the *same* types as the
-# native reqwest-backed code, not a look-alike duplicate. Pure Rust, no C deps.
+# reqwest on wasm32 is its fetch backend: the same async API as native, over the global `fetch`
+# (browsers, workers and Node 18+; verified under Node against a real local server).
 #
-# wasm-bindgen/js-sys/wasm-bindgen-futures back the real-libsodium.js crypto
-# bridge in src/crypto/low.rs (docs/wasm-port-plan.md decision 2.1), the same
-# mechanism already proven in the standalone core/wasm-crypto-poc crate.
+# wasm-bindgen/js-sys/wasm-bindgen-futures back the injected-libsodium crypto
+# (src/crypto/wasm_sodium.rs, docs/wasm-port-plan.md decision 2.1) and the JS timer/task helpers
+# in src/util/exec.rs.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-http = "0.2.12"
+reqwest = { version = "0.13.5", default-features = false }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
