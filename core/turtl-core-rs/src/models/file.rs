@@ -1,16 +1,16 @@
 use ::jedi::Value;
-use ::error::{TResult, TError};
-use ::storage::Storage;
-use ::models::model::Model;
-use ::models::protected::{Keyfinder, Protected};
-use ::models::note::Note;
-use ::models::sync_record::{SyncAction, SyncType, SyncRecord};
-use ::models::validate::Validate;
-use ::sync::sync_model::{self, SyncModel, MemorySaver};
-use ::turtl::Turtl;
+use crate::error::{TResult, TError};
+use crate::storage::Storage;
+use crate::models::model::Model;
+use crate::models::protected::{Keyfinder, Protected};
+use crate::models::note::Note;
+use crate::models::sync_record::{SyncAction, SyncType, SyncRecord};
+use crate::models::validate::Validate;
+use crate::sync::sync_model::{self, SyncModel, MemorySaver};
+use crate::turtl::Turtl;
 use ::std::mem;
-use ::crypto;
-use ::util;
+use crate::crypto;
+use crate::util;
 use ::std::fs;
 use ::std::io::prelude::*;
 use ::std::path::PathBuf;
@@ -48,7 +48,7 @@ protected! {
     #[derive(Serialize, Deserialize)]
     #[protected_modeltype(file)]
     pub struct FileData {
-        #[serde(with = "::util::ser::base64_converter")]
+        #[serde(with = "crate::util::ser::base64_converter")]
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(default)]
         #[protected_field(private)]
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn can_save_and_load_files() {
-        let turtl = ::turtl::tests::with_test(true);
+        let turtl = crate::turtl::tests::with_test(true);
         let user_id = turtl.user_id().unwrap();
 
         let mut note: Note = jedi::from_val(json!({

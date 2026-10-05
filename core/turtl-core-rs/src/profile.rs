@@ -7,24 +7,24 @@
 //! from local storage and discarded once sent to the UI.
 
 use ::std::collections::HashMap;
-use ::turtl::Turtl;
-use ::error::{TResult, TError};
+use crate::turtl::Turtl;
+use crate::error::{TResult, TError};
 use ::jedi::{self, Value};
-use ::models::model::{self, Model};
-use ::models::keychain::Keychain;
-use ::models::space::Space;
-use ::models::board::Board;
-use ::models::note::Note;
-use ::models::file::FileData;
-use ::models::invite::Invite;
-use ::models::protected::{self, Protected};
-use ::models::sync_record::{SyncRecord, SyncAction, SyncType};
-use ::models::storable::Storable;
-use ::sync::sync_model;
+use crate::models::model::{self, Model};
+use crate::models::keychain::Keychain;
+use crate::models::space::Space;
+use crate::models::board::Board;
+use crate::models::note::Note;
+use crate::models::file::FileData;
+use crate::models::invite::Invite;
+use crate::models::protected::{self, Protected};
+use crate::models::sync_record::{SyncRecord, SyncAction, SyncType};
+use crate::models::storable::Storable;
+use crate::sync::sync_model;
 use ::lib_permissions::Permission;
 use ::config;
-use ::crypto;
-use ::messaging;
+use crate::crypto;
+use crate::messaging;
 
 /// A structure holding a collection of objects that represent's a user's
 /// Turtl data profile.

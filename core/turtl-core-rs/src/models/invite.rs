@@ -1,15 +1,15 @@
-use ::error::{TResult, TError};
-use ::models::model::Model;
-use ::models::protected::{Keyfinder, Protected};
-use ::models::sync_record::{SyncRecord, SyncAction};
-use ::models::validate::Validate;
-use ::sync::sync_model::{self, SyncModel, MemorySaver};
-use ::sync::incoming;
+use crate::error::{TResult, TError};
+use crate::models::model::Model;
+use crate::models::protected::{Keyfinder, Protected};
+use crate::models::sync_record::{SyncRecord, SyncAction};
+use crate::models::validate::Validate;
+use crate::sync::sync_model::{self, SyncModel, MemorySaver};
+use crate::sync::incoming;
 use ::lib_permissions::Role;
-use ::crypto::{self, Key};
+use crate::crypto::{self, Key};
 use ::jedi::{self, Value};
-use ::turtl::Turtl;
-use ::profile::Profile;
+use crate::turtl::Turtl;
+use crate::profile::Profile;
 
 /// Used as our passphrase for our invites if we don't provide one.
 const DEFAULT_INVITE_PASSPHRASE: &'static str = "this is the default passphrase lol";
@@ -19,7 +19,7 @@ protected! {
     pub struct Invite {
         #[protected_field(public)]
         pub space_id: String,
-        #[serde(with = "::util::ser::int_converter")]
+        #[serde(with = "crate::util::ser::int_converter")]
         #[protected_field(public)]
         pub from_user_id: String,
         #[protected_field(public)]
@@ -35,7 +35,7 @@ protected! {
         #[protected_field(public)]
 		pub title: String,
 
-        #[serde(with = "::util::ser::base64_converter")]
+        #[serde(with = "crate::util::ser::base64_converter")]
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(default)]
         #[protected_field(private)]

@@ -1,25 +1,25 @@
 use ::std::collections::HashMap;
 use ::jedi::{self, Value, Serialize};
-use ::error::{TResult, TError};
-use ::crypto::{self, Key, CryptoOp};
-use ::api::{ApiReq, StatusCode};
-use ::models::model::{self, Model};
-use ::models::space::Space;
-use ::models::board::Board;
-use ::models::protected::{Keyfinder, Protected};
-use ::models::sync_record::{SyncType, SyncAction, SyncRecord};
-use ::models::validate::{self, Validate};
-use ::turtl::Turtl;
-use ::util;
-use ::sync::sync_model::{self, SyncModel, MemorySaver};
-use ::sync::incoming::SyncIncoming;
-use ::messaging;
+use crate::error::{TResult, TError};
+use crate::crypto::{self, Key, CryptoOp};
+use crate::api::{ApiReq, StatusCode};
+use crate::models::model::{self, Model};
+use crate::models::space::Space;
+use crate::models::board::Board;
+use crate::models::protected::{Keyfinder, Protected};
+use crate::models::sync_record::{SyncType, SyncAction, SyncRecord};
+use crate::models::validate::{self, Validate};
+use crate::turtl::Turtl;
+use crate::util;
+use crate::sync::sync_model::{self, SyncModel, MemorySaver};
+use crate::sync::incoming::SyncIncoming;
+use crate::messaging;
 #[cfg(not(target_arch = "wasm32"))]
 use ::migrate::MigrateResult;
 // TODO(wasm): see turtl.rs's `MigrateResult` stub -- same rationale (the `migrate` crate isn't
 // a wasm32 dependency; docs/wasm-port-plan.md).
 #[cfg(target_arch = "wasm32")]
-use ::turtl::MigrateResult;
+use crate::turtl::MigrateResult;
 use ::std::path::PathBuf;
 use ::std::io::prelude::*;
 use ::std::fs;
@@ -333,7 +333,7 @@ impl User {
         #[derive(Deserialize, Debug)]
         struct PWChangeResponse {
             #[serde(default)]
-            #[serde(deserialize_with = "::util::ser::opt_vec_str_i64_converter::deserialize")]
+            #[serde(deserialize_with = "crate::util::ser::opt_vec_str_i64_converter::deserialize")]
             sync_ids: Option<Vec<i64>>,
         }
         let auth_change = json!({

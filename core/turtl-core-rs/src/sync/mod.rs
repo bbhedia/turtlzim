@@ -19,7 +19,7 @@ mod macros;
 // regardless of target, so it gets a same-shape wasm32 stub (sync/incoming_wasm.rs) rather than
 // being cfg'd out entirely. `outgoing`/`files` have no consumers outside this module's own
 // (native-only, see below) `start()`, so they're simply native-only. All three real
-// implementations depend on blocking reqwest (via ::api::Api) and real OS threads/rusqlite --
+// implementations depend on blocking reqwest (via crate::api::Api) and real OS threads/rusqlite --
 // see docs/wasm-port-plan.md decisions 2.2/2.3/2.4 (storage/networking/concurrency), each its
 // own future milestone.
 #[cfg(not(target_arch = "wasm32"))]
@@ -38,19 +38,19 @@ use ::std::sync::{Arc, RwLock, Mutex, mpsc};
 use ::std::thread;
 use ::config;
 #[cfg(not(target_arch = "wasm32"))]
-use ::sync::outgoing::SyncOutgoing;
+use crate::sync::outgoing::SyncOutgoing;
 #[cfg(not(target_arch = "wasm32"))]
-use ::sync::incoming::SyncIncoming;
+use crate::sync::incoming::SyncIncoming;
 #[cfg(not(target_arch = "wasm32"))]
-use ::sync::files::outgoing::FileSyncOutgoing;
+use crate::sync::files::outgoing::FileSyncOutgoing;
 #[cfg(not(target_arch = "wasm32"))]
-use ::sync::files::incoming::FileSyncIncoming;
-use ::models::sync_record::SyncRecord;
-use ::util;
-use ::error::{TResult, TError};
-use ::storage::Storage;
-use ::api::Api;
-use ::messaging;
+use crate::sync::files::incoming::FileSyncIncoming;
+use crate::models::sync_record::SyncRecord;
+use crate::util;
+use crate::error::{TResult, TError};
+use crate::storage::Storage;
+use crate::api::Api;
+use crate::messaging;
 use ::crossbeam::sync::MsQueue;
 
 /// This holds the configuration for the sync system (whether it's enabled, the
@@ -129,7 +129,7 @@ pub trait Syncer {
     fn get_config(&self) -> Arc<RwLock<SyncConfig>>;
 
     /// Set this sync thread's run version
-    fn set_run_version(&mut self, i64);
+    fn set_run_version(&mut self, _: i64);
 
     /// Get this sync thread's run version
     fn get_run_version(&self) -> i64;
@@ -373,7 +373,7 @@ pub fn start(config: Arc<RwLock<SyncConfig>>, api: Arc<Api>, db: Arc<Mutex<Optio
 
 /// Start our syncing system!
 // TODO(wasm): the real sync engine spawns 4 OS threads (`std::thread::Builder::spawn`) that each
-// make blocking HTTP calls via `::api::Api` -- neither real OS-thread parallelism nor blocking
+// make blocking HTTP calls via `crate::api::Api` -- neither real OS-thread parallelism nor blocking
 // reqwest exist on wasm32 (see docs/wasm-port-plan.md decisions 2.3 networking and 2.4
 // concurrency, both separate future milestones: async reqwest/fetch + a single-threaded
 // spawn_local/Worker-based scheduler). Not yet ported.
@@ -389,9 +389,9 @@ mod tests {
     use ::std::sync::{Arc, RwLock, Mutex};
 
     use ::jedi::{self, Value};
-    use ::storage::Storage;
-    use ::api::Api;
-    use ::models::sync_record::{SyncAction, SyncType, SyncRecord};
+    use crate::storage::Storage;
+    use crate::api::Api;
+    use crate::models::sync_record::{SyncAction, SyncType, SyncRecord};
 
     #[test]
     fn serializes_sync_record() {

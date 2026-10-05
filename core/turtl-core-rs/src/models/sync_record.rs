@@ -1,10 +1,10 @@
 use ::jedi::{self, Value};
-use ::error::{TResult, TError};
-use ::models::model::Model;
-use ::models::protected::{Protected, Keyfinder};
-use ::storage::Storage;
-use ::turtl::Turtl;
-use ::sync::sync_model::SyncModel;
+use crate::error::{TResult, TError};
+use crate::models::model::Model;
+use crate::models::protected::{Protected, Keyfinder};
+use crate::storage::Storage;
+use crate::turtl::Turtl;
+use crate::sync::sync_model::SyncModel;
 use ::std::fmt::Display;
 
 /// How many times a sync record can fail before it's "frozen"
@@ -67,7 +67,7 @@ impl Default for SyncType {
 /// A helpful struct for dealing with sync errors
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SyncError {
-    #[serde(with = "::util::ser::int_converter")]
+    #[serde(with = "crate::util::ser::int_converter")]
     pub code: String,
     pub msg: String,
 }
@@ -78,10 +78,10 @@ protected! {
     pub struct SyncRecord {
         #[protected_field(public)]
         pub action: SyncAction,
-        #[serde(deserialize_with = "::util::ser::int_converter::deserialize")]
+        #[serde(deserialize_with = "crate::util::ser::int_converter::deserialize")]
         #[protected_field(public)]
         pub item_id: String,
-        #[serde(with = "::util::ser::int_converter")]
+        #[serde(with = "crate::util::ser::int_converter")]
         #[protected_field(public)]
         pub user_id: String,
         #[serde(rename = "type")]
@@ -91,7 +91,7 @@ protected! {
         #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         #[protected_field(public)]
-        #[serde(with = "::util::ser::opt_vec_str_i64_converter")]
+        #[serde(with = "crate::util::ser::opt_vec_str_i64_converter")]
         pub sync_ids: Option<Vec<i64>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[protected_field(public)]

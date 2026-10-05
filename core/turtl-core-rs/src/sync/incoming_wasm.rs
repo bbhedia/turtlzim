@@ -1,8 +1,8 @@
 //! TODO(wasm): wasm32 stand-in for sync/incoming.rs.
 //!
 //! The real `SyncIncoming` (long-polls the API for changes, applies them to the local db inside
-//! a SQL transaction) needs both a working `::api::Api` (blocking reqwest, see src/api.rs) and a
-//! working `::storage::Storage` (rusqlite, see src/storage.rs) -- neither is ported to wasm32
+//! a SQL transaction) needs both a working `crate::api::Api` (blocking reqwest, see src/api.rs) and a
+//! working `crate::storage::Storage` (rusqlite, see src/storage.rs) -- neither is ported to wasm32
 //! yet (docs/wasm-port-plan.md decisions 2.2 storage / 2.3 networking, separate future
 //! milestones), so this file is never actually used as a `Syncer` on wasm32 (see
 //! `sync::start()`'s wasm32 stub in sync/mod.rs).
@@ -12,20 +12,20 @@
 //! here to keep the crate's public interface identical across targets.
 
 use ::jedi::{self, Value};
-use ::error::{TError, TResult};
-use ::storage::Storage;
-use ::models::protected::{Protected, Keyfinder};
-use ::models::model::Model;
-use ::models::user::User;
-use ::models::keychain::KeychainEntry;
-use ::models::space::Space;
-use ::models::invite::Invite;
-use ::models::board::Board;
-use ::models::note::Note;
-use ::models::file::FileData;
-use ::models::sync_record::{SyncType, SyncRecord, SyncAction};
-use ::sync::sync_model::MemorySaver;
-use ::turtl::Turtl;
+use crate::error::{TError, TResult};
+use crate::storage::Storage;
+use crate::models::protected::{Protected, Keyfinder};
+use crate::models::model::Model;
+use crate::models::user::User;
+use crate::models::keychain::KeychainEntry;
+use crate::models::space::Space;
+use crate::models::invite::Invite;
+use crate::models::board::Board;
+use crate::models::note::Note;
+use crate::models::file::FileData;
+use crate::models::sync_record::{SyncType, SyncRecord, SyncAction};
+use crate::sync::sync_model::MemorySaver;
+use crate::turtl::Turtl;
 use ::std::mem;
 
 pub struct SyncIncoming;

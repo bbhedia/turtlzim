@@ -13,10 +13,10 @@
 // Natively only the tests use this; on wasm32 the exported `cryptoSelfTest()` does.
 #![allow(dead_code)]
 
-use ::crypto;
-use ::crypto::{CResult, CryptoError, Key};
-use ::crypto::low;
-use ::crypto::low::chacha20poly1305 as aead;
+use crate::crypto;
+use crate::crypto::{CResult, CryptoError, Key};
+use crate::crypto::low;
+use crate::crypto::low::chacha20poly1305 as aead;
 
 /// Run every check; the error names the first one that failed.
 pub fn run() -> CResult<()> {

@@ -20,8 +20,8 @@ macro_rules! crypto_test {
 
         #[cfg(target_arch = "wasm32")]
         #[::wasm_bindgen_test::wasm_bindgen_test(async)]
-        fn $name() -> ::crypto::wasm_test_support::ThenReady {
-            ::crypto::wasm_test_support::ThenReady::new($body)
+        fn $name() -> crate::crypto::wasm_test_support::ThenReady {
+            crate::crypto::wasm_test_support::ThenReady::new($body)
         }
     };
 }
@@ -32,11 +32,11 @@ mod selftest;
 #[cfg(target_arch = "wasm32")]
 mod wasm_sodium;
 
-pub use ::crypto::error::{
+pub use crate::crypto::error::{
     CResult,
     CryptoError,
 };
-pub use ::crypto::low::{
+pub use crate::crypto::low::{
     sha256,
     sha512,
     to_hex,
@@ -49,12 +49,12 @@ pub use ::crypto::low::{
     KEYGEN_MEM_DEFAULT,
     random_salt,
 };
-pub use ::crypto::low::chacha20poly1305::{random_nonce, random_key, noncelen, keylen};
-pub use ::crypto::key::Key;
+pub use crate::crypto::low::chacha20poly1305::{random_nonce, random_key, noncelen, keylen};
+pub use crate::crypto::key::Key;
 // The host must call and await `initWasmCrypto(sodium)` exactly once before any other crypto::
 // function is used on wasm32 -- see `wasm_sodium::init_wasm_crypto`'s doc comment.
 #[cfg(target_arch = "wasm32")]
-pub use ::crypto::wasm_sodium::init_wasm_crypto;
+pub use crate::crypto::wasm_sodium::init_wasm_crypto;
 
 /// Stores our current crypto version. This gets encoded into a header in the
 /// ciphertext and lets the crypto module know how to handle the message.
@@ -296,9 +296,9 @@ pub fn random_hash() -> CResult<String> {
 }
 
 pub mod asym {
-    use ::crypto::key::Key;
-    use ::crypto::error::{CResult, CryptoError};
-    use ::crypto::low::asym as low_asym;
+    use crate::crypto::key::Key;
+    use crate::crypto::error::{CResult, CryptoError};
+    use crate::crypto::low::asym as low_asym;
 
     /// Stores our current crypto version. This gets encoded into a header in the
     /// ciphertext and lets the crypto module know how to handle the message.
@@ -346,7 +346,7 @@ mod tests {
     //! Tests for our high-level Crypto module interface.
 
     use super::*;
-    use ::crypto::low::chacha20poly1305 as aead;
+    use crate::crypto::low::chacha20poly1305 as aead;
 
     const TEST_ITERATIONS: usize = 32;
 

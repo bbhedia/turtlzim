@@ -31,8 +31,8 @@ use ::sodiumoxide::crypto::auth as sodium_auth;
 #[cfg(not(target_arch = "wasm32"))]
 use ::sodiumoxide::crypto::pwhash;
 #[cfg(target_arch = "wasm32")]
-use ::crypto::wasm_sodium;
-use ::crypto::error::{CResult, CryptoError};
+use crate::crypto::wasm_sodium;
+use crate::crypto::error::{CResult, CryptoError};
 
 /// Abstract the size of hmac keys
 #[allow(dead_code)]
@@ -262,9 +262,9 @@ pub mod chacha20poly1305 {
 
     #[cfg(not(target_arch = "wasm32"))]
     use ::sodiumoxide::crypto::aead::chacha20poly1305_ietf as aead;
-    use ::crypto::{CResult, CryptoError};
+    use crate::crypto::{CResult, CryptoError};
     #[cfg(target_arch = "wasm32")]
-    use ::crypto::wasm_sodium;
+    use crate::crypto::wasm_sodium;
 
     /// Get the key length for chacha20poly1305
     #[cfg(not(target_arch = "wasm32"))]
@@ -376,9 +376,9 @@ pub mod chacha20poly1305 {
 }
 
 pub mod asym {
-    use ::crypto::error::{CryptoError, CResult};
+    use crate::crypto::error::{CryptoError, CResult};
     #[cfg(target_arch = "wasm32")]
-    use ::crypto::wasm_sodium;
+    use crate::crypto::wasm_sodium;
     #[cfg(not(target_arch = "wasm32"))]
     use ::sodiumoxide::crypto::box_ as crypto_box;
     #[cfg(not(target_arch = "wasm32"))]

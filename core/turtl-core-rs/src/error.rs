@@ -9,9 +9,9 @@ use ::clippo::error::CError as ClippoError;
 #[cfg(not(target_arch = "wasm32"))]
 use ::migrate::error::MError as MigrateError;
 use ::rusqlite;
-use ::api::StatusCode;
-use ::crypto::CryptoError;
-use ::util;
+use crate::api::StatusCode;
+use crate::crypto::CryptoError;
+use crate::util;
 
 macro_rules! quick_error_obj {
     ($ty:expr, $err:expr) => {
@@ -157,7 +157,7 @@ macro_rules! function {
 #[macro_export]
 macro_rules! twrap {
     ($terror:expr) => {
-        ::error::TError::Wrapped(function!(), file!(), line!(), ::std::sync::Arc::new($terror))
+        crate::error::TError::Wrapped(function!(), file!(), line!(), ::std::sync::Arc::new($terror))
     }
 }
 
@@ -176,7 +176,7 @@ macro_rules! TErr {
 macro_rules! toterr {
     ($e:expr) => (
         {
-            let err: ::error::TError = From::from($e);
+            let err: crate::error::TError = From::from($e);
             twrap!(err)
         }
     )
@@ -185,8 +185,8 @@ macro_rules! toterr {
 /// A macro to make it easy to create From impls for TError
 macro_rules! from_err {
     ($t:ty) => (
-        impl From<$t> for ::error::TError {
-            fn from(err: $t) -> ::error::TError {
+        impl From<$t> for crate::error::TError {
+            fn from(err: $t) -> crate::error::TError {
                 if cfg!(feature = "panic-on-error") {
                     panic!("{:?}", err);
                 } else {

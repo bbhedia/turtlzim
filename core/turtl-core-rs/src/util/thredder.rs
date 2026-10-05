@@ -17,7 +17,7 @@ use ::futures::Future;
 #[cfg(not(target_arch = "wasm32"))]
 use ::futures_cpupool::CpuPool;
 
-use ::error::{TResult, TFutureResult};
+use crate::error::{TResult, TFutureResult};
 
 /// Stores state information for a thread we've spawned.
 pub struct Thredder {

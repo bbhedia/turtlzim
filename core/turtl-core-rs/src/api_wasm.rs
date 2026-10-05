@@ -18,7 +18,7 @@
 use ::std::sync::RwLock;
 use ::std::time::Duration;
 use ::jedi::{DeserializeOwned, Serialize};
-use ::error::{TResult, TError};
+use crate::error::{TResult, TError};
 
 pub use ::http::Method;
 pub use ::http::StatusCode;

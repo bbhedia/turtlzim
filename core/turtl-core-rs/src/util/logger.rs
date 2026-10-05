@@ -2,7 +2,7 @@ use ::config;
 use ::fern;
 use ::log;
 use ::time;
-use ::error::{TResult, TError};
+use crate::error::{TResult, TError};
 use ::std::{self, env};
 use ::std::fs::{self, File};
 use ::std::io::BufReader;

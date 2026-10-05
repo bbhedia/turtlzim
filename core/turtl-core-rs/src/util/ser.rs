@@ -1,5 +1,5 @@
 pub mod int_converter {
-    use ::error::{TResult, TError};
+    use crate::error::{TResult, TError};
     use ::serde::ser::Serializer;
     use ::serde::de::{self, Deserializer, Visitor};
     use ::jedi::Value;
@@ -136,11 +136,11 @@ pub mod int_opt_converter {
 }
 
 pub mod base64_converter {
-    use ::error::{TResult, TError};
+    use crate::error::{TResult, TError};
     use ::serde::ser::{self, Serializer};
     use ::serde::de::{self, Deserializer, Deserialize};
     use ::jedi::Value;
-    use ::crypto;
+    use crate::crypto;
 
     #[allow(dead_code)]
     pub fn serialize<S>(val: &Option<Vec<u8>>, ser: S) -> Result<S::Ok, S::Error>
@@ -227,7 +227,7 @@ pub mod opt_vec_str_i64_converter {
     use ::serde::ser::{Serializer, SerializeSeq};
     use ::serde::de::{self, Deserializer, Deserialize};
     use ::jedi::Value;
-    use ::error::TResult;
+    use crate::error::TResult;
 
     #[allow(dead_code)]
     pub fn serialize<S>(val: &Option<Vec<i64>>, ser: S) -> Result<S::Ok, S::Error>

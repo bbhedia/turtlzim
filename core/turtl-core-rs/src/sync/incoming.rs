@@ -1,27 +1,27 @@
 use ::std::sync::{Arc, RwLock, Mutex};
 use ::std::io::ErrorKind;
 use ::jedi::{self, Value};
-use ::error::{TResult, TError};
-use ::sync::{SyncConfig, Syncer};
-use ::sync::sync_model::{SyncModel, MemorySaver};
-use ::storage::Storage;
-use ::api::{Api, ApiReq};
-use ::messaging;
-use ::models;
-use ::models::protected::{Protected, Keyfinder};
-use ::models::model::Model;
-use ::models::user::User;
-use ::models::keychain::KeychainEntry;
-use ::models::space::Space;
-use ::models::invite::Invite;
-use ::models::board::Board;
-use ::models::note::Note;
-use ::models::file::FileData;
-use ::models::sync_record::{SyncType, SyncRecord, SyncAction};
-use ::turtl::Turtl;
+use crate::error::{TResult, TError};
+use crate::sync::{SyncConfig, Syncer};
+use crate::sync::sync_model::{SyncModel, MemorySaver};
+use crate::storage::Storage;
+use crate::api::{Api, ApiReq};
+use crate::messaging;
+use crate::models;
+use crate::models::protected::{Protected, Keyfinder};
+use crate::models::model::Model;
+use crate::models::user::User;
+use crate::models::keychain::KeychainEntry;
+use crate::models::space::Space;
+use crate::models::invite::Invite;
+use crate::models::board::Board;
+use crate::models::note::Note;
+use crate::models::file::FileData;
+use crate::models::sync_record::{SyncType, SyncRecord, SyncAction};
+use crate::turtl::Turtl;
 use ::std::mem;
 use ::config;
-use ::util;
+use crate::util;
 
 const SYNC_IGNORE_KEY: &'static str = "sync:incoming:ignore";
 
@@ -39,7 +39,7 @@ struct SyncResponse {
     #[serde(default)]
     records: Vec<SyncRecord>,
     #[serde(default)]
-    #[serde(deserialize_with = "::util::ser::str_i64_converter::deserialize")]
+    #[serde(deserialize_with = "crate::util::ser::str_i64_converter::deserialize")]
     sync_id: i64,
     /// extra data returned from the sync system
     #[serde(default)]

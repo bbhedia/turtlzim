@@ -100,7 +100,7 @@ use ::std::sync::Arc;
 use ::std::env;
 use ::std::fs;
 use ::jedi::Value;
-use ::error::TResult;
+use crate::error::TResult;
 #[cfg(not(target_arch = "wasm32"))]
 use ::fs2::FileExt;
 

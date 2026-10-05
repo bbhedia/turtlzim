@@ -51,7 +51,7 @@ use ::wasm_bindgen::prelude::*;
 use ::wasm_bindgen::JsCast;
 use ::wasm_bindgen_futures::JsFuture;
 
-use ::crypto::error::{CResult, CryptoError};
+use crate::crypto::error::{CResult, CryptoError};
 
 #[wasm_bindgen]
 extern "C" {
@@ -228,7 +228,7 @@ pub fn init_wasm_crypto(sodium: JsValue) -> Promise {
 /// from the native one. Needs `initWasmCrypto(sodium)` to have been awaited first.
 #[wasm_bindgen(js_name = cryptoSelfTest)]
 pub fn crypto_self_test() -> Result<String, JsValue> {
-    ::crypto::selftest::run().map_err(|e| JsValue::from(JsError::new(&format!("{}", e))))?;
+    crate::crypto::selftest::run().map_err(|e| JsValue::from(JsError::new(&format!("{}", e))))?;
     let version = with_sodium("cryptoSelfTest", |s| s.sodium_version_string())
         .ok()
         .and_then(|res| res.ok())

@@ -1,6 +1,6 @@
 use ::std::thread;
 use ::std::time::Duration;
-use ::error::{TResult, TError};
+use crate::error::{TResult, TError};
 use ::std::io;
 use ::std::fs;
 use ::std::path::Path;

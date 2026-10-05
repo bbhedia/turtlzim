@@ -1,19 +1,19 @@
-use ::error::{TResult, TError};
-use ::models::model::Model;
-use ::models::board::Board;
-use ::models::note::Note;
-use ::models::invite::{Invite, InviteRequest};
-use ::models::protected::{Keyfinder, Protected};
-use ::models::space_member::SpaceMember;
-use ::models::sync_record::{SyncRecord, SyncAction};
-use ::models::validate::{self, Validate};
-use ::models::keychain;
-use ::sync::sync_model::{self, SyncModel, MemorySaver};
-use ::turtl::Turtl;
+use crate::error::{TResult, TError};
+use crate::models::model::Model;
+use crate::models::board::Board;
+use crate::models::note::Note;
+use crate::models::invite::{Invite, InviteRequest};
+use crate::models::protected::{Keyfinder, Protected};
+use crate::models::space_member::SpaceMember;
+use crate::models::sync_record::{SyncRecord, SyncAction};
+use crate::models::validate::{self, Validate};
+use crate::models::keychain;
+use crate::sync::sync_model::{self, SyncModel, MemorySaver};
+use crate::turtl::Turtl;
 use ::lib_permissions::{Role, Permission};
 use ::jedi::{self, Value};
-use ::crypto::Key;
-use ::messaging;
+use crate::crypto::Key;
+use crate::messaging;
 use ::std::default::Default;
 
 protected! {
@@ -22,7 +22,7 @@ protected! {
     /// each with different permission levels.
     #[derive(Serialize, Deserialize)]
     pub struct Space {
-        #[serde(with = "::util::ser::int_converter")]
+        #[serde(with = "crate::util::ser::int_converter")]
         #[protected_field(public)]
         pub user_id: String,
         #[serde(default)]

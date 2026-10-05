@@ -10,10 +10,10 @@ use ::rusqlite::types::ToSql;
 use ::clouseau::Clouseau;
 use ::dumpy::SearchVal;
 
-use ::error::{TResult, TError};
-use ::models::model;
-use ::models::note::Note;
-use ::models::file::File;
+use crate::error::{TResult, TError};
+use crate::models::model;
+use crate::models::note::Note;
+use crate::models::file::File;
 
 /// A query builder
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -350,7 +350,7 @@ mod tests {
     use super::*;
 
     use ::jedi;
-    use ::models::note::Note;
+    use crate::models::note::Note;
 
     // On wasm32 these run under `wasm-pack test --node` against real SQLite (sqlite-wasm-rs),
     // exercising the same FTS4 queries as native: wasm-bindgen-test's attribute shadows `#[test]`.

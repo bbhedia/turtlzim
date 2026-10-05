@@ -442,7 +442,10 @@ Networking and concurrency are unified on async/await across both native and web
       ~600 unrelated call sites crate-wide (this crate leans on 2015-specific macro/path
       resolution pervasively -- e.g. glob-imported `macro_rules!` names colliding with module
       items, was one concrete failure seen). That is very much *not* a safe, narrow change, so
-      the crate stays on (implicit) edition 2015.
+      the crate stays on (implicit) edition 2015. **[Superseded in Step 4b-2a: that diagnosis was
+      wrong about the cause and the cost. The ~600 errors were almost all 2015-style absolute
+      paths to the crate's own modules, and a mechanical rewrite fixed them; the crate now builds
+      as edition 2018 with every test green, so `async fn`/`.await` is available.]**
 
       Instead, `crypto::init_wasm_crypto()` is a **plain synchronous fn returning `js_sys::
       Promise`**, built from a hand-written `Future` impl (`low.rs`'s `InitCryptoFuture` --
@@ -546,10 +549,40 @@ Networking and concurrency are unified on async/await across both native and web
       which does ship a snippet, still needs the bare-map workaround. (e) Every native `cargo test` of `turtl_core` rewrites the tracked
       `core/wasm-crypto-poc/test/golden_vectors.json` (`generate_wasm_golden_vectors`); `git
       checkout` it before committing.
-- [ ] Step 4b-2: async `reqwest`/`fetch` into `api.rs` (decision 2.3) -- the whole call chain
-      through `dispatch.rs` and every `Syncer` impl; `turtl_core` is a 2015-edition crate, so
-      prefer futures-0.1 combinators (`.then()`/`.map()`/`.and_then()`) over hand-rolled
-      `poll()`.
+- [ ] Step 4b-2: async networking (decision 2.3) -- **design chosen 2026-10-05, in progress.**
+      Decided after research (options were put to the user; all three recommended ones taken):
+      (1) move `turtl_core` to **edition 2018** and write real `async fn`/`.await`; (2) **native keeps
+      its threads**: thread-per-message and the four sync threads stay, each driving its async fn to
+      completion with `block_on` on one shared tokio runtime (so futures need not be `Send`), while
+      wasm drives the same fns with `spawn_local`; (3) **scope**: the JSON API, user flows, sync
+      engine, dispatch and the space/invite APIs; **file attachments stay native-only** (stubbed on
+      wasm) because they stream to the filesystem and need a browser file-storage backend, which
+      belongs with persistence (4b-5b).
+
+      Research behind it: the HTTP layer is small (`api.rs` is 298 lines with one blocking choke
+      point, `ApiCaller::call`; about 40 call sites in a dozen files, mostly `models/user.rs`); the
+      sync engine is four polling loops (`run_sync()`, sleep, repeat) and dispatch is a thread per
+      message, both of which map directly onto async tasks. reqwest 0.13.5's wasm backend binds the
+      *global* `fetch` (not `window.fetch`) and was verified under Node against a real local server
+      (GET with a custom header, POST with an auth header and JSON body, readable error status and
+      body, per-request timeout), so networking can be tested on wasm without a browser; native async
+      reqwest 0.13 compiles here. Sub-steps, each its own commit:
+      - [x] **4b-2a: edition 2018** (done). 339 occurrences in 41 files of a 2015-style path to one of
+        the crate's own modules (`::models::..`) became `crate::models::..` (one regex over the 13
+        top-level module names); the 16 serde attribute strings (`"::util::ser::.."`) and the 16
+        crate-local paths `protected_derive` emits got the same treatment; the derive hands syn 0.11
+        its input with `crate ::` respelled `::` (syn 0.11 predates `crate::` paths, and the derive
+        never re-emits field types); two anonymous trait parameters got `_:`; one root call became
+        `crate::init(..)`. **`cargo fix --edition` does not work on this crate**: it rewrites paths
+        inside serde attribute strings into invalid syntax (`crate::"::util::.."`), after which the
+        derive chokes and everything cascades (that cascade is the old "~600 errors"). Verified:
+        native `turtl_core` 68/68, `dumpy` 6, `clouseau` 3, `jedi` 3; wasm32 36/36, `dumpy` 6,
+        `clouseau` 3; the production `--target web` build and its smoke test.
+      - [ ] 4b-2b: async `Api` on reqwest 0.13 for both targets (replacing `api_wasm.rs`), the
+        execution helpers (`block_on` on a shared runtime natively, `spawn_local` and a JS timer on
+        wasm), and tests against a mock server on both targets.
+      - [ ] 4b-2c: convert the callers (user flows, space/invite/feedback APIs, `Syncer`, the sync
+        engine, dispatch) to `async fn`, with `block_on` only at the thread entry points.
 - [ ] Step 4b-3: the real single-threaded-async concurrency rewrite (2.4) replacing `Thredder`'s
       synchronous-inline placeholder.
 - [x] Step 4b-4 (`wasm-pack build --target web`, with libsodium injected) -- **done**

@@ -1,17 +1,17 @@
 use ::std::sync::{Arc, RwLock, Mutex};
-use ::sync::{SyncConfig, Syncer};
-use ::sync::sync_model::SyncModel;
-use ::storage::Storage;
-use ::api::{Api, Method};
-use ::messaging;
-use ::error::{TResult, TError};
-use ::models::sync_record::{SyncType, SyncRecord};
-use ::models::file::FileData;
+use crate::sync::{SyncConfig, Syncer};
+use crate::sync::sync_model::SyncModel;
+use crate::storage::Storage;
+use crate::api::{Api, Method};
+use crate::messaging;
+use crate::error::{TResult, TError};
+use crate::models::sync_record::{SyncType, SyncRecord};
+use crate::models::file::FileData;
 use ::std::time::Duration;
 use ::std::fs;
 use ::std::io::{Read, Write};
 use ::jedi::{self, Value};
-use ::util;
+use crate::util;
 use ::config;
 use ::reqwest;
 

@@ -10,7 +10,10 @@ use proc_macro::TokenStream;
 
 #[proc_macro_derive(Protected, attributes(protected_modeltype, protected_field))]
 pub fn protected(input: TokenStream) -> TokenStream {
-    let s = input.to_string();
+    // syn 0.11 predates `crate::` paths, which the 2018 edition makes the way to name this crate's own
+    // items. Field *types* are never re-emitted (only field names and attributes are used), so
+    // hand the parser the 2015 spelling of them.
+    let s = input.to_string().replace("crate ::", "::");
 
     let ast = syn::parse_derive_input(&s).expect("protected_derive::protected() -- failed to parse tokens or something");
     let gen = impl_protected(&ast);
@@ -247,18 +250,18 @@ fn impl_protected(ast: &syn::MacroInput) -> quote::Tokens {
         }
 
         impl Protected for #name {
-            fn key<'a>(&'a self) -> Option<&'a ::crypto::Key> {
+            fn key<'a>(&'a self) -> Option<&'a crate::crypto::Key> {
                 self._key.as_ref()
             }
 
-            fn key_or_else(&self) -> ::error::TResult<::crypto::Key> {
+            fn key_or_else(&self) -> crate::error::TResult<crate::crypto::Key> {
                 match self.key() {
                     Some(x) => Ok(x.clone()),
-                    None => TErr!(::error::TError::MissingField(format!("{}.key", stringify!(#name)))),
+                    None => TErr!(crate::error::TError::MissingField(format!("{}.key", stringify!(#name)))),
                 }
             }
 
-            fn set_key(&mut self, key: Option<::crypto::Key>) {
+            fn set_key(&mut self, key: Option<crate::crypto::Key>) {
                 self._key = key;
                 self._set_key_on_submodels();
             }
@@ -287,7 +290,7 @@ fn impl_protected(ast: &syn::MacroInput) -> quote::Tokens {
             }
 
             #[allow(unused_variables)]  // required in case we have no submodels
-            fn submodel_data(&self, field: &str, private: bool) -> ::error::TResult<::jedi::Value> {
+            fn submodel_data(&self, field: &str, private: bool) -> crate::error::TResult<::jedi::Value> {
                 #(
                     if field == stringify!(#submodel_fields2) {
                         match self.#submodel_fields3.as_ref() {
@@ -298,7 +301,7 @@ fn impl_protected(ast: &syn::MacroInput) -> quote::Tokens {
                         }
                     }
                 )*
-                Err(::error::TError::MissingField(format!("The field {} wasn't found in this model", field)))
+                Err(crate::error::TError::MissingField(format!("The field {} wasn't found in this model", field)))
             }
 
             fn _set_key_on_submodels(&mut self) {
@@ -314,7 +317,7 @@ fn impl_protected(ast: &syn::MacroInput) -> quote::Tokens {
                 )*
             }
 
-            fn serialize_submodels(&mut self) -> ::error::TResult<()> {
+            fn serialize_submodels(&mut self) -> crate::error::TResult<()> {
                 #(
                     match self.#submodel_fields5.as_mut() {
                         Some(ref mut x) => {
@@ -326,7 +329,7 @@ fn impl_protected(ast: &syn::MacroInput) -> quote::Tokens {
                 Ok(())
             }
 
-            fn deserialize_submodels(&mut self) -> ::error::TResult<()> {
+            fn deserialize_submodels(&mut self) -> crate::error::TResult<()> {
                 #(
                     match self.#submodel_fields6.as_mut() {
                         Some(ref mut x) => {
@@ -340,26 +343,26 @@ fn impl_protected(ast: &syn::MacroInput) -> quote::Tokens {
                 Ok(())
             }
 
-            fn clone(&self) -> ::error::TResult<Self> {
+            fn clone(&self) -> crate::error::TResult<Self> {
                 let mut model = Self::clone_from(::jedi::to_val(self).map_err(|e| toterr!(e))?)?;
                 let key = self.key().map(|x| x.clone());
                 model.set_key(key);
                 Ok(model)
             }
 
-            fn generate_key(&mut self) -> ::error::TResult<&::crypto::Key> {
+            fn generate_key(&mut self) -> crate::error::TResult<&crate::crypto::Key> {
                 if self.key().is_none() {
-                    let key = ::crypto::Key::random()?;
+                    let key = crate::crypto::Key::random()?;
                     self.set_key(Some(key));
                 }
                 Ok(self.key().expect("Protected.generate_key() -- failed to grab self key"))
             }
 
-            fn get_keys<'a>(&'a self) -> Option<&'a Vec<::models::keychain::KeyRef<String>>> {
+            fn get_keys<'a>(&'a self) -> Option<&'a Vec<crate::models::keychain::KeyRef<String>>> {
                 self.keys.as_ref()
             }
 
-            fn set_keys(&mut self, keydata: Vec<::models::keychain::KeyRef<String>>) {
+            fn set_keys(&mut self, keydata: Vec<crate::models::keychain::KeyRef<String>>) {
                 self.keys = Some(keydata);
             }
 
@@ -378,7 +381,7 @@ fn impl_protected(ast: &syn::MacroInput) -> quote::Tokens {
                 self.body = None;
             }
 
-            fn merge_fields(&mut self, data: &::jedi::Value) -> ::error::TResult<()> {
+            fn merge_fields(&mut self, data: &::jedi::Value) -> crate::error::TResult<()> {
                 #({
                     match ::jedi::get_opt::<::jedi::Value>(&[#public_only_fields_rename2], data) {
                         Some(x) => {

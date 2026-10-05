@@ -1,5 +1,5 @@
-use ::turtl::Turtl;
-use ::error::{TResult, TError};
+use crate::turtl::Turtl;
+use crate::error::{TResult, TError};
 
 /// Stores feedback we'll be sending to the server
 #[derive(Serialize, Deserialize, Debug)]

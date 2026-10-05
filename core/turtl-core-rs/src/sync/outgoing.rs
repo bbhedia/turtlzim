@@ -1,11 +1,11 @@
 use ::std::sync::{Arc, RwLock, Mutex};
-use ::error::TResult;
-use ::sync::{SyncConfig, Syncer};
-use ::sync::incoming::{SyncIncoming, SyncResponseExtra};
-use ::storage::Storage;
-use ::api::{Api, ApiReq};
-use ::messaging;
-use ::models::sync_record::{SyncType, SyncRecord};
+use crate::error::TResult;
+use crate::sync::{SyncConfig, Syncer};
+use crate::sync::incoming::{SyncIncoming, SyncResponseExtra};
+use crate::storage::Storage;
+use crate::api::{Api, ApiReq};
+use crate::messaging;
+use crate::models::sync_record::{SyncType, SyncRecord};
 
 #[derive(Deserialize, Debug)]
 struct SyncResponse {
@@ -173,9 +173,9 @@ impl Syncer for SyncOutgoing {
 mod tests {
     use super::*;
     use ::std::sync::{Arc, RwLock, Mutex};
-    use ::models::sync_record::SyncRecord;
+    use crate::models::sync_record::SyncRecord;
     use ::jedi;
-    use ::schema;
+    use crate::schema;
 
     #[test]
     fn ignores_frozen_syncs() {

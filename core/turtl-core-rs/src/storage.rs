@@ -4,17 +4,17 @@
 use ::std::sync::{Arc, RwLock};
 use ::std::mem;
 
-use ::crypto;
+use crate::crypto;
 use ::rusqlite::{self, Connection};
 use ::jedi::{self, Value};
 use ::dumpy::Dumpy;
 use ::config;
 
-use ::models::model::{self};
-use ::models::protected::Protected;
-use ::models::storable::Storable;
+use crate::models::model::{self};
+use crate::models::protected::Protected;
+use crate::models::storable::Storable;
 
-use ::error::TResult;
+use crate::error::TResult;
 
 /// Given a db filename, return the foll path we'll use for the db file
 pub fn db_location(db_name: &String) -> TResult<String> {
@@ -180,9 +180,9 @@ mod tests {
     use ::jedi::{self, Value};
     use ::rusqlite::types::Value as SqlValue;
 
-    use ::error::TResult;
-    use ::models::model::{self, Model};
-    use ::models::protected::Protected;
+    use crate::error::TResult;
+    use crate::models::model::{self, Model};
+    use crate::models::protected::Protected;
 
     // On wasm32 these run under `wasm-pack test --node` against real SQLite (sqlite-wasm-rs):
     // wasm-bindgen-test's attribute shadows `#[test]`, and the tests that need real crypto go

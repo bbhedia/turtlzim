@@ -6,9 +6,9 @@
 
 use ::carrier;
 use ::jedi::{self, Value, Serialize};
-use ::util;
+use crate::util;
 use ::config;
-use ::error::{TResult, TError};
+use crate::error::{TResult, TError};
 
 /// Defines a container for sending responses to the client. We could use a hash
 /// table, but then the elements might serialize out of order. This allows us to
@@ -169,7 +169,7 @@ impl Messenger {
 /// bitches about lifetimes and lifetimes are so horribly infectious that I
 /// can't justify rewriting a bunch of shit to satisfy it.
 pub trait MsgThunk: Send + 'static {
-    fn call_box(self: Box<Self>, &mut Messenger);
+    fn call_box(self: Box<Self>, _: &mut Messenger);
 }
 impl<F: FnOnce(&mut Messenger) + Send + 'static> MsgThunk for F {
     fn call_box(self: Box<Self>, messenger: &mut Messenger) {
@@ -240,7 +240,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use ::error::TError;
+    use crate::error::TError;
 
     /// given a thread-safe bool, return a copy of the bool
     fn grab_locked_bool(val: &Arc<Mutex<bool>>) -> bool {
