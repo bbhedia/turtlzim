@@ -69,6 +69,7 @@ extern crate url;
 pub mod error;
 #[macro_use]
 mod util;
+#[macro_use]
 mod crypto;
 mod messaging;
 // TODO(wasm): api.rs is built entirely on reqwest's *blocking* client, which has no wasm32

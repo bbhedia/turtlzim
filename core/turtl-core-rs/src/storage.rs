@@ -186,27 +186,10 @@ mod tests {
 
     // On wasm32 these run under `wasm-pack test --node` against real SQLite (sqlite-wasm-rs):
     // wasm-bindgen-test's attribute shadows `#[test]`, and the tests that need real crypto go
-    // through `crypto_test!` below, because libsodium.js needs a one-time async init first.
+    // through the crate-wide `crypto_test!` (crypto/mod.rs), because libsodium.js needs a
+    // one-time async init first.
     #[cfg(target_arch = "wasm32")]
     use ::wasm_bindgen_test::wasm_bindgen_test as test;
-    #[cfg(target_arch = "wasm32")]
-    use ::wasm_bindgen_test::wasm_bindgen_test;
-    #[cfg(target_arch = "wasm32")]
-    use ::crypto::wasm_test_support::ThenReady;
-
-    /// Declares a test that needs real crypto: a plain `#[test]` natively; on wasm32 the body runs
-    /// after the one-time async libsodium.js init (see `crypto::wasm_test_support`).
-    macro_rules! crypto_test {
-        ($name:ident, $body:ident) => {
-            #[cfg(not(target_arch = "wasm32"))]
-            #[test]
-            fn $name() { $body() }
-
-            #[cfg(target_arch = "wasm32")]
-            #[wasm_bindgen_test(async)]
-            fn $name() -> ThenReady { ThenReady::new($body) }
-        };
-    }
 
     protected! {
         #[derive(Serialize, Deserialize)]

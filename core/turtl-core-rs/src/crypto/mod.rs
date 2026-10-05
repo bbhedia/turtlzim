@@ -2,6 +2,30 @@
 /// related.
 
 mod error;
+
+/// (Test-only) Declares a test that needs real crypto, to run on every target.
+///
+/// Natively it is a plain `#[test]`. On wasm32 it is a `wasm-bindgen-test` that first awaits the
+/// one-time async libsodium.js init (see `wasm_test_support`, below) and then runs `$body`, an
+/// ordinary `fn()`. That way this crate's existing known-answer tests (SHA, HMAC, scrypt key
+/// derivation, AEAD envelopes, a sealed box made by the original JS client) double as
+/// native-vs-wasm parity tests without being rewritten: the same assertions, the same expected
+/// bytes, on both targets. Visible crate-wide through `#[macro_use] mod crypto;` in lib.rs.
+#[cfg(test)]
+macro_rules! crypto_test {
+    ($name:ident, $body:ident) => {
+        #[cfg(not(target_arch = "wasm32"))]
+        #[test]
+        fn $name() { $body() }
+
+        #[cfg(target_arch = "wasm32")]
+        #[::wasm_bindgen_test::wasm_bindgen_test(async)]
+        fn $name() -> ::crypto::wasm_test_support::ThenReady {
+            ::crypto::wasm_test_support::ThenReady::new($body)
+        }
+    };
+}
+
 mod low;
 mod key;
 
@@ -333,8 +357,7 @@ mod tests {
         assert_eq!(super::SYM_ALGORITHM[0], "chacha20poly1305");
     }
 
-    #[test]
-    fn can_gen_keys() {
+    fn can_gen_keys_body() {
         let username = String::from("andrew@thillygooth.com");
         let password = String::from("this is definitely not the password i use for my bank account. no sir.");
         let salt = Vec::from(&(sha512(username.as_bytes()).unwrap())[0..KEYGEN_SALT_LEN]);
@@ -344,8 +367,7 @@ mod tests {
         assert_eq!(keystr, "f36850e9bd90afc3413a89693bf71ebdf347f3727bad9b4487e249bb21ca28f1");
     }
 
-    #[test]
-    fn can_decrypt_latest() {
+    fn can_decrypt_latest_body() {
         let key = Key::new(from_base64(&String::from("2gtrzmvEQkfK9Lq+0eGqLjDrmlKBabp7T212Zdv35T0=")).unwrap());
         let payload = from_base64(&String::from("AAYBAAzGNuOg4N1zkQ2BlAiBbjNiYibICOs1NW18Jh/QfvdS+fR70+5kMnNCjXUSND05fU3m/FrcFZKPd3yQAl5gsP+4hWqkbWd+6/ip6HISeEz0NPBNTCWedSVgKYiEdnORSoiunl4l61vBmsyzQGnQl8fCYuerTLeGpq6j6Y5fBVmqmjWbmc5zeKqmg+LTfFUq9iNg5HoUPVKfjVm1aYlFG/fjMSk25j5zIgecFHAJOlQqtHXXPPCxwYLBoHBPsZE3kMu8jzE1QO8SAPOPyp2o3pD8fX1OhvqRHL/W34dqQzasmrscgvdvAy69l6nwbByOsjwvNSm2jWiNWGqFqxLgLXLy00r8A3E3hBDtQur4uo6Vs9ZSYn4mfLjEAyhyUsZeaoti8pKK5FVcJA9a//Blztbdmd8SPysXxks/6RvHIjy+aRCVxs/8Bw2Mv+AiSZ59dohNN4OUoVy3hNXk0RfdCDakw5AVq7xocAwmMLZeoWUgUt+Nb8ntt5W8KpfZVGMuxqIQoJoRMG7kf6TEHpL4vBOmosV0MwtLWkXwyXsx+zkP3GRw9mIcCkm5wEWpELYYzrOLmVQs4QHMetWsmyfTFOFlzVFPl7ctKlKuUOfbKETmrafvCNmoeOAWn58CXeEsD06ejrlg9zuPf5Vc3eIMSJ+EKIy8/eMLLFIDEzYkutqOfZoG6LJgevbgivLV7oXnG4kBF5pGVvwnpED4fTUFCFnc+MWATCN9aIJ58aLIdmF7TLYQwwXwNyyo9MvTJn/sEVjsbX/kpYrtknW1pjJ44e11du2Q5GpJXA4630g7BOOxooYTQgumoo/P3pPJnLjt9TJWPw7Q2h5rb2tqJowhltN19upncbOwMl1HPJcCqtOZOmttskMiDZGAjytiGOuD15TnfDUoZu3b97x0O6Nzm3RxGGBg4kQjC0q0RW0700EGGeCaiq9XAfUFIsS5XQ==")).unwrap();
         let plain = decrypt(&key, payload).unwrap();
@@ -353,8 +375,7 @@ mod tests {
         assert_eq!(plain_str, r#"{"title":"libertarian quotes","body":"Moreover, the institution of child labor is an honorable one, with a long and glorious history of good works. And the villains of the piece are not the employers, but rather those who prohibit the free market in child labor. These do-gooders are responsible for the untold immiseration of those who are thus forced out of employment. Although the harm done was greater in the past, when great poverty made widespread child labor necessary, there are still people in dire straits today. Present prohibitions of child labor are thus an unconscionable interference with their lives.","tags":["moron"],"mod":1468007942,"created":1468007942.493,"keys":[]}"#);
     }
 
-    #[test]
-    fn catches_truncated_ciphertext() {
+    fn catches_truncated_ciphertext_body() {
         let key = Key::new(from_base64(&String::from("2gtrzmvEQkfK9Lq+0eGqLjDrmlKBabp7T212Zdv35T0=")).unwrap());
         let payload = from_base64(&String::from("AAYBAA")).unwrap();
         let err = decrypt(&key, payload);
@@ -384,8 +405,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn can_encrypt_latest() {
+    fn can_encrypt_latest_body() {
         let key = Key::new(from_base64(&String::from("2gtrzmvEQkfK9Lq+0eGqLjDrmlKBabp7T212Zdv35T0=")).unwrap());
         let nonce = Vec::from(&sha512(String::from("omg wtff").as_bytes()).unwrap()[0..aead::noncelen()]);
         let plain = String::from(r#"{"title":"libertarian quotes","body":"Moreover, the institution of child labor is an honorable one, with a long and glorious history of good works. And the villains of the piece are not the employers, but rather those who prohibit the free market in child labor. These do-gooders are responsible for the untold immiseration of those who are thus forced out of employment. Although the harm done was greater in the past, when great poverty made widespread child labor necessary, there are still people in dire straits today. Present prohibitions of child labor are thus an unconscionable interference with their lives.","tags":["moron"],"mod":1468007942,"created":1468007942.493,"keys":[]}"#);
@@ -395,8 +415,7 @@ mod tests {
         assert_eq!(enc_str, "AAYBAAzGNuOg4N1zkQ2BlAiBbjNiYibICOs1NW18Jh/QfvdS+fR70+5kMnNCjXUSND05fU3m/FrcFZKPd3yQAl5gsP+4hWqkbWd+6/ip6HISeEz0NPBNTCWedSVgKYiEdnORSoiunl4l61vBmsyzQGnQl8fCYuerTLeGpq6j6Y5fBVmqmjWbmc5zeKqmg+LTfFUq9iNg5HoUPVKfjVm1aYlFG/fjMSk25j5zIgecFHAJOlQqtHXXPPCxwYLBoHBPsZE3kMu8jzE1QO8SAPOPyp2o3pD8fX1OhvqRHL/W34dqQzasmrscgvdvAy69l6nwbByOsjwvNSm2jWiNWGqFqxLgLXLy00r8A3E3hBDtQur4uo6Vs9ZSYn4mfLjEAyhyUsZeaoti8pKK5FVcJA9a//Blztbdmd8SPysXxks/6RvHIjy+aRCVxs/8Bw2Mv+AiSZ59dohNN4OUoVy3hNXk0RfdCDakw5AVq7xocAwmMLZeoWUgUt+Nb8ntt5W8KpfZVGMuxqIQoJoRMG7kf6TEHpL4vBOmosV0MwtLWkXwyXsx+zkP3GRw9mIcCkm5wEWpELYYzrOLmVQs4QHMetWsmyfTFOFlzVFPl7ctKlKuUOfbKETmrafvCNmoeOAWn58CXeEsD06ejrlg9zuPf5Vc3eIMSJ+EKIy8/eMLLFIDEzYkutqOfZoG6LJgevbgivLV7oXnG4kBF5pGVvwnpED4fTUFCFnc+MWATCN9aIJ58aLIdmF7TLYQwwXwNyyo9MvTJn/sEVjsbX/kpYrtknW1pjJ44e11du2Q5GpJXA4630g7BOOxooYTQgumoo/P3pPJnLjt9TJWPw7Q2h5rb2tqJowhltN19upncbOwMl1HPJcCqtOZOmttskMiDZGAjytiGOuD15TnfDUoZu3b97x0O6Nzm3RxGGBg4kQjC0q0RW0700EGGeCaiq9XAfUFIsS5XQ==");
     }
 
-    #[test]
-    fn can_gen_random_keys() {
+    fn can_gen_random_keys_body() {
         // test a number of hashes
         for _ in 0..TEST_ITERATIONS {
             let key = Key::random().unwrap();
@@ -404,8 +423,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn can_gen_random_nonce() {
+    fn can_gen_random_nonce_body() {
         // test a number of hashes
         for _ in 0..TEST_ITERATIONS {
             let nonce = aead::random_nonce().unwrap();
@@ -413,8 +431,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn can_gen_random_hash() {
+    fn can_gen_random_hash_body() {
         // test a number of hashes
         for _ in 0..TEST_ITERATIONS {
             let hash = random_hash().unwrap();
@@ -429,8 +446,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn asym_crypto() {
+    fn asym_crypto_body() {
         // test decrypting pre-computed val from js
         let ciphertext = from_base64(&String::from(r#"A3eNneAydRaXiMB0886wo3sTTAxHcyM7JpaLN4z2rqQRyxUPq/eKrWHyF2/1wC9gfmw5t7lQ6KhT+tSbYTAHQb2EJ3NvwGRyeQ5SXId7RYSAeaoizSyT8JfEI91hyRde3sC5C00xYn60LYjt"#)).unwrap();
         let pk = Key::new(from_base64(&String::from(r#"3KhS3n3QlT/w7rE8hwwq/HNnVxlgzkphsqYKRAzbNGg="#)).unwrap());
@@ -458,6 +474,15 @@ mod tests {
         let res = asym::decrypt(&her_pk, &her_sk, encrypted);
         assert!(res.is_err());
     }
+
+    crypto_test!(can_gen_keys, can_gen_keys_body);
+    crypto_test!(can_decrypt_latest, can_decrypt_latest_body);
+    crypto_test!(catches_truncated_ciphertext, catches_truncated_ciphertext_body);
+    crypto_test!(can_encrypt_latest, can_encrypt_latest_body);
+    crypto_test!(can_gen_random_keys, can_gen_random_keys_body);
+    crypto_test!(can_gen_random_nonce, can_gen_random_nonce_body);
+    crypto_test!(can_gen_random_hash, can_gen_random_hash_body);
+    crypto_test!(asym_crypto, asym_crypto_body);
 
     #[test]
     /// Golden-vector generator for the WASM crypto proof-of-concept

@@ -1,8 +1,8 @@
 {
   "name": "turtl-core-rs-wasm-crypto",
   "private": true,
-  "description": "npm deps for the wasm32 real-libsodium.js crypto bridge (src/crypto/low.rs's wasm_bridge, js/sodium_bridge.js) and its wasm-bindgen-test suite. See docs/wasm-port-plan.md decision 2.1.",
+  "description": "npm deps for the wasm32 real-libsodium.js crypto bridge (src/crypto/low.rs's wasm_bridge, js/sodium_bridge.js) and its wasm-bindgen-test suite. The *sumo* build is required: only it has scrypt (native gen_key), the explicit SHA functions, and Argon2. See docs/wasm-port-plan.md decision 2.1 and Step 4b-5.",
   "dependencies": {
-    "libsodium-wrappers": "^0.7.15"
+    "libsodium-wrappers-sumo": "^0.7.15"
   }
 }

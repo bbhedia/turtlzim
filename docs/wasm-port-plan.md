@@ -129,6 +129,11 @@ uses libsodium.js in-browser for Argon2id + XChaCha20-Poly1305 in a real E2EE pr
   the same as hashing with SHA-512/256). Not adopted — too much bespoke compatibility work with
   no upstream guarantee, and `dryoc` already did this work.
 
+**Refinement (2026-10-05): use the *sumo* build.** Native `gen_key()` is scrypt, and the standard
+`libsodium-wrappers` omits all password hashing (and the explicit `crypto_hash_sha512`);
+`libsodium-wrappers-sumo` has them, with the same API and init. See Step 4b-5a in the Status
+section for the verification.
+
 **Known integration costs:** libsodium.js requires an async `await sodium.ready` init before
 any call (native init is currently synchronous); two wasm modules load instead of one; every
 crypto call crosses a JS↔wasm boundary. **Non-negotiable regardless of approach:** a
@@ -517,17 +522,35 @@ Networking and concurrency are unified on async/await across both native and web
 - [ ] Step 4b-4: `wasm-pack build --target web` producing a loadable module end to end (only
       `wasm-pack test --node` and the PoC's `--target nodejs` build have run so far); see
       follow-up (d) above for the `package.json` trap.
-- [ ] Step 4b-5: persistence (OPFS-SAHPool in a dedicated Worker, browser-tested), and the
-      remaining incidental crypto stubs (`sha256`/`sha512`/`hmac`/`secure_compare`/
-      `gen_key`(pwhash)/`asym::*`). **Matters for the web login path:** `gen_key` is what turns a
-      user's passphrase into the master key that decrypts everything synced from other clients, so
-      byte-identical scrypt output is non-negotiable. Verified 2026-10-05 against the installed
-      packages: the **standard `libsodium-wrappers` 0.7.16 has no password hashing at all**
-      (no scrypt, no Argon2 `crypto_pwhash`) and no explicit `crypto_hash_sha512`; the **sumo**
-      build (`libsodium-wrappers-sumo` 0.7.16, libsodium 1.0.20) has scrypt with the same
-      `INTERACTIVE` limits native uses (`OPSLIMIT` 524288 / `MEMLIMIT` 16777216), Argon2, and the
-      explicit SHA functions, for about +0.7 MB of wasm (2.0 MB vs 1.3 MB on disk). So this step
-      switches the JS bridge to the sumo package (a superset; same `sodium.ready` init) and adds
-      golden-vector parity tests against native `sodiumoxide` for each primitive, `gen_key`
-      first.
+- [x] Step 4b-5a (the remaining crypto surface) -- **done** (2026-10-05). `sha256`/`sha512`,
+      `hmac` (HMAC-SHA512-256 via `crypto_auth`), `secure_compare`, `random_salt`, `gen_key`
+      (**scrypt**), and `asym::{keygen,encrypt,decrypt}` (sealed boxes) now run for real on wasm32
+      through the same libsodium.js bridge as the AEAD hot path, so no `NotImplemented` crypto
+      stub is left. `gen_key` is what turns a user's passphrase into the master key that decrypts
+      everything synced from other clients, so byte-identical scrypt output was non-negotiable:
+      verified two ways, see below. The bridge moved from `libsodium-wrappers` to
+      **`libsodium-wrappers-sumo`** 0.7.16 (libsodium 1.0.20): the standard build has no password
+      hashing at all (no scrypt, no Argon2) and no explicit `crypto_hash_sha512`, while sumo is a
+      strict superset with the same API and `sodium.ready` init, for about +0.7 MB of wasm (2.0 MB
+      vs 1.3 MB on disk). Sumo's scrypt reports the same `INTERACTIVE` limits native uses
+      (`OPSLIMIT` 524288 / `MEMLIMIT` 16777216). Lengths (hmac key, scrypt salt, box keys) are
+      validated in Rust before the bridge so bad input gives native's `BadData` errors rather than
+      libsodium.js's differently-worded exceptions; `secure_compare` is the same double-hmac as
+      native with the throwaway key from `rand_bytes()`.
+
+      **Verification -- the crate's own known-answer tests run on both targets.** Rather than
+      inventing new vectors, a crate-wide `crypto_test!` macro (crypto/mod.rs) turns an existing
+      test into a plain `#[test]` natively and, on wasm32, a `wasm-bindgen-test` that first awaits
+      the one-time libsodium.js init. 20 existing tests were converted mechanically (bodies
+      unchanged) and 3 added: the FIPS 180 SHA vectors (an anchor from outside this project),
+      error-kind parity for bad lengths / a box that won't open, and `random_salt`. The expected
+      values are the original Turtl authors', several validated against their JS client: SHA-256/
+      512, HMAC, **two scrypt key derivations**, the AEAD envelopes, and a sealed box produced by
+      the JS client's libsodium.js. Result: wasm32 **32/32**, native `turtl_core` **66/66**
+      (`dumpy` 6, `clouseau` 3, `jedi` 3 unchanged). A Node pre-flight against the bare package
+      matched both scrypt answers before any Rust was written, and a mutation check shows the
+      assertions bite on wasm: changing the wasm-only `KEYGEN_OPS_DEFAULT` to 1048576 (which
+      doubles scrypt's `p`) makes exactly the two scrypt tests fail. (Nudging it to 524289 does
+      *not*: scrypt quantizes its cost parameters, so that mutation is equivalent.)
+- [ ] Step 4b-5b: persistence (OPFS-SAHPool in a dedicated Worker, browser-tested).
 - [ ] Step 5: full parity pass before calling the port done.
