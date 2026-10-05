@@ -7,6 +7,9 @@ node_modules/
 dist/
 build/
 
+# wasm-pack output for the web package (npm run wasm in web/)
+web/src/zim-wasm/
+
 # Claude Code session-local state
 .claude/
 # Session exports from scripts/export-claude-session.sh hold full conversation

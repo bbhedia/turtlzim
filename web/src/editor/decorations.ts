@@ -1,0 +1,194 @@
+import { StateField } from "@codemirror/state";
+import type { EditorState, Line, Range } from "@codemirror/state";
+import { Decoration, EditorView } from "@codemirror/view";
+import type { DecorationSet } from "@codemirror/view";
+import { Kind, ListMarker, Opaque, VERBATIM_UNTERMINATED } from "../kinds";
+import type { Spans } from "../spans";
+import { setShowMarkup, showMarkupField, spansOf } from "./syntax";
+import { BulletWidget, CheckboxWidget, ChipWidget, RuleWidget, isCheckbox } from "./widgets";
+
+/** The decorations of a document, and the subset of them that hide text (the caret skips those). */
+export interface Decorated {
+  all: DecorationSet;
+  atomic: DecorationSet;
+}
+
+const INLINE_CLASSES: Record<number, string> = {
+  [Kind.HeaderKey]: "cm-zim-header-key",
+  [Kind.Bold]: "cm-zim-bold",
+  [Kind.Italic]: "cm-zim-italic",
+  [Kind.Underline]: "cm-zim-underline",
+  [Kind.Strike]: "cm-zim-strike",
+  [Kind.InlineVerbatim]: "cm-zim-code-inline",
+  [Kind.Superscript]: "cm-zim-sup",
+  [Kind.Subscript]: "cm-zim-sub",
+  [Kind.Link]: "cm-zim-link",
+  [Kind.LinkDisplay]: "cm-zim-link-display",
+  [Kind.Tag]: "cm-zim-tag",
+  [Kind.AutoUrl]: "cm-zim-url",
+  [Kind.AutoEmail]: "cm-zim-url",
+};
+
+/**
+ * Live preview: how a page looks, as decorations over its text. The text itself is never changed.
+ *
+ * Syntax characters (the `**` of bold, the `[[` of a link, the `======` of a heading) are the
+ * `Marker` spans, each owned by the construct it belongs to. A marker is dimmed while a selection
+ * touches its construct and hidden otherwise; `showMarkup` keeps every marker visible. Bullets,
+ * checkboxes and rules are drawn as widgets in place of their characters, and images and anchors
+ * as small chips until the caret enters them.
+ */
+export function buildDecorations(state: EditorState, spans: Spans, showMarkup: boolean): Decorated {
+  const doc = state.doc;
+  const ranges = state.selection.ranges;
+  const touches = (from: number, to: number): boolean => ranges.some((r) => r.from <= to && r.to >= from);
+  const reveal = (from: number, to: number): boolean => showMarkup || touches(from, to);
+
+  const all: Range<Decoration>[] = [];
+  const atomic: Range<Decoration>[] = [];
+
+  const lineDeco = (pos: number, cls: string, style?: string): void => {
+    all.push(Decoration.line({ class: cls, ...(style ? { attributes: { style } } : {}) }).range(pos));
+  };
+  const mark = (from: number, to: number, cls: string): void => {
+    if (from < to) all.push(Decoration.mark({ class: cls }).range(from, to));
+  };
+  const replace = (from: number, to: number, widget?: BulletWidget | CheckboxWidget | ChipWidget | RuleWidget): void => {
+    if (from >= to) return;
+    const range = Decoration.replace(widget ? { widget } : {}).range(from, to);
+    all.push(range);
+    atomic.push(range);
+  };
+  const eachLine = (from: number, to: number, f: (line: Line, index: number, count: number) => void): void => {
+    const first = doc.lineAt(from).number;
+    const last = doc.lineAt(to).number;
+    for (let n = first; n <= last; n++) f(doc.line(n), n - first, last - first + 1);
+  };
+
+  const open: number[] = []; // the chain of spans containing the current one
+  let skipUntil = 0; // spans starting before this are covered by a replacing widget
+  for (let i = 0; i < spans.length; i++) {
+    const from = spans.start(i);
+    const to = spans.end(i);
+    const kind = spans.kind(i);
+    const detail = spans.detail(i);
+    while (open.length && spans.end(open[open.length - 1] as number) <= from) open.pop();
+    const parent = open.length ? (open[open.length - 1] as number) : -1;
+    open.push(i);
+    if (from < skipUntil) continue;
+
+    switch (kind) {
+      case Kind.Header:
+        eachLine(from, to, (line) => lineDeco(line.from, "cm-zim-header"));
+        break;
+
+      case Kind.Heading:
+        lineDeco(doc.lineAt(from).from, `cm-zim-heading cm-zim-h${detail}`);
+        break;
+
+      case Kind.IndentedParagraph:
+        eachLine(from, to, (line) => lineDeco(line.from, "cm-zim-indented", `--zim-depth: ${detail}`));
+        break;
+
+      case Kind.ListItem:
+        lineDeco(doc.lineAt(from).from, "cm-zim-item", `--zim-depth: ${detail}`);
+        break;
+
+      case Kind.ListMarker:
+        if (detail === ListMarker.BULLET) {
+          if (showMarkup) mark(from, to, "cm-zim-list-marker");
+          else replace(from, to, new BulletWidget());
+        } else if (isCheckbox(detail)) {
+          if (showMarkup) mark(from, to, "cm-zim-list-marker");
+          else replace(from, to, new CheckboxWidget(detail));
+          const line = doc.lineAt(from).from;
+          if (detail === ListMarker.CHECKED) lineDeco(line, "cm-zim-item-done");
+          if (detail === ListMarker.XCHECKED) lineDeco(line, "cm-zim-item-dropped");
+        } else {
+          mark(from, to, "cm-zim-list-marker cm-zim-list-number");
+        }
+        break;
+
+      case Kind.VerbatimBlock: {
+        const unterminated = (detail & VERBATIM_UNTERMINATED) !== 0;
+        eachLine(from, to, (line, index, count) => {
+          let cls = "cm-zim-code";
+          if (index === 0) cls += " cm-zim-code-first";
+          if (index === count - 1) cls += " cm-zim-code-last";
+          if (unterminated) cls += " cm-zim-code-open";
+          lineDeco(line.from, cls);
+        });
+        break;
+      }
+
+      case Kind.HorizontalRule:
+        if (reveal(from, to)) mark(from, to, "cm-zim-rule-source");
+        else {
+          replace(from, to, new RuleWidget());
+          skipUntil = to;
+        }
+        break;
+
+      case Kind.Opaque:
+        eachLine(from, to, (line) =>
+          lineDeco(line.from, `cm-zim-opaque ${detail === Opaque.OBJECT ? "cm-zim-object" : "cm-zim-table"}`),
+        );
+        break;
+
+      case Kind.Marker: {
+        const owner = detail;
+        if (reveal(spans.start(owner), spans.end(owner))) mark(from, to, "cm-zim-marker");
+        else replace(from, to);
+        break;
+      }
+
+      case Kind.LinkTarget:
+        // With a display part (detail 1) the target is source, not text: hide it like the brackets.
+        if (detail === 1 && parent >= 0 && !reveal(spans.start(parent), spans.end(parent))) replace(from, to);
+        else mark(from, to, "cm-zim-link-target");
+        break;
+
+      case Kind.Image:
+        if (reveal(from, to)) mark(from, to, "cm-zim-image-source");
+        else {
+          replace(from, to, new ChipWidget("image", imageLabel(state.sliceDoc(from + 2, to - 2))));
+          skipUntil = to;
+        }
+        break;
+
+      case Kind.Anchor:
+        if (reveal(from, to)) mark(from, to, "cm-zim-anchor-source");
+        else {
+          replace(from, to, new ChipWidget("anchor", state.sliceDoc(from + 5, to - 2).trim()));
+          skipUntil = to;
+        }
+        break;
+
+      default: {
+        const cls = INLINE_CLASSES[kind];
+        if (cls) mark(from, to, cls);
+      }
+    }
+  }
+  return { all: Decoration.set(all, true), atomic: Decoration.set(atomic, true) };
+}
+
+/** What to show for an image whose source is hidden: its alt text, else the file name. */
+function imageLabel(source: string): string {
+  const bar = source.lastIndexOf("|");
+  if (bar >= 0 && bar < source.length - 1) return source.slice(bar + 1);
+  const path = source.split(/[?|]/)[0] ?? source;
+  return path.split("/").pop() || path;
+}
+
+export const decorationsField = StateField.define<Decorated>({
+  create: (state) => buildDecorations(state, spansOf(state), state.field(showMarkupField)),
+  update(value, tr) {
+    const changed = tr.docChanged || tr.selection !== undefined || tr.effects.some((e) => e.is(setShowMarkup));
+    return changed ? buildDecorations(tr.state, spansOf(tr.state), tr.state.field(showMarkupField)) : value;
+  },
+  provide: (field) => [
+    EditorView.decorations.from(field, (value) => value.all),
+    EditorView.atomicRanges.of((view) => view.state.field(field).atomic),
+  ],
+});

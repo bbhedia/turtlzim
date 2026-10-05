@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Zim Editor</title>
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <header class="bar">
+      <h1>Zim editor</h1>
+      <label class="button">Open a page…<input id="open" type="file" accept=".txt,text/plain" hidden /></label>
+      <button id="save" type="button">Save a copy</button>
+      <label class="check"><input id="markup" type="checkbox" /> Show markup</label>
+      <button id="sample" type="button">Sample page</button>
+    </header>
+    <main><div id="editor"></div></main>
+    <footer class="status"><span id="status">Loading…</span></footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

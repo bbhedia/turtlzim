@@ -109,9 +109,18 @@ cargo build --release              # in core-rs
 # Core (web / WASM)
 wasm-pack build --target web        # produces the WASM package the web UI imports
 
-# Web app
-npm run dev                         # web client dev server
-npm run build                       # web client production build
+# Zim format crate and its wasm bindings (from the repo root)
+cargo test -p zim-format -p zim-wasm   # unit, fuzz and file-layer tests
+scripts/zim-golden.sh                  # byte-identical round trips on real Zim pages (clones Zim once)
+
+# Web app / Zim editor (web/; see docs/zim-editor-plan.md)
+cd web && npm install
+npm run wasm                        # build core/zim-wasm into web/src/zim-wasm (needs wasm-pack)
+npm run dev                         # dev server
+npm run build                       # typecheck + production build into web/dist
+npm test                            # Vitest: editor logic, headless (ZIM_GOLDEN_DIR=... adds real pages)
+scripts/setup-browser.sh            # once: Chromium + libraries + a font, no root
+npm run test:browser                # the built editor in a real browser (keystrokes, clicks, files)
 
 # Desktop (Tauri)
 npm run tauri dev

@@ -16,6 +16,7 @@
 //! ```
 
 pub mod block;
+pub mod file;
 pub mod header;
 pub mod highlight;
 pub mod inline;
@@ -24,6 +25,7 @@ pub use block::{
     Block, CheckboxState, Heading, HorizontalRule, ListBlock, ListItem, ListMarker, NumberStyle,
     Opaque, Paragraph, Verbatim,
 };
+pub use file::{LineEnding, PageFile};
 pub use header::HeaderField;
 pub use highlight::{highlight, to_utf16, Span, SpanKind};
 pub use inline::{Image, Inline, Link};

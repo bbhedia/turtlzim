@@ -1,0 +1,30 @@
+{
+  "name": "zim-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The shared Zim editor (CodeMirror 6) and its demo page. See docs/zim-editor-plan.md.",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "wasm": "wasm-pack build ../core/zim-wasm --target web --release --out-dir ../../web/src/zim-wasm --out-name zim_wasm --no-pack",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:browser": "node test/browser.mjs"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.13"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "playwright-core": "^1.63.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3"
+  }
+}

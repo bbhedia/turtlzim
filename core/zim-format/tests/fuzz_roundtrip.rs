@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 mod common;
 
+use common::Rng;
+
 use zim_format::inline::{parse_inline, render_inline};
 
 /// The format's punctuation and the tokens that give it something to bite on.
@@ -44,24 +46,6 @@ const LINE_STARTS: &[&str] = &[
     "=== ", "'''", "\t'''", "\t\t'''", "--------------------", "| a | b |", "{{{code: lang=\"x\"",
     "\t{{{", "}}}", "Content-Type: x", "Key: v", " ", "A paragraph line ",
 ];
-
-struct Rng(u64);
-
-impl Rng {
-    /// xorshift64*
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
-    }
-}
 
 /// The first promise the crate makes about any text that does not hold for `text`, if any: the
 /// round trip, a stable parse, the inline round trip, and well-formed syntax spans.

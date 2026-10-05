@@ -376,3 +376,41 @@ fn real_notebooks_have_well_formed_spans() {
         problems.join("\n")
     );
 }
+
+/// The file layer on the bytes of real files: split into {mark, line ending, text} and put back,
+/// every file comes out identical, and the one that isn't UTF-8 is refused rather than mangled.
+#[test]
+#[ignore = "needs a corpus of real Zim pages: set ZIM_GOLDEN_DIR (see the module docs)"]
+fn real_notebooks_survive_the_file_layer() {
+    let (mut files, mut refused, mut with_mark, mut crlf, mut mixed) = (0, Vec::new(), 0, 0, 0);
+    let mut problems = Vec::new();
+    for path in corpus() {
+        let bytes =
+            std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        files += 1;
+        let Ok(file) = zim_format::PageFile::decode(&bytes) else {
+            refused.push(path.display().to_string());
+            continue;
+        };
+        with_mark += usize::from(file.bom);
+        crlf += usize::from(file.line_ending == zim_format::LineEnding::Crlf);
+        mixed += usize::from(file.line_ending == zim_format::LineEnding::Mixed);
+        if file.encode() != bytes {
+            problems.push(format!(
+                "{}: decode then encode changed the bytes",
+                path.display()
+            ));
+        } else if zim_format::parse(&file.text).serialize() != file.text {
+            problems.push(format!(
+                "{}: the page text doesn't round-trip",
+                path.display()
+            ));
+        } else if let Some(problem) = common::span_problem(&file.text) {
+            problems.push(format!("{}: spans: {problem}", path.display()));
+        }
+    }
+    println!(
+        "{files} files: {with_mark} with a byte-order mark, {crlf} CRLF, {mixed} mixed; refused as not UTF-8: {refused:?}"
+    );
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
