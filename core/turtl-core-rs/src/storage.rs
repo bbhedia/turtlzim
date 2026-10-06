@@ -14,7 +14,7 @@ use crate::models::model::{self};
 use crate::models::protected::Protected;
 use crate::models::storable::Storable;
 
-use crate::error::TResult;
+use crate::error::{TResult, TError};
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 thread_local! {
@@ -137,6 +137,37 @@ impl Storage {
             conn: conn,
             dumpy: dumpy,
         })
+    }
+
+    /// Start a batch: every save and delete from now until `commit()` is one change that happens whole or
+    /// not at all (`rollback()` undoes all of it; so does a crash, or closing the db, before `commit()`).
+    /// It is also what makes saving many things fast, since the db is written once.
+    pub fn begin(&self) -> TResult<()> {
+        if !self.conn.is_autocommit() {
+            return TErr!(TError::BadValue(String::from("a batch of changes is already open")));
+        }
+        Ok(self.conn.execute_batch("BEGIN IMMEDIATE")?)
+    }
+
+    /// End the batch `begin()` started, keeping what was changed in it.
+    pub fn commit(&self) -> TResult<()> {
+        if self.conn.is_autocommit() {
+            return TErr!(TError::BadValue(String::from("there is no batch of changes open")));
+        }
+        Ok(self.conn.execute_batch("COMMIT")?)
+    }
+
+    /// End the batch `begin()` started, undoing everything that was changed in it.
+    pub fn rollback(&self) -> TResult<()> {
+        if self.conn.is_autocommit() {
+            return TErr!(TError::BadValue(String::from("there is no batch of changes open")));
+        }
+        Ok(self.conn.execute_batch("ROLLBACK")?)
+    }
+
+    /// Whether a batch is open (see `begin()`).
+    pub fn in_batch(&self) -> bool {
+        !self.conn.is_autocommit()
     }
 
     /// Save a model to our db. Make sure it's serialized before handing it in.
@@ -422,7 +453,53 @@ mod tests {
         assert_eq!(storage.kv_keys_with_prefix("jobs:").unwrap(), vec!["jobs:a", "jobs:b"]);
     }
 
+    fn shiba(name: &str) -> Shiba {
+        let mut model = Shiba::new_with_id().unwrap();
+        model.generate_key().unwrap();
+        model.color = Some(String::from("sesame"));
+        model.name = Some(String::from(name));
+        model.serialize().unwrap();
+        model
+    }
+
+    /// Changes made in a batch are all kept by `commit()` and all undone by `rollback()`, deletes
+    /// included, and a batch can't be opened twice or ended twice.
+    fn batches_are_whole_or_nothing_body() {
+        let storage = pretest();
+        let (kept, doomed, added) = (shiba("kept"), shiba("doomed"), shiba("added"));
+        storage.save(&kept).unwrap();
+        storage.save(&doomed).unwrap();
+        let count = |storage: &Storage| storage.all::<Shiba>("shibas").unwrap().len();
+        assert!(!storage.in_batch());
+        assert!(storage.commit().is_err() && storage.rollback().is_err(), "nothing to end");
+
+        storage.begin().unwrap();
+        assert!(storage.in_batch());
+        assert!(storage.begin().is_err(), "a batch inside a batch is refused");
+        storage.save(&added).unwrap();
+        storage.delete(&doomed).unwrap();
+        assert_eq!(count(&storage), 2);
+        storage.rollback().unwrap();
+        assert!(!storage.in_batch());
+        assert_eq!(count(&storage), 2);
+        assert!(storage.get::<Shiba>("shibas", doomed.id().unwrap()).unwrap().is_some(), "the delete was undone");
+        assert!(storage.get::<Shiba>("shibas", added.id().unwrap()).unwrap().is_none(), "the save was undone");
+
+        storage.begin().unwrap();
+        storage.save(&added).unwrap();
+        storage.delete(&doomed).unwrap();
+        storage.commit().unwrap();
+        assert!(!storage.in_batch());
+        assert_eq!(count(&storage), 2);
+        assert!(storage.get::<Shiba>("shibas", doomed.id().unwrap()).unwrap().is_none());
+        assert!(storage.get::<Shiba>("shibas", added.id().unwrap()).unwrap().is_some());
+        // and the connection is as good as new: a batch can be had again
+        storage.begin().unwrap();
+        storage.rollback().unwrap();
+    }
+
     crypto_test!(saves_retrieves_models, saves_retrieves_models_body);
     crypto_test!(deletes_models, deletes_models_body);
+    crypto_test!(batches_are_whole_or_nothing, batches_are_whole_or_nothing_body);
 }
 

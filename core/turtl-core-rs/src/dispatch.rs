@@ -249,6 +249,19 @@ async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             });
             Ok(profile_data)
         }
+        // changes made between `begin` and `commit` happen whole or not at all (see `Turtl::batch_begin()`)
+        "profile:batch:begin" => {
+            turtl.batch_begin()?;
+            Ok(json!({}))
+        }
+        "profile:batch:commit" => {
+            turtl.batch_commit()?;
+            Ok(json!({}))
+        }
+        "profile:batch:rollback" => {
+            turtl.batch_rollback()?;
+            Ok(json!({}))
+        }
         "profile:sync:model" => {
             let action: SyncAction = match jedi::get(&["2"], &data) {
                 Ok(action) => action,
@@ -349,9 +362,13 @@ async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             }))
         }
         "profile:note:get-file" => {
-            let note_id = jedi::get(&["2"], &data)?;
-            let notes: Vec<Note> = turtl.load_notes(&vec![note_id])?;
-            let bin = FileData::load_file(turtl, &notes[0])?;
+            let note_id: String = jedi::get(&["2"], &data)?;
+            let notes: Vec<Note> = turtl.load_notes(&vec![note_id.clone()])?;
+            let note = match notes.first() {
+                Some(note) => note,
+                None => return TErr!(TError::NotFound(format!("note {} not found", note_id))),
+            };
+            let bin = FileData::load_file(turtl, note)?;
             let base64 = crypto::to_base64(&bin)?;
             Ok(Value::String(base64))
         }

@@ -826,6 +826,48 @@ impl Turtl {
         protected::map_deserialize(self, notes)
     }
 
+    /// Run `op` on the user's database.
+    fn with_user_db<T, F>(&self, op: F) -> TResult<T>
+        where F: FnOnce(&Storage) -> TResult<T>
+    {
+        let db_guard = lock!(self.db);
+        match db_guard.as_ref() {
+            Some(db) => op(db),
+            None => TErr!(TError::MissingField(String::from("Turtl.db"))),
+        }
+    }
+
+    /// Start a batch of changes: until `batch_commit()`, what is saved or deleted is one change that
+    /// happens whole or not at all (a crash or a logout before the commit undoes it too), and saving
+    /// many things is fast because the database is written once. Only for a core without a server, since
+    /// a sync that came along would send what is not yet kept. One batch at a time, and whatever is saved
+    /// while one is open joins it, so whoever opens it makes the changes until it is closed.
+    pub fn batch_begin(&self) -> TResult<()> {
+        if !self.local_only {
+            return TErr!(TError::Msg(String::from("batches of changes are for a core without a server")));
+        }
+        self.with_user_db(|db| db.begin())
+    }
+
+    /// End the open batch, keeping what it changed.
+    pub fn batch_commit(&self) -> TResult<()> {
+        self.with_user_db(|db| db.commit())
+    }
+
+    /// End the open batch, undoing everything it changed: in the database, and in what is held in memory
+    /// (the profile, the search index), which changed as the batch went and is made what the database
+    /// says again.
+    pub fn batch_rollback(&self) -> TResult<()> {
+        self.with_user_db(|db| db.rollback())?;
+        {
+            let mut profile_guard = lockw!(self.profile);
+            profile_guard.wipe();
+            *profile_guard = Profile::new();
+        }
+        self.load_profile()?;
+        self.index_notes()
+    }
+
     /// Take all the (encrypted) notes in our profile data then decrypt, index,
     /// and free them. The idea is we can get a set of note IDs from a search,
     /// but we're not holding all our notes decrypted in memory at all times.

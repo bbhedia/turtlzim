@@ -64,6 +64,27 @@ impl ToSql for SearchVal {
     }
 }
 
+/// Run `work` so that what it writes happens whole or not at all. A savepoint is a transaction of its own when
+/// there is none open, and part of the open one when there is (so a batch the caller started is still one
+/// change), which is why this can be used anywhere. It also makes the several statements of a write one
+/// commit instead of one each.
+fn atomically<T, F>(conn: &Connection, work: F) -> DResult<T>
+    where F: FnOnce() -> DResult<T>
+{
+    conn.execute_batch("SAVEPOINT dumpy_op")?;
+    match work() {
+        Ok(x) => {
+            conn.execute_batch("RELEASE dumpy_op")?;
+            Ok(x)
+        }
+        Err(e) => {
+            // (if undoing fails there is nothing more to be done, and the first error is the one to report)
+            let _ = conn.execute_batch("ROLLBACK TO dumpy_op; RELEASE dumpy_op");
+            Err(e)
+        }
+    }
+}
+
 /// The Dumpy struct stores our schema and acts as a namespace for our public
 /// functions.
 pub struct Dumpy {
@@ -90,8 +111,13 @@ impl Dumpy {
         Ok(())
     }
 
-    /// Store an object!
+    /// Store an object! The object and its index rows are written together or not at all (so a failure, or
+    /// a crash, never leaves an object without its indexes), also inside a transaction the caller has open.
     pub fn store(&self, conn: &Connection, table: &String, obj: &Value) -> DResult<()> {
+        atomically(conn, || self.store_in_pieces(conn, table, obj))
+    }
+
+    fn store_in_pieces(&self, conn: &Connection, table: &String, obj: &Value) -> DResult<()> {
         let id: String = match jedi::get_opt(&["id"], obj) {
             Some(id) => id,
             None => return Err(DError::Msg(format!("Dumpy.store() -- object being saved to table `{}` is missing `id` field", table))),
@@ -206,11 +232,13 @@ impl Dumpy {
         Ok(())
     }
 
-    /// Remove all traces of an object.
+    /// Remove all traces of an object (together or not at all, like `store()`).
     pub fn delete(&self, conn: &Connection, table: &String, id: &String) -> DResult<()> {
-        conn.execute("DELETE FROM dumpy_objects WHERE table_name = $1 AND id = $2", &[table, id])?;
-        conn.execute("DELETE FROM dumpy_index WHERE table_name = $1 AND object_id = $2", &[table, id])?;
-        Ok(())
+        atomically(conn, || {
+            conn.execute("DELETE FROM dumpy_objects WHERE table_name = $1 AND id = $2", &[table, id])?;
+            conn.execute("DELETE FROM dumpy_index WHERE table_name = $1 AND object_id = $2", &[table, id])?;
+            Ok(())
+        })
     }
 
     /// Get an object from dumpy's store
@@ -540,6 +568,74 @@ mod tests {
         dumpy.kv_delete(&conn, "some_setting").unwrap();
         let val = dumpy.kv_get(&conn, "some_setting").unwrap();
         assert_eq!(val, None);
+    }
+
+    fn object_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM dumpy_objects", [], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_failed_store_leaves_nothing_behind() {
+        let conn = Connection::open_in_memory().unwrap();
+        // an index that names no fields: storing gets as far as writing the object, then fails
+        let schema = jedi::parse(&String::from(r#"{"broken":{"indexes":[{"name":"oops"}]},"notes":{"indexes":[{"fields":["boards"]}]}}"#)).unwrap();
+        let dumpy = Dumpy::new(schema);
+        dumpy.init(&conn).unwrap();
+        let note = jedi::parse(&String::from(r#"{"id":"a","boards":["1","2"],"body":"x"}"#)).unwrap();
+        dumpy.store(&conn, &String::from("notes"), &note).unwrap();
+        assert_eq!((object_count(&conn), index_count(&conn)), (1, 2));
+
+        assert!(dumpy.store(&conn, &String::from("broken"), &note).is_err());
+        // the object the failed store wrote first is gone (and the one stored before is as it was)
+        assert_eq!((object_count(&conn), index_count(&conn)), (1, 2));
+        assert!(dumpy.get(&conn, &String::from("broken"), &String::from("a")).unwrap().is_none());
+        assert!(conn.is_autocommit(), "no transaction is left open");
+
+        // and a failed store of a changed object keeps the old one whole, indexes included
+        let changed = jedi::parse(&String::from(r#"{"id":"a","boards":["9"],"body":"y"}"#)).unwrap();
+        assert!(dumpy.store(&conn, &String::from("broken"), &changed).is_err());
+        let kept = dumpy.get(&conn, &String::from("notes"), &String::from("a")).unwrap().unwrap();
+        assert_eq!(jedi::get::<String>(&["body"], &kept).unwrap(), "x");
+        assert_eq!(index_count(&conn), 2);
+    }
+
+    #[test]
+    fn writes_join_the_transaction_that_is_open() {
+        let (conn, dumpy) = pre_test();
+        dumpy.init(&conn).unwrap();
+        let note1 = jedi::parse(&String::from(r#"{"id":"n1","user_id":"1","boards":["a","b"],"body":"x"}"#)).unwrap();
+        let note2 = jedi::parse(&String::from(r#"{"id":"n2","user_id":"2","boards":["a"],"body":"y"}"#)).unwrap();
+        dumpy.store(&conn, &String::from("notes"), &note1).unwrap();
+        let before = (object_count(&conn), index_count(&conn));
+
+        // rolled back: a store, a second store, and a delete are all undone together
+        conn.execute_batch("BEGIN").unwrap();
+        dumpy.store(&conn, &String::from("notes"), &note2).unwrap();
+        dumpy.delete(&conn, &String::from("notes"), &String::from("n1")).unwrap();
+        assert_eq!(object_count(&conn), 1);
+        assert!(!conn.is_autocommit(), "the writes did not end the transaction");
+        conn.execute_batch("ROLLBACK").unwrap();
+        assert_eq!((object_count(&conn), index_count(&conn)), before);
+        assert!(dumpy.get(&conn, &String::from("notes"), &String::from("n1")).unwrap().is_some());
+        assert!(dumpy.get(&conn, &String::from("notes"), &String::from("n2")).unwrap().is_none());
+
+        // committed: all there
+        conn.execute_batch("BEGIN").unwrap();
+        dumpy.store(&conn, &String::from("notes"), &note2).unwrap();
+        dumpy.delete(&conn, &String::from("notes"), &String::from("n1")).unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        assert!(dumpy.get(&conn, &String::from("notes"), &String::from("n1")).unwrap().is_none());
+        assert!(dumpy.get(&conn, &String::from("notes"), &String::from("n2")).unwrap().is_some());
+
+        // a failure inside the transaction undoes only that write, and the transaction goes on
+        let broken = Dumpy::new(jedi::parse(&String::from(r#"{"broken":{"indexes":[{"name":"oops"}]}}"#)).unwrap());
+        conn.execute_batch("BEGIN").unwrap();
+        dumpy.store(&conn, &String::from("notes"), &note1).unwrap();
+        assert!(broken.store(&conn, &String::from("broken"), &note2).is_err());
+        assert!(!conn.is_autocommit());
+        conn.execute_batch("COMMIT").unwrap();
+        assert!(dumpy.get(&conn, &String::from("notes"), &String::from("n1")).unwrap().is_some());
+        assert!(dumpy.get(&conn, &String::from("broken"), &String::from("n2")).unwrap().is_none());
     }
 
     #[test]

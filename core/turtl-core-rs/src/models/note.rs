@@ -1,3 +1,4 @@
+use ::jedi::Value;
 use crate::turtl::Turtl;
 use crate::error::TResult;
 use crate::models::model::Model;
@@ -60,6 +61,11 @@ protected! {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[protected_field(private)]
         pub color: Option<i64>,
+        /// Whatever a client keeps about a note that no other field is for: a JSON object, encrypted with the
+        /// rest of the private fields, which the core does not look into or search.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[protected_field(private)]
+        pub props: Option<Value>,
     }
 }
 

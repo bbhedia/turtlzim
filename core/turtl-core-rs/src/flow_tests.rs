@@ -811,6 +811,135 @@ async fn local_only() {
 }
 async_test!(local_only_flow, local_only());
 
+/// Changes made between `profile:batch:begin` and `commit` are all kept, and between `begin` and `rollback`
+/// all undone: new spaces and notes, edits, and deletes, in the database and in what the core holds in
+/// memory (the profile, the search). Misuse is refused, and a core with a server doesn't batch at all.
+async fn local_batches() {
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.local_only = true;
+    let joined = ask(&turtl, json!(["b0", "user:join", "Batch-Vault", "a passphrase for batches"])).await;
+    assert_eq!(joined["e"], json!(0), "{}", joined);
+
+    let mut counter = 0;
+    macro_rules! mid { () => {{ counter += 1; format!("b{}", counter) }} }
+    macro_rules! ok { ($args:expr) => {{
+        let res = ask(&turtl, $args).await;
+        assert_eq!(res["e"], json!(0), "{}", res);
+        res["d"].clone()
+    }} }
+    macro_rules! refused { ($args:expr) => {{
+        let res = ask(&turtl, $args).await;
+        assert_eq!(res["e"], json!(1), "should have been refused: {}", res);
+        res["d"].clone()
+    }} }
+    let page = |space_id: &str, title: &str, text: &str| json!({
+        "space_id": space_id, "user_id": "0", "type": "zim-page", "title": title, "text": text,
+        "props": {"bom": title.len() % 2 == 0, "eol": "crlf", "modified": 1759000000000i64},
+    });
+    // the pages of a space as the core lists them: (title, text), by title
+    macro_rules! pages_of { ($space_id:expr) => {{
+        let found = ok!(json!([mid!(), "profile:find-notes", {"space_id": $space_id, "per_page": 1000}]));
+        let mut pages: Vec<(String, String)> = found["notes"].as_array().unwrap().iter()
+            .map(|note| (String::from(note["title"].as_str().unwrap()), String::from(note["text"].as_str().unwrap_or("")))).collect();
+        pages.sort();
+        assert_eq!(found["total"], json!(pages.len()));
+        pages
+    }} }
+    let space_names = |turtl: &Turtl| -> Vec<String> {
+        let mut names: Vec<String> = lockr!(turtl.profile).spaces.iter().map(|space| space.title.clone().unwrap()).collect();
+        names.sort();
+        names
+    };
+
+    // a notebook made as usual
+    let space = ok!(json!([mid!(), "profile:sync:model", "add", "space", {"user_id": "0", "title": "Alpha", "color": "#408080"}]));
+    let alpha = String::from(space["id"].as_str().unwrap());
+    let one = ok!(json!([mid!(), "profile:sync:model", "add", "note", page(&alpha, "One", "first\n")]));
+    let two = ok!(json!([mid!(), "profile:sync:model", "add", "note", page(&alpha, "Two", "second\n")]));
+    let one_id = String::from(one["id"].as_str().unwrap());
+    let two_id = String::from(two["id"].as_str().unwrap());
+    assert_eq!(one["props"], json!({"bom": false, "eol": "crlf", "modified": 1759000000000i64}), "props come back as they went in");
+
+    // a batch that is kept: a new space with pages, an edit, a delete
+    ok!(json!([mid!(), "profile:batch:begin"]));
+    let space = ok!(json!([mid!(), "profile:sync:model", "add", "space", {"user_id": "0", "title": "Beta", "color": "#439645"}]));
+    let beta = String::from(space["id"].as_str().unwrap());
+    for title in &["B1", "B2", "B3"] {
+        ok!(json!([mid!(), "profile:sync:model", "add", "note", page(&beta, title, &format!("text of {}\n", title))]));
+    }
+    ok!(json!([mid!(), "profile:sync:model", "edit", "note", {"id": one_id, "user_id": "0", "space_id": alpha, "type": "zim-page", "title": "One", "text": "first, edited\n"}]));
+    ok!(json!([mid!(), "profile:sync:model", "delete", "note", {"id": two_id}]));
+    // (inside the batch everything is already to be seen, the search included)
+    assert_eq!(pages_of!(beta).len(), 3);
+    ok!(json!([mid!(), "profile:batch:commit"]));
+    assert_eq!(space_names(&turtl), vec!["Alpha", "Beta"]);
+    assert_eq!(pages_of!(alpha), vec![(String::from("One"), String::from("first, edited\n"))]);
+    assert_eq!(pages_of!(beta).len(), 3);
+    let found = ok!(json!([mid!(), "profile:find-notes", {"space_id": beta, "text": "B2"}]));
+    assert_eq!(found["total"], json!(1));
+
+    // a batch that is thrown away: a new space and pages, an edit, a delete (of a page, and of a whole space)
+    ok!(json!([mid!(), "profile:batch:begin"]));
+    let space = ok!(json!([mid!(), "profile:sync:model", "add", "space", {"user_id": "0", "title": "Gamma", "color": "#800000"}]));
+    let gamma = String::from(space["id"].as_str().unwrap());
+    ok!(json!([mid!(), "profile:sync:model", "add", "note", page(&gamma, "G1", "gamma\n")]));
+    ok!(json!([mid!(), "profile:sync:model", "add", "note", page(&alpha, "Three", "third\n")]));
+    ok!(json!([mid!(), "profile:sync:model", "edit", "note", {"id": one_id, "user_id": "0", "space_id": alpha, "type": "zim-page", "title": "One", "text": "first, edited again\n"}]));
+    ok!(json!([mid!(), "profile:sync:model", "delete", "note", {"id": one_id}]));
+    ok!(json!([mid!(), "profile:sync:model", "delete", "space", {"id": beta}]));
+    assert_eq!(space_names(&turtl), vec!["Alpha", "Gamma"], "inside the batch the changes are to be seen");
+    ok!(json!([mid!(), "profile:batch:rollback"]));
+    assert_eq!(space_names(&turtl), vec!["Alpha", "Beta"], "the new space is gone, the deleted one is back");
+    assert_eq!(pages_of!(alpha), vec![(String::from("One"), String::from("first, edited\n"))]);
+    assert_eq!(pages_of!(beta).len(), 3, "everything in the space that was deleted is back and can be found");
+    let found = ok!(json!([mid!(), "profile:find-notes", {"space_id": beta, "text": "B2"}]));
+    assert_eq!(found["total"], json!(1));
+    assert_eq!(pages_of!(gamma), Vec::<(String, String)>::new());
+    let profile = ok!(json!([mid!(), "profile:load"]));
+    assert_eq!(profile["spaces"].as_array().unwrap().len(), 2);
+
+    // a change that fails in the middle of a batch is undone with the rest, by whoever opened it
+    ok!(json!([mid!(), "profile:batch:begin"]));
+    ok!(json!([mid!(), "profile:sync:model", "add", "note", page(&alpha, "Half", "half\n")]));
+    let refusal = refused!(json!([mid!(), "profile:sync:model", "add", "note", {"space_id": alpha, "user_id": "0", "title": "no type"}]));
+    assert_eq!(refusal["type"], json!("validation"));
+    ok!(json!([mid!(), "profile:batch:rollback"]));
+    assert_eq!(pages_of!(alpha).len(), 1);
+
+    // a file in a batch that is thrown away is not there afterwards (natively the file itself stays on
+    // disk, without a note: the note is what makes it reachable)
+    ok!(json!([mid!(), "profile:batch:begin"]));
+    let file_note = ok!(json!([mid!(), "profile:sync:model", "add", "note", {
+        "space_id": alpha, "user_id": "0", "type": "zim-file", "title": "One/pic.png",
+        "file": {"name": "One/pic.png", "type": "image/png", "filedata": {"data": crypto::to_base64(&vec![1u8, 2, 3]).unwrap()}},
+    }]));
+    let file_note_id = String::from(file_note["id"].as_str().unwrap());
+    ok!(json!([mid!(), "profile:note:get-file", file_note_id]));
+    ok!(json!([mid!(), "profile:batch:rollback"]));
+    let gone = refused!(json!([mid!(), "profile:note:get-file", file_note_id]));
+    assert_eq!(gone["type"], json!("not_found"));
+
+    // misuse: no batch open, or one already
+    refused!(json!([mid!(), "profile:batch:commit"]));
+    refused!(json!([mid!(), "profile:batch:rollback"]));
+    assert_eq!(space_names(&turtl), vec!["Alpha", "Beta"], "a refused rollback changes nothing");
+    ok!(json!([mid!(), "profile:batch:begin"]));
+    refused!(json!([mid!(), "profile:batch:begin"]));
+    ok!(json!([mid!(), "profile:batch:commit"]));
+
+    // nothing was ever queued for a server, and none was asked for anything
+    assert!(sync_records(&turtl.db).is_empty());
+    assert_eq!(requests(&server).await, Vec::<String>::new());
+
+    // a core with a server doesn't batch: a sync loop could send what a rollback then takes back
+    let other = test_turtl(&server);
+    other.join(String::from("Batch@Test.com"), String::from("batchpassphrase")).await.unwrap();
+    let refusal = ask(&other, json!(["b-server", "profile:batch:begin"])).await;
+    assert_eq!(refusal["e"], json!(1), "{}", refusal);
+}
+async_test!(local_batches_flow, local_batches());
+
 /// A folder for the databases of the test on this thread, kept as files for as long as this lives (and
 /// deleted when it goes). Without it the databases of a test are in memory.
 #[cfg(not(target_arch = "wasm32"))]
@@ -864,7 +993,7 @@ async fn local_only_on_disk() {
     let passphrase = "correct horse battery staple 8213";
     let secrets = [
         "Zebra Journal", "Secret Plans Page", "the vault door code is 7391", "diagram-4417.png",
-        "ATTACHMENT-BYTES-5529", "image/x-secret", passphrase,
+        "ATTACHMENT-BYTES-5529", "image/x-secret", passphrase, "props-secret-3318", "Unfinished page 6642",
     ];
 
     let (user_id, space_id, page_id, file_note_id) = {
@@ -878,6 +1007,7 @@ async fn local_only_on_disk() {
         let space_id = String::from(space["d"]["id"].as_str().unwrap());
         let page = ask(&turtl, json!(["d3", "profile:sync:model", "add", "note", {
             "space_id": space_id, "user_id": "0", "type": "text", "title": secrets[1], "text": format!("{}.\n", secrets[2]),
+            "props": {"origin": secrets[7]},
         }])).await;
         assert_eq!(page["e"], json!(0), "{}", page);
         let page_id = String::from(page["d"]["id"].as_str().unwrap());
@@ -888,6 +1018,14 @@ async fn local_only_on_disk() {
         }])).await;
         assert_eq!(file_note["e"], json!(0), "{}", file_note);
         let file_note_id = String::from(file_note["d"]["id"].as_str().unwrap());
+
+        // a batch that is still open when the account is logged out (or the page closed) is undone
+        let begun = ask(&turtl, json!(["d4b", "profile:batch:begin"])).await;
+        assert_eq!(begun["e"], json!(0), "{}", begun);
+        let unfinished = ask(&turtl, json!(["d4c", "profile:sync:model", "add", "note", {
+            "space_id": space_id, "user_id": "0", "type": "text", "title": secrets[8], "text": "never committed\n",
+        }])).await;
+        assert_eq!(unfinished["e"], json!(0), "{}", unfinished);
         turtl.logout().unwrap();
         (user_id, space_id, page_id, file_note_id)
     };
@@ -912,6 +1050,7 @@ async fn local_only_on_disk() {
     let page = notes["d"]["notes"].as_array().unwrap().iter().find(|note| note["id"] == json!(page_id)).unwrap().clone();
     assert_eq!(page["title"], json!(secrets[1]));
     assert_eq!(page["text"], json!(format!("{}.\n", secrets[2])));
+    assert_eq!(page["props"], json!({"origin": secrets[7]}));
     let file = ask(&turtl, json!(["d10", "profile:note:get-file", file_note_id])).await;
     assert_eq!(file["e"], json!(0), "{}", file);
     assert_eq!(
