@@ -97,6 +97,8 @@ export class Vault {
   private readonly connect: () => CoreTransport;
   private readonly persistence: Persistence | null;
   private readonly listeners = new Set<(event: VaultEvent) => void>();
+  /** Whether the browser promised to keep the vault's data when it is short of room (null: not asked, or not told). Without that promise it may delete it. */
+  persisted: boolean | null = null;
   /** The unlock or lock in progress: they go one at a time. */
   private busy: Promise<unknown> = Promise.resolve();
 
@@ -127,7 +129,6 @@ export class Vault {
       this.client = null;
       this.emit({ kind: "lost", reason });
     });
-    void this.askToKeep();
     this.emit({ kind: "unlocked" });
   }
 
@@ -167,6 +168,7 @@ export class Vault {
         throw error;
       }
       this.adopt(client);
+      await this.askToKeep();
     });
   }
 
@@ -190,6 +192,7 @@ export class Vault {
         throw error;
       }
       this.adopt(client);
+      void this.askToKeep();
     });
   }
 
@@ -266,9 +269,10 @@ export class Vault {
   /** Ask the browser not to clear the vault's data when it is short of room: the data can't be recovered if it does. */
   private async askToKeep(): Promise<void> {
     try {
-      await navigator.storage?.persist?.();
+      this.persisted = (await navigator.storage?.persist?.()) ?? null;
     } catch {
       // not allowed here: the notebooks are kept all the same, just not guaranteed to stay
+      this.persisted = null;
     }
   }
 }

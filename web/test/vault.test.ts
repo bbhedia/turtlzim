@@ -1,7 +1,7 @@
 // The vault and the client of the core, in Node: the core runs in this process (see helpers/direct-core.ts),
 // which keeps its databases in memory. What needs a real browser (the Worker, the private file system,
 // data surviving a reload) is in the browser test.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CoreClient, CoreError } from "../src/vault/core-client";
 import type { CoreTransport } from "../src/vault/core-client";
 import { NoVaultError, Vault, VaultBusyError, VaultExistsError, VaultUnavailableError, WrongPassphraseError, checkPassphrase } from "../src/vault/vault";
@@ -292,6 +292,46 @@ describe("the vault", () => {
     await vault.unlock(PASSPHRASE);
     await vault.lock();
     expect(events).toEqual(["unlocked", "lost: out of memory", "unlocked", "locked"]);
+  });
+
+  describe("whether the browser promised to keep the data", () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    /** An engine with no vault in it yet, which makes one when asked. */
+    const emptyEngine = (): CoreTransport => {
+      const transport: CoreTransport = {
+        onMessage: null,
+        onLost: null,
+        async boot() {},
+        send(message: string) {
+          const [id, command] = JSON.parse(message) as string[];
+          setTimeout(() => transport.onMessage?.("any", JSON.stringify({ id, e: 0, d: command === "user:local-accounts" ? [] : {} })), 0);
+        },
+        async close() {},
+      };
+      return transport;
+    };
+
+    for (const answer of [true, false] as const) {
+      it(`knows it when the browser says ${answer}`, async () => {
+        vi.stubGlobal("navigator", { storage: { persist: async () => answer } });
+        const vault = new Vault({ persistence: null, connect: emptyEngine });
+        expect(vault.persisted).toBeNull();
+        await vault.create(PASSPHRASE);
+        expect(vault.persisted).toBe(answer);
+      });
+    }
+
+    it("stays unknown when the browser can't be asked, or refuses to answer", async () => {
+      vi.stubGlobal("navigator", {});
+      const none = new Vault({ persistence: null, connect: emptyEngine });
+      await none.create(PASSPHRASE);
+      expect(none.persisted).toBeNull();
+      vi.stubGlobal("navigator", { storage: { persist: async () => { throw new Error("not allowed"); } } });
+      const refusing = new Vault({ persistence: null, connect: emptyEngine });
+      await refusing.create(PASSPHRASE);
+      expect(refusing.persisted).toBeNull();
+    });
   });
 
   it("explains why the data can't be kept, or is in use, instead of showing what the core said", async () => {

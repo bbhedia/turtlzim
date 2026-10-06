@@ -16,7 +16,7 @@
 // contains this text). Needs python3 (its zipfile module reads and writes the zips this test checks).
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { delimiter, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createStaticServer } from "../scripts/serve.mjs";
@@ -1089,7 +1089,7 @@ try {
       const dialog = ui.dialog();
       await dialog.waitFor();
       const into = dialog.getByLabel("Import as");
-      const label = await into.locator("option").nth(1).innerText();
+      const label = await into.locator('option[value="here"]').innerText();
       assertEqual(label, expectedLabel, "the dialog says what would be replaced");
       await into.selectOption("here");
       await dialog.getByRole("button", { name: "Import", exact: true }).click();
@@ -1748,6 +1748,458 @@ try {
     for (const name of ["New page", "Rename", "Attach…", "Delete"]) {
       const box = await page.getByRole("button", { name, exact: true }).boundingBox();
       assert(box && box.x >= 0 && box.x + box.width <= 390, `the ${name} button is on the screen`);
+    }
+  });
+
+  // ==========================================================================================
+  // Encrypted notebooks, through the interface
+  // ==========================================================================================
+  const PASSPHRASE = "pale river stone lantern";
+  const topDialog = (page) => page.locator("dialog.dialog").last();
+  const noDialogs = (page) => page.waitForFunction(() => document.querySelectorAll("dialog.dialog").length === 0);
+  const vaultDialog = (page, title) => page.locator("dialog.dialog", { has: page.getByRole("heading", { name: title, exact: true }) });
+  const isEncryptedOpen = (page) => page.waitForFunction(() => window.__zim.app.session?.info.kind === "encrypted");
+  const isOpenNotebook = (page) => page.waitForFunction(() => window.__zim.app.session?.info.kind === "open");
+
+  /** New notebook… of the encrypted kind. The first time that makes the vault, which asks for a passphrase. */
+  async function newEncryptedNotebook(ui, title, { first = true, passphrase = PASSPHRASE, start = "empty" } = {}) {
+    const { page } = ui;
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+    const dialog = topDialog(page);
+    await dialog.getByLabel("Name").fill(title);
+    await dialog.getByLabel("Kind").selectOption("encrypted");
+    await dialog.getByLabel("Start with").selectOption(start);
+    await dialog.getByRole("button", { name: "Create", exact: true }).click();
+    if (first) {
+      const making = vaultDialog(page, "Encrypted notebooks");
+      await making.waitFor();
+      await making.getByLabel("Passphrase", { exact: true }).fill(passphrase);
+      await making.getByLabel("Passphrase again").fill(passphrase);
+      await making.getByLabel("I understand").check();
+      await making.getByRole("button", { name: "Create encrypted notebooks" }).click();
+    }
+    await isEncryptedOpen(page);
+    // a browser that won't promise to keep the data says so, once, after the first notebook is made (see the scenario for that)
+    const told = page.locator("dialog.dialog", { hasText: "Keep a copy of encrypted notebooks" });
+    if (first) await told.waitFor({ timeout: 3000 }).then(() => told.getByRole("button", { name: "OK" }).click(), () => undefined);
+    await noDialogs(page);
+  }
+
+  /** What the browser is keeping for this page outside the notebooks: the address, the title, the history entry, localStorage and sessionStorage. */
+  const visibleOutside = (page) =>
+    page.evaluate(() => ({ title: document.title, hash: location.hash, url: location.href, state: JSON.stringify(history.state), local: JSON.stringify({ ...localStorage }), session: JSON.stringify({ ...sessionStorage }) }));
+
+  await app("an encrypted notebook is made with a passphrase, written in, locked, and unlocked again after a reload", {}, async (ui) => {
+    const { page } = ui;
+    await newEncryptedNotebook(ui, "Diary");
+    assertEqual(await ui.notebookTitle(), "Diary", "the new notebook is open");
+    assert(await page.locator(".notebook-button .badge").isVisible(), "and marked as encrypted");
+    assert(await page.locator(".lock-button").isVisible(), "the Lock button is there");
+    assertEqual(await ui.current(), "Home", "it opens at its home page");
+
+    await ui.typeAtEnd("The vault door code is 7391.\n");
+    await ui.goto("Secrets:Plans");
+    await ui.typeAtEnd("Meet at the old mill.\n");
+    await ui.flush();
+    assertEqual(await ui.saveState(), "Saved", "what is typed is saved in the vault");
+    assertDeepEqual(await ui.names(), ["Home", "Secrets:Plans"], "the pages are there");
+
+    // nothing of it is where the browser keeps things for the page: not the address, the tab's title, the history, or the settings
+    const outside = await visibleOutside(page);
+    assertEqual(outside.title, "Encrypted notebook", "the tab says nothing of what is open");
+    assertEqual(outside.hash, "#/", "neither does the address");
+    for (const secret of ["Diary", "Secrets", "Plans", "7391", "old mill", "Home"]) {
+      for (const [where, value] of Object.entries(outside)) assert(!value.includes(secret), `${JSON.stringify(secret)} is in the ${where} of the page: ${value.slice(0, 200)}`);
+    }
+
+    // locking leaves the notebook, ends the engine, and shows nothing of it
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+    await page.waitForFunction(() => document.querySelector(".lock-button").hidden);
+    const shown = await page.evaluate(() => document.body.innerText + document.title);
+    for (const secret of ["Diary", "Plans", "7391", "old mill"]) assert(!shown.includes(secret), `${JSON.stringify(secret)} is still on the page after locking`);
+    await ui.openMenu();
+    assertDeepEqual(await ui.menu().getByRole("menuitem").allInnerTexts(), (await ui.menu().getByRole("menuitem").allInnerTexts()).filter((t) => !t.includes("Diary")), "no encrypted notebook is in the menu");
+    assert(await ui.menu().getByRole("menuitem", { name: "Unlock encrypted notebooks…" }).isVisible(), "but there is a way to unlock them");
+    await page.keyboard.press("Escape");
+
+    // after a reload they are still locked; a wrong passphrase is refused; the right one opens them where they were left
+    await ui.reload();
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Unlock encrypted notebooks…" }).click();
+    const unlocking = vaultDialog(page, "Unlock encrypted notebooks");
+    await unlocking.getByLabel("Passphrase").fill("pale river stone lantern!");
+    await unlocking.getByRole("button", { name: "Unlock", exact: true }).click();
+    await unlocking.locator(".dialog-error").filter({ hasText: "not the passphrase" }).waitFor();
+    assert(await unlocking.isVisible(), "the dialog stays open after a wrong passphrase");
+    await unlocking.getByLabel("Passphrase").fill(PASSPHRASE);
+    await unlocking.getByRole("button", { name: "Unlock", exact: true }).click();
+    await noDialogs(page);
+    await isEncryptedOpen(page);
+    assertEqual(await ui.notebookTitle(), "Diary", "the encrypted notebook that was open is open again");
+    assert((await ui.pageText("Home")).includes("The vault door code is 7391."), "its first page is as it was");
+    assert((await ui.pageText("Secrets:Plans")).includes("Meet at the old mill."), "and the other");
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+  });
+
+  await app("Back and Forward work in an encrypted notebook without the browser being told a page's name", {}, async (ui) => {
+    const { page } = ui;
+    await newEncryptedNotebook(ui, "Trail");
+    await ui.goto("One");
+    await ui.typeAtEnd("a\n");
+    await ui.goto("Two");
+    await ui.typeAtEnd("b\n");
+    await ui.flush();
+    assertEqual(await ui.current(), "Two", "on the second page");
+    assertEqual(await page.evaluate(() => location.hash), "#/", "the address has no name in it");
+    await page.goBack();
+    await ui.waitCurrent("One");
+    await page.goBack();
+    await ui.waitCurrent("Home");
+    await page.goForward();
+    await ui.waitCurrent("One");
+    assertEqual(await page.evaluate(() => location.hash), "#/", "still no name in it");
+    assertEqual(await page.title(), "Encrypted notebook", "and none in the title");
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+  });
+
+  await app("typing in an encrypted notebook leaves no draft behind, even when the page is closed at once", {}, async (ui) => {
+    const { page, context } = ui;
+    await newEncryptedNotebook(ui, "Drafts");
+    await ui.goto("Hidden page name");
+    await ui.typeAtEnd("a secret sentence that is not saved yet");
+    // the page closes with the typing unsaved: an open notebook would keep a draft in localStorage for the next start
+    await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    const stored = await page.evaluate(() => JSON.stringify({ ...localStorage }));
+    assert(!stored.includes("secret sentence"), `the typing is in localStorage: ${stored.slice(0, 300)}`);
+    assert(!stored.includes("Hidden page name"), `the page's name is in localStorage: ${stored.slice(0, 300)}`);
+    assert(!stored.includes("draft"), `a draft was kept: ${stored.slice(0, 300)}`);
+    // the sections that are folded are page names too
+    await ui.goto("Section:Child");
+    await ui.typeAtEnd("x\n");
+    await ui.flush();
+    await page.evaluate(() => document.querySelector('.row[data-name="Section"] .chevron')?.click());
+    assert(!(await page.evaluate(() => JSON.stringify({ ...localStorage }))).toLowerCase().includes("section"), "folding a section of an encrypted notebook is not remembered by name");
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+    void context;
+  });
+
+  await app("an encrypted notebook is exported (after a warning that the copy is plain), imported as an encrypted notebook, renamed, and deleted", {}, async (ui) => {
+    const { page } = ui;
+    await newEncryptedNotebook(ui, "Source", { start: "sample" });
+    const pages = await ui.names();
+    assert(pages.length > 3, "the sample notebook has pages");
+    await ui.openMenu();
+    const exported = await ui.download(async () => {
+      await ui.menu().getByRole("menuitem", { name: "Export notebook (zip)" }).click();
+      const warning = topDialog(page);
+      await warning.waitFor();
+      assert((await warning.innerText()).includes("anyone who gets the file can read"), "the export says the copy is not encrypted");
+      await warning.getByRole("button", { name: "Export a plain copy" }).click();
+    });
+    assertEqual(exported.name, "Source.zip", "the zip is named for the notebook");
+    const dir = mkdtempSync(join(work, "enc-export-"));
+    const names = unzip(exported.bytes, dir);
+    assert(names.length >= pages.length, `the zip has the pages (${names.length} files)`);
+
+    // import it as a new encrypted notebook
+    const zipPath = join(work, "source-notebook.zip");
+    writeFileSync(zipPath, exported.bytes);
+    await page.locator('input[type="file"][accept=".zip,application/zip"]').setInputFiles(zipPath);
+    const importing = topDialog(page);
+    await importing.waitFor();
+    await importing.getByLabel("Notebook name").fill("Copy");
+    await importing.getByLabel("Import as").selectOption("encrypted");
+    await importing.getByRole("button", { name: "Import", exact: true }).click();
+    await noDialogs(page);
+    await page.waitForFunction(() => window.__zim.app.session.title === "Copy");
+    assertEqual(await page.evaluate(() => window.__zim.app.session.info.kind), "encrypted", "the copy is an encrypted notebook");
+    assertDeepEqual(await ui.names(), pages, "with the same pages");
+
+    // renamed, then both are in the menu with their kind
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Rename notebook…" }).click();
+    await ui.confirmDialog("Rename", { Name: "Copy, renamed" });
+    assertEqual(await ui.notebookTitle(), "Copy, renamed", "renamed");
+    await ui.openMenu();
+    const labels = await ui.menu().getByRole("menuitemradio").allInnerTexts();
+    assert(labels.some((l) => l.includes("Source") && /encrypted/i.test(l)) && labels.some((l) => l.includes("Copy, renamed") && /encrypted/i.test(l)), `both are in the menu, marked: ${JSON.stringify(labels)}`);
+    await page.keyboard.press("Escape");
+
+    // deleted: gone from the menu, and the other is still there
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Delete notebook…" }).click();
+    await ui.confirmDialog("Delete notebook");
+    await page.waitForFunction(() => window.__zim.app.session.title !== "Copy, renamed");
+    await ui.openMenu();
+    const after = await ui.menu().getByRole("menuitemradio").allInnerTexts();
+    assert(!after.some((l) => l.includes("Copy, renamed")) && after.some((l) => l.includes("Source")), `the copy is gone and the source is not: ${JSON.stringify(after)}`);
+    await page.keyboard.press("Escape");
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+  });
+
+  await app("a lost passphrase can only be got around by erasing, after which encrypted notebooks start again", {}, async (ui) => {
+    const { page } = ui;
+    await newEncryptedNotebook(ui, "Doomed");
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+    await ui.reload();
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Unlock encrypted notebooks…" }).click();
+    const unlocking = vaultDialog(page, "Unlock encrypted notebooks");
+    await unlocking.getByRole("button", { name: "I forgot it…" }).click();
+    const erasing = vaultDialog(page, "Erase encrypted notebooks");
+    await erasing.waitFor();
+    assert((await erasing.innerText()).includes("for good"), "it says that this is for good");
+    await erasing.getByRole("button", { name: "Erase encrypted notebooks" }).click();
+    await noDialogs(page);
+    assert((await ui.status()).includes("Erased"), `the status says so (${await ui.status()})`);
+    await ui.openMenu();
+    assertEqual(await ui.menu().getByRole("menuitem", { name: "Unlock encrypted notebooks…" }).count(), 0, "there is nothing left to unlock");
+    await page.keyboard.press("Escape");
+    // and a new vault can be made, with another passphrase
+    await newEncryptedNotebook(ui, "Fresh", { passphrase: "another passphrase altogether" });
+    assertEqual(await ui.notebookTitle(), "Fresh", "a new encrypted notebook");
+    await ui.openMenu();
+    const labels = await ui.menu().getByRole("menuitemradio").allInnerTexts();
+    assert(!labels.some((l) => l.includes("Doomed")), "and the old one did not come back");
+    await page.keyboard.press("Escape");
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+  });
+
+  await app("a passphrase has to be long enough and typed twice, and the box about losing it has to be ticked", {}, async (ui) => {
+    const { page } = ui;
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+    const dialog = topDialog(page);
+    await dialog.getByLabel("Kind").selectOption("encrypted");
+    await dialog.getByRole("button", { name: "Create", exact: true }).click();
+    const making = vaultDialog(page, "Encrypted notebooks");
+    await making.waitFor();
+    assert((await making.innerText()).includes("Nobody can recover this passphrase"), "the dialog says nobody can recover the passphrase");
+    const confirm = making.getByRole("button", { name: "Create encrypted notebooks" });
+    assert(await confirm.isDisabled(), "nothing can be created with no passphrase");
+    await making.getByLabel("Passphrase", { exact: true }).fill("short");
+    assert((await making.innerText()).includes("at least 10 characters"), "a short passphrase is explained");
+    await making.getByLabel("Passphrase", { exact: true }).fill(PASSPHRASE);
+    await making.getByLabel("Passphrase again").fill("pale river stone lantern, not quite");
+    assert((await making.innerText()).includes("not the same"), "two different passphrases are noticed");
+    assert(await confirm.isDisabled(), "and refused");
+    await making.getByLabel("Passphrase again").fill(PASSPHRASE);
+    assert(await confirm.isEnabled(), "the same twice is allowed");
+    await confirm.click();
+    await making.locator(".dialog-error").filter({ hasText: "Tick the box" }).waitFor();
+    assert(await making.isVisible(), "but without the box ticked, it stays open and says why");
+    await making.getByLabel("I understand").check();
+    await confirm.click();
+    await noDialogs(page);
+    await isEncryptedOpen(page);
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+  });
+
+  /**
+   * Everything the browser keeps for this page outside the page itself, as one string per place: every
+   * IndexedDB database (blobs and buffers read as bytes), localStorage and sessionStorage, the Cache API, and every file of the
+   * origin-private file system. (The vault has to be locked: the files of an unlocked one are held by its engine.)
+   */
+  const keptByTheBrowser = (page) =>
+    page.evaluate(async () => {
+      const latin1 = (buffer) => {
+        let s = "";
+        const bytes = new Uint8Array(buffer);
+        for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        return s;
+      };
+      const plain = async (value) => {
+        if (value instanceof Blob) return `blob:${value.type}:${latin1(await value.arrayBuffer())}`;
+        if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return latin1(value instanceof ArrayBuffer ? value : value.buffer);
+        if (Array.isArray(value)) return (await Promise.all(value.map(plain))).join("|");
+        if (value && typeof value === "object") return (await Promise.all(Object.entries(value).map(async ([k, v]) => `${k}=${await plain(v)}`))).join("|");
+        return String(value);
+      };
+      const places = {};
+      for (const { name } of await indexedDB.databases()) {
+        const db = await new Promise((resolve, reject) => {
+          const opening = indexedDB.open(name);
+          opening.onsuccess = () => resolve(opening.result);
+          opening.onerror = () => reject(opening.error);
+        });
+        let all = "";
+        for (const store of db.objectStoreNames) {
+          const rows = await new Promise((resolve, reject) => {
+            const request = db.transaction(store).objectStore(store).getAll();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          all += `[${store}] ${(await Promise.all(rows.map(plain))).join("\n")}\n`;
+        }
+        db.close();
+        places[`indexedDB:${name}`] = all;
+      }
+      places.localStorage = JSON.stringify({ ...localStorage });
+      places.sessionStorage = JSON.stringify({ ...sessionStorage });
+      places.caches = JSON.stringify(await caches.keys());
+      const walk = async (dir, prefix) => {
+        for await (const [name, handle] of dir.entries()) {
+          if (handle.kind === "directory") await walk(handle, `${prefix}${name}/`);
+          else places[`opfs:${prefix}${name}`] = latin1(await (await handle.getFile()).arrayBuffer());
+        }
+      };
+      await walk(await navigator.storage.getDirectory(), "");
+      return places;
+    });
+
+  await app("nothing of an encrypted notebook is in anything the browser keeps: not IndexedDB, not the settings, not the private files", {}, async (ui) => {
+    const { page } = ui;
+    const secrets = { notebook: "Zebra Journal", page: "Hidden Sub Page Name", text: "the vault door code is 7391", file: "diagram-4417.dat", bytes: "ATTACHMENT-BYTES-5529", tag: "@secrettag" };
+    await newEncryptedNotebook(ui, secrets.notebook);
+    await ui.goto(`Hidden:${secrets.page}`);
+    await ui.typeAtEnd(`${secrets.text} ${secrets.tag}\n`);
+    await ui.flush();
+    await ui.attachInput().setInputFiles({ name: secrets.file, mimeType: "application/x-secret-type", buffer: Buffer.from(`${secrets.bytes}\x00\x01\xff`, "latin1") });
+    await page.waitForFunction((name) => [...document.querySelectorAll(".attachment-list .name")].some((n) => n.textContent === name), secrets.file);
+    await ui.flush();
+    const notebookId = await page.evaluate(() => window.__zim.app.session.info.id);
+    assertDeepEqual(await ui.attachmentNames(), [secrets.file], "the attachment is in the notebook");
+
+    // (and an open notebook, which is what the scan has to be able to find things in)
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+    await ui.goto("Open page");
+    await ui.typeAtEnd("an open sentence for comparison\n");
+    await ui.flush();
+    const places = await keptByTheBrowser(page);
+    const where = (needle) => Object.entries(places).filter(([, value]) => value.includes(needle)).map(([place]) => place);
+
+    assert(where("an open sentence for comparison").some((p) => p.startsWith("indexedDB:")), `the scan can read an open notebook's text in IndexedDB (${JSON.stringify(Object.keys(places))})`);
+    assert(where(notebookId.slice("vault:".length)).some((p) => p.startsWith("opfs:")), "and the encrypted notebook's id in the private files");
+    for (const [kind, secret] of Object.entries(secrets)) {
+      assertDeepEqual(where(secret), [], `the ${kind} (${JSON.stringify(secret)}) is nowhere the browser keeps things`);
+    }
+    for (const part of ["Hidden", "7391", "ATTACHMENT", "application/x-secret-type", "Zebra"]) assertDeepEqual(where(part), [], `${JSON.stringify(part)} is nowhere the browser keeps things`);
+    assertDeepEqual(where(PASSPHRASE), [], "nor is the passphrase");
+
+    // unlocked again, everything is back
+    await ui.reload();
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Unlock encrypted notebooks…" }).click();
+    const unlocking = vaultDialog(page, "Unlock encrypted notebooks");
+    await unlocking.getByLabel("Passphrase").fill(PASSPHRASE);
+    await unlocking.getByRole("button", { name: "Unlock", exact: true }).click();
+    await noDialogs(page);
+    await isEncryptedOpen(page);
+    assertEqual(await ui.notebookTitle(), secrets.notebook, "the notebook is back under its name");
+    await ui.goto(`Hidden:${secrets.page}`);
+    assert((await ui.pageText(`Hidden:${secrets.page}`)).includes(secrets.text), "with its page");
+    assertDeepEqual(await ui.attachmentNames(), [secrets.file], "and its attachment");
+    const bytes = await page.evaluate(async () => {
+      const session = window.__zim.app.session;
+      const blob = await session.fileBlob(session.attachments(window.__zim.app.current.name)[0].path);
+      return [...new Uint8Array(await blob.arrayBuffer())];
+    });
+    assertDeepEqual(bytes, [...Buffer.from(`${secrets.bytes}\x00\x01\xff`, "latin1")], "the attachment's bytes are as they were");
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+  });
+
+  for (const promised of [false, true]) {
+    await app(
+      promised ? "a browser that promises to keep the data is not warned" : "a browser that won't promise to keep the data says so, once, and the notebook is made all the same",
+      { beforeLoad: promised ? () => Object.defineProperty(navigator.storage, "persist", { value: async () => true }) : () => Object.defineProperty(navigator.storage, "persist", { value: async () => false }) },
+      async (ui) => {
+        const { page } = ui;
+        await ui.openMenu();
+        await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+        const dialog = topDialog(page);
+        await dialog.getByLabel("Name").fill("Kept");
+        await dialog.getByLabel("Kind").selectOption("encrypted");
+        await dialog.getByRole("button", { name: "Create", exact: true }).click();
+        const making = vaultDialog(page, "Encrypted notebooks");
+        await making.waitFor();
+        await making.getByLabel("Passphrase", { exact: true }).fill(PASSPHRASE);
+        await making.getByLabel("Passphrase again").fill(PASSPHRASE);
+        await making.getByLabel("I understand").check();
+        await making.getByRole("button", { name: "Create encrypted notebooks" }).click();
+        await isEncryptedOpen(page);
+        const told = page.locator("dialog.dialog", { hasText: "Keep a copy of encrypted notebooks" });
+        if (promised) {
+          await noDialogs(page);
+          assertEqual(await told.count(), 0, "nothing was said");
+        } else {
+          await told.waitFor();
+          assert((await told.innerText()).includes("has not promised to keep"), "it says the browser has not promised to keep the notebooks");
+          assert((await told.innerText()).includes("Export"), "and what to do about it");
+          await told.getByRole("button", { name: "OK" }).click();
+          await noDialogs(page);
+          assertEqual(await ui.notebookTitle(), "Kept", "the notebook was made all the same");
+          // it is said once: the next encrypted notebook makes no fuss
+          await newEncryptedNotebook(ui, "Second", { first: false });
+          assertEqual(await told.count(), 0, "not again");
+        }
+        await page.locator(".lock-button").click();
+        await isOpenNotebook(page);
+      },
+    );
+  }
+
+  await app("an encrypted notebook is not offered to the browser's spell checker or translator, and the vault locks itself when nobody has used the app for a while", {}, async (ui) => {
+    const { page } = ui;
+    await newEncryptedNotebook(ui, "Quiet");
+    const attributes = () => page.locator(".cm-content").evaluate((el) => ({ spellcheck: el.getAttribute("spellcheck"), translate: el.getAttribute("translate"), autocorrect: el.getAttribute("autocorrect") }));
+    assertDeepEqual(await attributes(), { spellcheck: "false", translate: "no", autocorrect: "off" }, "the text being written is not offered to the spell checker or the translator");
+    assertEqual(await page.evaluate(() => document.documentElement.translate), false, "nor is the rest of the app (the tree and the breadcrumb are page names)");
+
+    // activity keeps it unlocked; stopping lets it lock itself, leaving the notebook and saying why
+    await page.evaluate(() => { window.__zim.app.autoLockMs = 1500; });
+    await page.keyboard.press("Shift");
+    for (let i = 0; i < 5; i++) {
+      await page.waitForTimeout(600);
+      await page.keyboard.press("Shift");
+    }
+    assert(await page.locator(".lock-button").isVisible(), "still unlocked after 3 s of use with a 1.5 s limit");
+    await page.waitForFunction(() => document.querySelector(".lock-button").hidden, null, { timeout: 8000 });
+    await page.waitForFunction(() => window.__zim.app.session.info.kind === "open" && window.__zim.app.current !== null && /nobody had used the app/.test(document.querySelector("#status").textContent));
+    assert((await ui.status()).includes("nobody had used the app"), `it says why (${await ui.status()})`);
+    assertEqual(await page.evaluate(() => document.documentElement.translate), true, "an open notebook can be translated again");
+  });
+
+  await scenario("a page that is not secure can't make an encrypted notebook, and says so", async () => {
+    const lan = Object.values(networkInterfaces()).flat().find((n) => n && n.family === "IPv4" && !n.internal)?.address;
+    if (!lan) {
+      console.log("  (skipped: this machine has no address but localhost)");
+      return;
+    }
+    const open = createStaticServer({ dir: dist });
+    await new Promise((resolve) => open.listen(0, "0.0.0.0", resolve));
+    const context = await browser.newContext();
+    context.setDefaultTimeout(10_000);
+    try {
+      const page = await context.newPage();
+      // (a browser ignores the COOP header of a page that is not secure, and says so)
+      page.on("pageerror", (error) => problems.push(`[page error] ${error.message}`));
+      page.on("console", (message) => message.type() === "error" && !/Cross-Origin-Opener-Policy header has been ignored/.test(message.text()) && problems.push(`[console error] ${message.text()}`));
+      await page.goto(`http://${lan}:${open.address().port}/`);
+      await ready(page);
+      const ui = driver(page, context);
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+      const dialog = topDialog(page);
+      await dialog.getByLabel("Kind").selectOption("encrypted");
+      await dialog.getByRole("button", { name: "Create", exact: true }).click();
+      await dialog.locator(".dialog-error").filter({ hasText: "secure page" }).waitFor();
+      assert(await dialog.isVisible(), "the dialog stays open with the reason");
+      assertEqual(await page.locator("dialog.dialog").count(), 1, "and no passphrase is asked for");
+    } finally {
+      await context.close();
+      open.close();
     }
   });
 

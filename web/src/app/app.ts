@@ -9,6 +9,7 @@ import type { Backlink, SearchHit } from "../notebook-core";
 import { FileUrls } from "../notebook/file-urls";
 import { IndexedDbStore } from "../notebook/idb";
 import { attachmentName, formatSize, isImageType, pictureAddress } from "../notebook/media";
+import { RoutedStore, isEncryptedId } from "../notebook/routed-store";
 import { createSampleNotebook } from "../notebook/sample";
 import { NotebookSession, createEmptyNotebook } from "../notebook/session";
 import type { SessionEvent } from "../notebook/session";
@@ -16,6 +17,9 @@ import { MemoryStore } from "../notebook/store";
 import type { FileInfo, NotebookInfo, NotebookStore } from "../notebook/store";
 import { isReadToImport, pagesFromFiles } from "../notebook/zim-files";
 import type { Imported, ImportedFile } from "../notebook/zim-files";
+import { NoVaultError, Vault, VaultBusyError, VaultExistsError, VaultUnavailableError, WrongPassphraseError, checkPassphrase, vaultSupport } from "../vault";
+import type { VaultEvent } from "../vault";
+import { TurtlStore } from "../vault/turtl-store";
 import { createZip, readZip } from "../zip";
 import { showDialog, showMessage } from "./dialogs";
 import { clear, h, highlighted } from "./dom";
@@ -88,6 +92,15 @@ function pageFromHash(): string | null {
 const OPENABLE_PROTOCOLS = new Set(["http:", "https:", "ftp:"]);
 
 const SAVE_DELAY_MS = 700;
+/** An encrypted notebook has no draft kept anywhere outside the vault for a closing page to rescue, so what is typed goes in sooner. */
+const PRIVATE_SAVE_DELAY_MS = 250;
+
+/** How long an unlocked vault is left without anyone touching the app before it locks itself. */
+const AUTO_LOCK_MS = 30 * 60_000;
+
+/** What the tab and the address say while an encrypted notebook is open: nothing that is in it (they are kept in the browser's history). */
+const PRIVATE_TITLE = "Encrypted notebook";
+const PRIVATE_ADDRESS = "#/";
 
 /** "1 page", "2 pages". */
 const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? "" : "s"}`;
@@ -104,7 +117,16 @@ export class App {
   current: Current | null = null;
 
   private readonly store: NotebookStore;
+  private readonly vault: Vault;
   private readonly keptInMemory: boolean;
+  /** The pages visited in an encrypted notebook, by the number the browser's history holds for each: names stay in memory, never in the address. */
+  private readonly trail = new Map<number, { notebook: string; name: string }>();
+  private trailCounter = 0;
+  /** The vault is being locked by the person (not lost): nobody needs to be told that the notebook that was open is gone. */
+  private locking = false;
+  /** How long the vault may be left alone (ms). A field so that a test can shorten it. */
+  autoLockMs = AUTO_LOCK_MS;
+  private autoLockTimer: number | undefined;
   private readonly tree: TreeView;
   private readonly linkCache = new Map<string, LinkStatus>();
   /** Addresses for the pictures of the open notebook. */
@@ -127,6 +149,7 @@ export class App {
     sidebarToggle: HTMLButtonElement;
     notebookButton: HTMLButtonElement;
     notebookMenu: HTMLElement;
+    lock: HTMLButtonElement;
     search: HTMLInputElement;
     searchResults: HTMLElement;
     markup: HTMLInputElement;
@@ -151,11 +174,19 @@ export class App {
     zipInput: HTMLInputElement;
   };
 
-  private constructor(root: HTMLElement, store: NotebookStore, keptInMemory: boolean) {
+  private constructor(root: HTMLElement, store: NotebookStore, keptInMemory: boolean, vault: Vault) {
     this.store = store;
+    this.vault = vault;
     this.keptInMemory = keptInMemory;
-    this.tree = new TreeView({ onOpen: (name) => void this.openPage(name, { push: true, closeSidebar: true }), onFoldChange: (folded) => prefs.set(`folded:${this.session?.info.id}`, JSON.stringify([...folded])) });
+    this.tree = new TreeView({
+      onOpen: (name) => void this.openPage(name, { push: true, closeSidebar: true }),
+      // (which sections are folded is the names of pages: an encrypted notebook's are not kept outside it)
+      onFoldChange: (folded) => !this.isPrivate && prefs.set(`folded:${this.session?.info.id}`, JSON.stringify([...folded])),
+    });
     this.els = this.build(root);
+    vault.onChange((event) => this.onVaultChange(event));
+    // anything a person does counts as using the app, and the vault locks itself when nobody has for a while
+    for (const type of ["keydown", "pointerdown", "wheel", "touchstart"]) document.addEventListener(type, () => this.restartAutoLock(), { capture: true, passive: true });
   }
 
   /** Open the notebook storage, build the interface, and open the last notebook (the sample one the first time). */
@@ -163,6 +194,7 @@ export class App {
     let store: NotebookStore;
     let keptInMemory = false;
     let app: App | undefined;
+    const vault = new Vault();
     try {
       store = await IndexedDbStore.open(pageKey, undefined, {
         // an older version of this app, open in another tab, holds the database and must let go before it can be upgraded
@@ -175,7 +207,9 @@ export class App {
       store = new MemoryStore(pageKey);
       keptInMemory = true;
     }
-    app = new App(root, store, keptInMemory);
+    // the encrypted notebooks are another store, in the vault, which is there to be unlocked
+    store = new RoutedStore(store, new TurtlStore(() => vault.core, pageKey), () => vault.unlocked);
+    app = new App(root, store, keptInMemory, vault);
     await app.openInitialNotebook();
     return app;
   }
@@ -190,6 +224,7 @@ export class App {
     const sidebarToggle = h("button", { type: "button", class: "icon-button", "aria-label": "Show or hide the page tree", "aria-controls": "sidebar", "aria-expanded": "true", on: { click: () => this.toggleSidebar() } }, h("span", { class: "burger", "aria-hidden": "true" }));
     const notebookButton = h("button", { type: "button", class: "notebook-button", "aria-haspopup": "menu", "aria-expanded": "false", on: { click: () => this.toggleNotebookMenu() } });
     const notebookMenu = h("div", { class: "menu", role: "menu", hidden: true, "aria-label": "Notebooks" });
+    const lock = h("button", { type: "button", class: "lock-button", hidden: true, text: "Lock", title: "Lock the encrypted notebooks: the passphrase is needed to open them again", on: { click: () => void this.lockVault() } });
     const search = h("input", { id: "search", type: "search", class: "search-input", placeholder: "Search pages   ( / )", "aria-label": "Search pages", role: "combobox", "aria-expanded": "false", "aria-controls": "search-results", "aria-autocomplete": "list", autocomplete: "off", spellcheck: "false" });
     const searchResults = h("div", { id: "search-results", class: "search-results", role: "listbox", hidden: true, "aria-label": "Search results" });
     const markup = h("input", { id: "markup", type: "checkbox", on: { change: () => { this.editor.setShowMarkup(markup.checked); prefs.set("markup", markup.checked ? "1" : "0"); } } });
@@ -226,7 +261,7 @@ export class App {
       h(
         "div",
         { class: "app", "data-sidebar": window.matchMedia("(max-width: 48rem)").matches ? "closed" : prefs.get("sidebar") === "closed" ? "closed" : "open" },
-        h("header", { class: "topbar" }, sidebarToggle, h("div", { class: "notebook-menu" }, notebookButton, notebookMenu), h("div", { class: "search" }, search, searchResults), button("New page", { class: "primary", on: { click: () => void this.newPage(this.current?.name.includes(":") ? `${this.current.name.slice(0, this.current.name.lastIndexOf(":") + 1)}` : "") } }), h("label", { class: "check", for: "markup" }, markup, " Show markup")),
+        h("header", { class: "topbar" }, sidebarToggle, h("div", { class: "notebook-menu" }, notebookButton, notebookMenu), lock, h("div", { class: "search" }, search, searchResults), button("New page", { class: "primary", on: { click: () => void this.newPage(this.current?.name.includes(":") ? `${this.current.name.slice(0, this.current.name.lastIndexOf(":") + 1)}` : "") } }), h("label", { class: "check", for: "markup" }, markup, " Show markup")),
         sidebar,
         page,
         h("footer", { class: "statusbar" }, status, saveState),
@@ -280,8 +315,14 @@ export class App {
       // Typing that is on its way to the store is safe (see keepDraft); typing the store refused is not.
       if (this.saveFailed) e.preventDefault();
     });
-    window.addEventListener("popstate", () => {
-      const name = pageFromHash();
+    window.addEventListener("popstate", (event: PopStateEvent) => {
+      const traced = (event.state as { trail?: unknown } | null)?.trail;
+      let name: string | null;
+      if (typeof traced === "number") {
+        // an encrypted notebook's page: only its number is in the history, and only this notebook can say whose
+        const step = this.trail.get(traced);
+        name = step && step.notebook === this.session?.info.id ? step.name : null;
+      } else name = this.isPrivate ? null : pageFromHash();
       if (name && (!this.current || name !== this.current.name)) void this.openPage(name, { push: false });
     });
 
@@ -319,7 +360,7 @@ export class App {
     folderInput.addEventListener("change", () => void this.readPickedFiles(folderInput, "folder"));
     zipInput.addEventListener("change", () => void this.readPickedFiles(zipInput, "zip"));
 
-    return { root, page, sidebarToggle, notebookButton, notebookMenu, search, searchResults, markup, breadcrumb, notice, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, attach, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput };
+    return { root, page, sidebarToggle, notebookButton, notebookMenu, lock, search, searchResults, markup, breadcrumb, notice, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, attach, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput };
   }
 
   private toggleSidebar(): void {
@@ -377,7 +418,10 @@ export class App {
     // The notebook that was open finishes whatever it was writing (a file being attached, say), then lets go.
     void previous?.close();
     prefs.set("notebook", id);
-    this.els.notebookButton.replaceChildren(h("span", { class: "notebook-title", text: session.title }), h("span", { class: "caret-down", "aria-hidden": "true" }));
+    // (an id and nothing else: what to open when the vault is unlocked again)
+    if (isEncryptedId(id)) prefs.set("vault-notebook", id);
+    this.trail.clear();
+    this.renderNotebookButton();
     this.els.notebookButton.title = "Notebooks";
     // sections start folded, until the person has chosen otherwise
     this.tree.setNodes(session.tree());
@@ -385,8 +429,43 @@ export class App {
     await this.openPage(pageName && session.exists(pageName) ? pageName : session.home, { push: false, replace: true });
   }
 
+  /** Whether the open notebook is an encrypted one: nothing in it may be put anywhere outside the vault (the address, the tab's title, the browser's own storage). */
+  private get isPrivate(): boolean {
+    return this.session?.info.kind === "encrypted";
+  }
+
+  private renderNotebookButton(): void {
+    // (a browser that offers to translate the page sends it to a service on the internet; the editor itself is never offered: CodeMirror marks it so)
+    document.documentElement.translate = !this.isPrivate;
+    const children: Node[] = [h("span", { class: "notebook-title", text: this.session.title })];
+    if (this.isPrivate) children.push(h("span", { class: "badge", text: "encrypted" }));
+    children.push(h("span", { class: "caret-down", "aria-hidden": "true" }));
+    this.els.notebookButton.replaceChildren(...children);
+  }
+
+  /**
+   * Show which page is open, in the address (so that Back and a bookmark work) and the tab's title. An
+   * encrypted notebook's pages are in neither, since both are kept by the browser: the history holds a
+   * number, and the title says nothing.
+   */
+  private locate(name: string, how: "push" | "replace" | "none"): void {
+    if (this.isPrivate) {
+      document.title = PRIVATE_TITLE;
+      if (how === "none") return;
+      const number = ++this.trailCounter;
+      this.trail.set(number, { notebook: this.session.info.id, name });
+      if (how === "push") history.pushState({ trail: number }, "", PRIVATE_ADDRESS);
+      else history.replaceState({ trail: number }, "", PRIVATE_ADDRESS);
+      return;
+    }
+    document.title = `${name.split(":").pop()} — ${this.session.title}`;
+    if (how === "push" && location.hash !== hashFor(name)) history.pushState(null, "", hashFor(name));
+    else if (how === "replace") history.replaceState(null, "", hashFor(name));
+  }
+
   /** The sections this person left folded in a notebook, or null if they have never chosen. */
   private savedFolds(id: string): string[] | null {
+    if (isEncryptedId(id)) return null;
     try {
       const saved: unknown = JSON.parse(prefs.get(`folded:${id}`) ?? "null");
       return Array.isArray(saved) && saved.every((k) => typeof k === "string") ? (saved as string[]) : null;
@@ -420,12 +499,14 @@ export class App {
     const open = this.els.notebookMenu.hidden;
     if (!open) return this.closeNotebookMenu();
     void this.store.listNotebooks().then((notebooks) => {
-      const item = (text: string, onClick: () => void, extra: Record<string, unknown> = {}) =>
-        h("button", { type: "button", role: "menuitem", class: "menu-item", text, on: { click: () => { this.closeNotebookMenu(); onClick(); } }, ...extra });
+      const item = (text: string, onClick: () => void, extra: Record<string, unknown> = {}, badge?: string) =>
+        h("button", { type: "button", role: "menuitem", class: "menu-item", on: { click: () => { this.closeNotebookMenu(); onClick(); } }, ...extra }, h("span", { text }), badge ? h("span", { class: "badge", text: badge }) : null);
       clear(this.els.notebookMenu);
       for (const notebook of notebooks) {
-        this.els.notebookMenu.append(item(notebook.title, () => void this.openNotebook(notebook.id), { role: "menuitemradio", "aria-checked": String(notebook.id === this.session.info.id) }));
+        this.els.notebookMenu.append(item(notebook.title, () => void this.openNotebook(notebook.id), { role: "menuitemradio", "aria-checked": String(notebook.id === this.session.info.id) }, notebook.kind === "encrypted" ? "encrypted" : undefined));
       }
+      if (this.vault.unlocked) this.els.notebookMenu.append(h("hr", {}), item("Lock encrypted notebooks", () => void this.lockVault()));
+      else if (this.vaultKnown()) this.els.notebookMenu.append(h("hr", {}), item("Unlock encrypted notebooks…", () => void this.unlockFromMenu()));
       this.els.notebookMenu.append(
         h("hr", {}),
         item("New notebook…", () => void this.newNotebook()),
@@ -451,14 +532,34 @@ export class App {
     await showDialog({
       title: "New notebook",
       fields: [{ name: "title", label: "Name", value: "My notebook", validate: (v) => (v.trim() ? null : "Give the notebook a name.") }],
-      choices: [{ name: "start", label: "Start with", value: "empty", options: [{ value: "empty", label: "An empty notebook" }, { value: "sample", label: "The sample notebook" }] }],
+      choices: [
+        { name: "kind", label: "Kind", value: "open", options: [{ value: "open", label: "Open: plain pages, kept in this browser" }, { value: "encrypted", label: "Encrypted: needs a passphrase to open" }] },
+        { name: "start", label: "Start with", value: "empty", options: [{ value: "empty", label: "An empty notebook" }, { value: "sample", label: "The sample notebook" }] },
+      ],
       confirm: "Create",
+      working: "Creating…",
       submit: async (values) => {
         const title = String(values.title).trim();
-        const info = values.start === "sample" ? await createSampleNotebook(this.store, title) : await createEmptyNotebook(this.store, title);
+        const kind = values.kind === "encrypted" ? "encrypted" : "open";
+        if (kind === "encrypted") {
+          const problem = await this.prepareVault();
+          if (problem) return problem;
+        }
+        const info = values.start === "sample" ? await createSampleNotebook(this.store, title, kind) : await createEmptyNotebook(this.store, title, "Home", kind);
         await this.openNotebook(info.id);
+        if (kind === "encrypted") this.warnIfNotKept();
       },
     });
+  }
+
+  /** Once: the browser has not promised to keep the encrypted notebooks, so they are only as safe as the room on this disk. */
+  private warnIfNotKept(): void {
+    if (this.vault.persisted !== false || prefs.get("not-kept-told") === "1") return;
+    prefs.set("not-kept-told", "1");
+    void showMessage(
+      "Keep a copy of encrypted notebooks",
+      "This browser has not promised to keep what encrypted notebooks hold if the disk runs low on room, and an encrypted notebook that is deleted can't be got back. Export a copy now and then (Export notebook in the menu), and keep it somewhere safe.",
+    );
   }
 
   private async renameNotebook(): Promise<void> {
@@ -468,7 +569,7 @@ export class App {
       confirm: "Rename",
       submit: async (values) => {
         await this.session.setTitle(String(values.title).trim());
-        this.els.notebookButton.replaceChildren(h("span", { class: "notebook-title", text: this.session.title }), h("span", { class: "caret-down", "aria-hidden": "true" }));
+        this.renderNotebookButton();
       },
     });
   }
@@ -494,6 +595,14 @@ export class App {
 
   private exportNotebook(): void {
     void this.flush().then(async () => {
+      if (this.isPrivate) {
+        const go = await showDialog({
+          title: "Export without encryption",
+          body: ["The zip file holds this notebook's pages and attachments as ordinary files, and anyone who gets the file can read them. Keep it somewhere safe."],
+          confirm: "Export a plain copy",
+        });
+        if (!go) return;
+      }
       try {
         const zip = createZip(await this.session.exportFiles());
         const slug = this.session.title.replace(/[^\p{L}\p{N}._-]+/gu, "_").replace(/^_+|_+$/g, "") || "notebook";
@@ -525,6 +634,174 @@ export class App {
     link.click();
     link.remove();
     setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // encrypted notebooks (the vault)
+
+  /** Whether the vault was made in this browser, as far as is remembered (a hint: asking the vault itself means starting its engine). */
+  private vaultKnown(): boolean {
+    return prefs.get("vault") === "1";
+  }
+
+  private onVaultChange(event: VaultEvent): void {
+    this.els.lock.hidden = !this.vault.unlocked;
+    this.restartAutoLock();
+    if (event.kind === "lost" && !this.locking) void this.vaultLost(event.reason);
+  }
+
+  private restartAutoLock(): void {
+    window.clearTimeout(this.autoLockTimer);
+    if (this.vault.unlocked) this.autoLockTimer = window.setTimeout(() => void this.autoLock(), this.autoLockMs);
+  }
+
+  private async autoLock(): Promise<void> {
+    if (!this.vault.unlocked) return;
+    await this.lockVault();
+    this.say("Locked the encrypted notebooks, as nobody had used the app for a while.");
+  }
+
+  /** The engine that keeps the encrypted notebooks died: they are locked, and what was in flight to them is gone. */
+  private async vaultLost(reason: string): Promise<void> {
+    this.trail.clear();
+    if (this.isPrivate) {
+      // what was typed and had not reached the vault can't be saved now; the notebook shown is not there to save it in
+      window.clearTimeout(this.saveTimer);
+      this.dirty = false;
+      this.saveFailed = false;
+      await this.leavePrivateNotebook();
+    }
+    await showMessage("The encrypted notebooks were locked", `Their engine stopped (${reason}), so they are locked. What you typed in the last moments may not have been saved. Unlock them again to go on.`);
+  }
+
+  /** Open a notebook that is not encrypted (one is made if there is none), so that the one that is can be left. */
+  private async leavePrivateNotebook(): Promise<void> {
+    const open = (await this.store.listNotebooks()).filter((n) => n.kind === "open");
+    const next = open[0] ?? (await createSampleNotebook(this.store));
+    await this.openNotebook(next.id);
+    this.closeSearch();
+    this.els.search.value = "";
+  }
+
+  /**
+   * Get the vault unlocked (or made, the first time) for what is about to be made in it, asking for the
+   * passphrase. Null if it is unlocked now, otherwise what to tell the person.
+   */
+  private async prepareVault(): Promise<string | null> {
+    const support = vaultSupport();
+    if (!support.ok) return support.reason;
+    if (this.vault.unlocked) return null;
+    if (this.vaultKnown()) await this.unlockDialog();
+    else await this.createDialog();
+    return this.vault.unlocked ? null : "Encrypted notebooks need their passphrase.";
+  }
+
+  private vaultProblem(error: unknown): string {
+    if (error instanceof WrongPassphraseError || error instanceof VaultBusyError || error instanceof VaultUnavailableError || error instanceof NoVaultError) return error.message;
+    return `The encrypted notebooks couldn't be opened: ${error instanceof Error ? error.message : String(error)}`;
+  }
+
+  /** The first time: choose the passphrase that every encrypted notebook of this browser will be locked with. */
+  private createDialog(): Promise<boolean> {
+    return showDialog({
+      title: "Encrypted notebooks",
+      body: [
+        "An encrypted notebook is kept scrambled in this browser, and unscrambled only while it is unlocked. The key is made from a passphrase that you choose now, and one passphrase protects every encrypted notebook here.",
+        h("p", {}, h("strong", { text: "Nobody can recover this passphrase for you. " }), "If you forget it, the encrypted notebooks are lost for good (the people who made this app can't open them either), so keep it somewhere safe."),
+      ],
+      fields: [
+        { name: "passphrase", label: "Passphrase", type: "password", autocomplete: "new-password", hint: "At least 10 characters. A few unrelated words make a good one.", validate: (v) => (v ? checkPassphrase(v) : "Choose a passphrase.") },
+        { name: "again", label: "Passphrase again", type: "password", autocomplete: "new-password", validate: (v, all) => (v === all.passphrase ? null : "The two passphrases are not the same.") },
+      ],
+      checks: [{ name: "understood", label: "I understand that a forgotten passphrase can't be recovered." }],
+      confirm: "Create encrypted notebooks",
+      working: "Creating…",
+      submit: async (values) => {
+        if (!values.understood) return "Tick the box to say you understand that the passphrase can't be recovered.";
+        try {
+          await this.vault.create(String(values.passphrase));
+        } catch (error) {
+          if (error instanceof VaultExistsError) {
+            // the browser has them already (what remembers that was cleared): that is the vault to unlock
+            prefs.set("vault", "1");
+            return (await this.unlockDialog()) ? undefined : "The encrypted notebooks that are here need their own passphrase.";
+          }
+          return this.vaultProblem(error);
+        }
+        prefs.set("vault", "1");
+      },
+    });
+  }
+
+  /** Ask for the passphrase and unlock the vault. */
+  private unlockDialog(): Promise<boolean> {
+    return showDialog({
+      title: "Unlock encrypted notebooks",
+      body: ["Type the passphrase of your encrypted notebooks."],
+      fields: [{ name: "passphrase", label: "Passphrase", type: "password", autocomplete: "current-password", validate: (v) => (v ? null : "Type the passphrase.") }],
+      actions: [{ label: "I forgot it…", run: (close) => { close(); void this.eraseDialog(); } }],
+      confirm: "Unlock",
+      working: "Unlocking…",
+      submit: async (values) => {
+        try {
+          await this.vault.unlock(String(values.passphrase));
+        } catch (error) {
+          if (error instanceof NoVaultError) prefs.remove("vault");
+          return this.vaultProblem(error);
+        }
+        prefs.set("vault", "1");
+      },
+    });
+  }
+
+  /** For a passphrase that is lost: the only way out is to erase what it protected and start again. */
+  private async eraseDialog(): Promise<void> {
+    const erased = await showDialog({
+      title: "Erase encrypted notebooks",
+      body: [
+        "Without the passphrase the encrypted notebooks can't be opened, by anyone. The only way to use encrypted notebooks again is to erase these.",
+        h("p", {}, h("strong", { text: "This deletes every encrypted notebook in this browser, with its pages and attachments, for good." }), " If you have a copy of them somewhere (an export, or another browser where they are unlocked), they are not touched."),
+      ],
+      confirm: "Erase encrypted notebooks",
+      danger: true,
+      working: "Erasing…",
+      submit: async () => {
+        try {
+          await this.vault.erase();
+        } catch (error) {
+          return this.vaultProblem(error);
+        }
+        prefs.remove("vault");
+      },
+    });
+    if (erased) this.say("Erased the encrypted notebooks.");
+  }
+
+  /** From the notebook menu: unlock, and go back to the encrypted notebook that was open last. */
+  private async unlockFromMenu(): Promise<void> {
+    if (!(await this.unlockDialog())) return;
+    const last = prefs.get("vault-notebook");
+    const notebooks = await this.store.listNotebooks();
+    const back = notebooks.find((n) => n.id === last && n.kind === "encrypted");
+    if (back) await this.openNotebook(back.id);
+    else this.say("Unlocked the encrypted notebooks.");
+  }
+
+  /** Lock the vault: leave the encrypted notebook that is open, and end the engine, so that nothing decrypted or secret is left in memory. */
+  private async lockVault(): Promise<void> {
+    if (!this.vault.unlocked || this.locking) return;
+    this.locking = true;
+    try {
+      await this.flush();
+      if (this.isPrivate) await this.leavePrivateNotebook();
+      this.closeSearch();
+      this.els.search.value = "";
+      await this.vault.lock();
+      this.trail.clear();
+      this.say("Locked the encrypted notebooks.");
+    } finally {
+      this.locking = false;
+    }
   }
 
   // ------------------------------------------------------------------------------------------
@@ -576,10 +853,15 @@ export class App {
       title: "Import notebook",
       body: [h("p", { text: lines.join("; ") + "." }), imported.skipped.length ? h("div", {}, h("p", { text: `${imported.skipped.length} files were skipped:` }), skipped) : null],
       fields: [{ name: "title", label: "Notebook name", value: imported.config.name ?? suggested, validate: (v) => (v.trim() ? null : "Give the notebook a name.") }],
-      choices: [{ name: "into", label: "Import as", value: "new", options: [{ value: "new", label: "A new notebook" }, { value: "here", label: `More pages in ${this.session.title}${replacing ? ` (replaces ${replacing} with the same names)` : ""}` }] }],
+      choices: [{ name: "into", label: "Import as", value: "new", options: [{ value: "new", label: "A new notebook" }, { value: "encrypted", label: "A new encrypted notebook" }, { value: "here", label: `More pages in ${this.session.title}${replacing ? ` (replaces ${replacing} with the same names)` : ""}` }] }],
       confirm: "Import",
+      working: "Importing…",
       submit: async (values) => {
         await this.flush();
+        if (values.into === "encrypted") {
+          const problem = await this.prepareVault();
+          if (problem) return problem;
+        }
         if (values.into === "here") {
           await this.session.addPages(imported.pages, imported.files);
           await this.syncCurrentPage();
@@ -588,7 +870,7 @@ export class App {
         }
         const names = new Set(imported.pages.map((p) => p.name.toLowerCase()));
         const wanted = imported.config.home && names.has(imported.config.home.toLowerCase()) ? imported.config.home : names.has("home") ? "Home" : (imported.pages[0] as { name: string }).name;
-        const info = await this.store.createNotebook({ title: String(values.title).trim(), home: wanted, kind: "open" }, imported.pages, imported.files);
+        const info = await this.store.createNotebook({ title: String(values.title).trim(), home: wanted, kind: values.into === "encrypted" ? "encrypted" : "open" }, imported.pages, imported.files);
         await this.openNotebook(info.id);
         this.say(`Imported ${counted} as ${info.title}.`);
       },
@@ -606,6 +888,7 @@ export class App {
     const ticket = ++this.navigation;
     await this.flush();
     if (ticket !== this.navigation) return;
+    const previous = this.current;
     let spelled: string;
     try {
       spelled = this.session.spell(name);
@@ -623,10 +906,7 @@ export class App {
     this.dirty = false;
     this.editor.goTo(exists ? 0 : text.length, { scroll: false });
     this.els.page.scrollTop = 0;
-    if (options.push && location.hash !== hashFor(spelled)) history.pushState(null, "", hashFor(spelled));
-    else if (options.replace) history.replaceState(null, "", hashFor(spelled));
-
-    document.title = `${spelled.split(":").pop()} — ${this.session.title}`;
+    this.locate(spelled, options.push && !(this.isPrivate && previous?.name === spelled) ? "push" : options.replace ? "replace" : "none");
     this.tree.setCurrent(spelled);
     this.renderBreadcrumb();
     this.renderBacklinks();
@@ -892,7 +1172,7 @@ export class App {
     this.dirty = true;
     this.setSaveState("Editing…");
     window.clearTimeout(this.saveTimer);
-    this.saveTimer = window.setTimeout(() => void this.flush(), SAVE_DELAY_MS);
+    this.saveTimer = window.setTimeout(() => void this.flush(), this.isPrivate ? PRIVATE_SAVE_DELAY_MS : SAVE_DELAY_MS);
   }
 
   private setSaveState(text: string): void {
@@ -901,7 +1181,8 @@ export class App {
 
   /** Put what is on screen where a page that is closing can still put it, if the notebook doesn't have it yet. */
   private keepDraft(): void {
-    if (!this.current || !this.session || !(this.dirty || this.saving > 0 || this.saveFailed)) return;
+    // (an encrypted notebook's typing is not put in localStorage, where anyone could read it: the vault is its only place)
+    if (!this.current || !this.session || this.isPrivate || !(this.dirty || this.saving > 0 || this.saveFailed)) return;
     const draft: Draft = { notebook: this.session.info.id, name: this.current.name, text: this.editor.getText(), at: Date.now() };
     prefs.set("draft", JSON.stringify(draft));
   }
@@ -1010,10 +1291,9 @@ export class App {
         this.renderAttachments();
         await this.refreshCurrentText();
         this.tree.setCurrent(this.current?.name ?? null);
-        history.replaceState(null, "", hashFor(this.current?.name ?? from));
+        this.locate(this.current?.name ?? from, "replace");
         this.renderBreadcrumb();
         this.renderBacklinks();
-        document.title = `${(this.current?.name ?? from).split(":").pop()} — ${this.session.title}`;
         this.say(`Renamed ${from} to ${moved?.[1] ?? String(values.name)}${report.linksChanged ? `; ${report.linksChanged} link${report.linksChanged === 1 ? "" : "s"} updated on ${report.rewritten.length} page${report.rewritten.length === 1 ? "" : "s"}` : ""}.`);
       },
     });

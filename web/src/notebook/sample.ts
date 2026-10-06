@@ -167,8 +167,8 @@ Evening: tried the notebook editor. @journal
 ];
 
 /** The sample notebook, as a notebook in `store`. */
-export async function createSampleNotebook(store: NotebookStore, title = "Sample notebook"): Promise<NotebookInfo> {
+export async function createSampleNotebook(store: NotebookStore, title = "Sample notebook", kind: NotebookInfo["kind"] = "open"): Promise<NotebookInfo> {
   const now = Date.now();
   const pages: StoredPage[] = SAMPLE_PAGES.map((p) => ({ ...p, bom: false, lineEnding: "lf", modified: now }));
-  return store.createNotebook({ title, home: "Home", kind: "open" }, pages);
+  return store.createNotebook({ title, home: "Home", kind }, pages);
 }

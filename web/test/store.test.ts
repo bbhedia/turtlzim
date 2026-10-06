@@ -6,7 +6,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { pageKey } from "../src/notebook-core";
 import { TurtlStore } from "../src/vault/turtl-store";
 import { freshAccount } from "./helpers/direct-core";
-import { IndexedDbStore } from "../src/notebook/idb";
+import { IndexedDbStore, newId } from "../src/notebook/idb";
 import { MemoryStore } from "../src/notebook/store";
 import type { NotebookStore, StoredFile, StoredPage } from "../src/notebook/store";
 import { initZimSync } from "../src/zim";
@@ -178,6 +178,18 @@ contract("encrypted", async () => {
 }, 240_000);
 
 describe("IndexedDB, beyond the contract", () => {
+  it("makes notebook ids without crypto.randomUUID, which a page that is not secure doesn't have", () => {
+    const original = crypto.randomUUID;
+    Object.defineProperty(crypto, "randomUUID", { value: undefined, configurable: true });
+    try {
+      const ids = new Set(Array.from({ length: 500 }, () => newId()));
+      expect(ids.size).toBe(500);
+      for (const id of ids) expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    } finally {
+      Object.defineProperty(crypto, "randomUUID", { value: original, configurable: true });
+    }
+  });
+
   it("keeps notebooks between one opening of the database and the next", async () => {
     const name = `reopen-${++databases}`;
     const first = await IndexedDbStore.open(pageKey, name);

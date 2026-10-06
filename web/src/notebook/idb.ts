@@ -38,6 +38,19 @@ function finished(tx: IDBTransaction): Promise<void> {
  * browser under storage pressure, by the browser: `requestPersistence()` asks it not to, where it
  * can, and export (a zip of `.txt` files) is the way to get a notebook out.
  */
+/**
+ * A random id for a notebook. `crypto.randomUUID()` is only there on secure pages (https, localhost),
+ * and the app has to run from any address a person puts it on: `getRandomValues` is there on all.
+ */
+export function newId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  // version 4, variant 10 (RFC 4122)
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export class IndexedDbStore implements NotebookStore {
   private constructor(
     private readonly db: IDBDatabase,
@@ -109,7 +122,7 @@ export class IndexedDbStore implements NotebookStore {
   }
 
   async createNotebook(info: Omit<NotebookInfo, "id" | "created">, pages: StoredPage[] = [], files: StoredFile[] = []): Promise<NotebookInfo> {
-    const created: NotebookInfo = { ...info, id: crypto.randomUUID(), created: Date.now() };
+    const created: NotebookInfo = { ...info, id: newId(), created: Date.now() };
     await this.write(["notebooks", "pages", "files"], (tx) => {
       tx.objectStore("notebooks").put(created);
       for (const page of pages) tx.objectStore("pages").put(this.row(created.id, page));

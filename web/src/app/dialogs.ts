@@ -10,8 +10,12 @@ export interface Field {
   value?: string;
   placeholder?: string;
   hint?: string;
-  /** A problem with the current value, as a message to show, or null if it's fine. */
-  validate?: (value: string) => string | null;
+  /** `password` hides what is typed (and keeps the browser from offering to spell-check it). */
+  type?: "text" | "password";
+  /** What a password manager should make of the field, for a `password`: a new one, or the current one. */
+  autocomplete?: "new-password" | "current-password";
+  /** A problem with the current value, as a message to show, or null if it's fine. `values` is what every field holds now. */
+  validate?: (value: string, values: Record<string, string>) => string | null;
 }
 
 export interface Check {
@@ -39,6 +43,10 @@ export interface DialogOptions {
   danger?: boolean;
   /** Without a cancel button (a message): the only button is `confirm`. */
   noCancel?: boolean;
+  /** Further buttons, next to Cancel; `close` ends the dialog as a cancel does. */
+  actions?: Array<{ label: string; run: (close: () => void) => void }>;
+  /** What the confirm button says while `submit` is working (it can take a moment). */
+  working?: string;
   /**
    * Called when the dialog is confirmed with what was entered. Return (or throw) a message to keep
    * the dialog open and show it; return nothing to close it.
@@ -57,11 +65,18 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
 
     const form = h("form", { method: "dialog", class: "dialog-form" }, h("h2", { id: "dialog-title", text: options.title }), ...(options.body ?? []).map((c) => (typeof c === "string" ? h("p", { text: c }) : c)));
 
+    const textValues = (): Record<string, string> => {
+      const values: Record<string, string> = {};
+      for (const field of options.fields ?? []) values[field.name] = (inputs.get(field.name) as HTMLInputElement).value;
+      return values;
+    };
+
     const refresh = (): boolean => {
       let valid = true;
+      const values = textValues();
       for (const field of options.fields ?? []) {
         const input = inputs.get(field.name) as HTMLInputElement;
-        const problem = field.validate ? field.validate(input.value) : null;
+        const problem = field.validate ? field.validate(input.value, values) : null;
         const slot = problems.get(field.name)!;
         slot.textContent = problem ?? "";
         input.setAttribute("aria-invalid", problem ? "true" : "false");
@@ -73,7 +88,7 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
 
     for (const field of options.fields ?? []) {
       const id = `field-${field.name}`;
-      const input = h("input", { id, type: "text", value: field.value ?? "", placeholder: field.placeholder, autocomplete: "off", spellcheck: "false", on: { input: () => { errorLine.textContent = ""; refresh(); } } });
+      const input = h("input", { id, type: field.type ?? "text", value: field.value ?? "", placeholder: field.placeholder, autocomplete: field.autocomplete ?? "off", spellcheck: "false", autocapitalize: "off", on: { input: () => { errorLine.textContent = ""; refresh(); } } });
       const problem = h("span", { class: "field-problem", "aria-live": "polite" });
       inputs.set(field.name, input);
       problems.set(field.name, problem);
@@ -89,7 +104,8 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
       inputs.set(check.name, box);
       form.append(h("label", { class: "check-row", for: box.id }, box, " ", check.label));
     }
-    form.append(errorLine, h("div", { class: "dialog-buttons" }, options.noCancel ? null : h("button", { type: "button", class: "secondary", text: "Cancel", on: { click: () => dialog.close("cancel") } }), confirmButton));
+    const extra = (options.actions ?? []).map((action) => h("button", { type: "button", class: "secondary", text: action.label, on: { click: () => action.run(() => dialog.close("cancel")) } }));
+    form.append(errorLine, h("div", { class: "dialog-buttons" }, ...extra, options.noCancel ? null : h("button", { type: "button", class: "secondary", text: "Cancel", on: { click: () => dialog.close("cancel") } }), confirmButton));
 
     let working = false;
     form.addEventListener("submit", async (event) => {
@@ -97,6 +113,7 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
       if (working || !refresh()) return;
       working = true;
       confirmButton.disabled = true;
+      if (options.working) confirmButton.textContent = options.working;
       const values: Record<string, string | boolean> = {};
       for (const [name, input] of inputs) values[name] = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : input.value;
       let problem: string | void;
@@ -106,6 +123,7 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
         problem = error instanceof Error ? error.message : String(error);
       }
       working = false;
+      confirmButton.textContent = options.confirm;
       if (problem) {
         errorLine.textContent = problem;
         refresh();
@@ -122,7 +140,7 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
     document.body.append(dialog);
     dialog.showModal();
     refresh();
-    const first = [...inputs.values()].find((i) => i instanceof HTMLInputElement && i.type === "text") as HTMLInputElement | undefined;
+    const first = [...inputs.values()].find((i) => i instanceof HTMLInputElement && (i.type === "text" || i.type === "password")) as HTMLInputElement | undefined;
     if (first) {
       first.focus();
       // select the part of a name a person is most likely to change: everything after the last colon

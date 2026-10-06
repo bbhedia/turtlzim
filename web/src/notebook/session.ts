@@ -455,7 +455,7 @@ export class NotebookSession {
 }
 
 /** A notebook with a home page, ready to open. */
-export async function createEmptyNotebook(store: NotebookStore, title: string, home = "Home"): Promise<NotebookInfo> {
+export async function createEmptyNotebook(store: NotebookStore, title: string, home = "Home", kind: NotebookInfo["kind"] = "open"): Promise<NotebookInfo> {
   const page: StoredPage = {
     name: home,
     text: newPageText(home, zimTimestamp()) + "\nThis notebook is empty. Make a page with New page, or follow a link to a page that doesn't exist yet.\n",
@@ -463,5 +463,5 @@ export async function createEmptyNotebook(store: NotebookStore, title: string, h
     lineEnding: "lf",
     modified: Date.now(),
   };
-  return store.createNotebook({ title, home, kind: "open" }, [page]);
+  return store.createNotebook({ title, home, kind }, [page]);
 }
