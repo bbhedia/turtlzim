@@ -120,7 +120,7 @@ npm run dev                         # dev server
 npm run build                       # typecheck + production build into web/dist
 npm test                            # Vitest: editor logic, headless (ZIM_GOLDEN_DIR=... adds real pages)
 scripts/setup-browser.sh            # once: Chromium + libraries + a font, no root
-npm run test:browser                # the built app in a real browser: 31 scenarios (ZIM_GOLDEN_DIR=... adds the real Zim manual; ONLY=text picks some)
+npm run test:browser                # the built app in a real browser (ZIM_GOLDEN_DIR=... adds the real Zim manual; ONLY=text picks scenarios)
 npm run screenshots <dir>           # nine pictures of the app to look at (light, dark, phone, dialogs)
 scripts/serve.sh start --host :: --port 8080   # serve web/dist in the background (see docs/zim-editor-plan.md: trying it from another machine)
 

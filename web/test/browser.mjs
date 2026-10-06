@@ -85,10 +85,14 @@ async function scenario(name, run) {
 
 let browser;
 
-/** A fresh browser profile (so a fresh IndexedDB: the sample notebook, nothing else) with the app open. */
-async function openApp(options = {}) {
+/**
+ * A fresh browser profile (so a fresh IndexedDB: the sample notebook, nothing else) with the app
+ * open. `beforeLoad`, if given, is a function that runs in the page before any of its own scripts.
+ */
+async function openApp({ beforeLoad, ...options } = {}) {
   const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1100, height: 900 }, ...options });
   context.setDefaultTimeout(10_000);
+  if (beforeLoad) await context.addInitScript(beforeLoad);
   const page = await context.newPage();
   page.on("pageerror", (error) => problems.push(`[page error] ${error.message}`));
   page.on("console", (message) => {
@@ -876,6 +880,34 @@ try {
     await ui.reload();
     assertEqual(await ui.pageText("Ideas"), kept, "something that isn't a draft is ignored");
   });
+
+  await app(
+    "a browser that keeps nothing: the app runs from memory, says so, and the sample is still usable",
+    {
+      beforeLoad: () => {
+        // what a browser that refuses site storage looks like to a page: there is no database to open
+        Object.defineProperty(window, "indexedDB", { value: undefined, configurable: true });
+      },
+    },
+    async (ui) => {
+      const { page } = ui;
+      assert((await page.locator(".notice").innerText()).includes("won't keep notebooks"), "a notice says what you write is lost when the tab closes");
+      assertEqual(await ui.current(), "Home", "the sample notebook opens as usual");
+      await ui.goto("Ideas");
+      assert((await page.locator(".notice").innerText()).includes("won't keep notebooks"), "and the notice stays on every page");
+      await ui.typeAtEnd("written anyway");
+      await ui.flush();
+      assertEqual(await ui.saveState(), "Saved", "writing works");
+      assert((await ui.pageText("Ideas")).endsWith("written anyway"), "and the notebook has it for as long as the tab lives");
+      const zip = await ui.download(async () => {
+        await ui.openMenu();
+        await ui.menu().getByRole("menuitem", { name: "Export notebook (zip)" }).click();
+      });
+      const names = unzip(zip.bytes, join(work, "export-memory"));
+      assert(names.includes("Ideas.txt"), "export still gets the notebook out");
+      assert(readFileSync(join(work, "export-memory", "Ideas.txt"), "utf8").endsWith("written anyway"), "with what was written");
+    },
+  );
 
   await app("a save that fails is reported, the text stays in the editor, and the next save works", {}, async (ui) => {
     const { page } = ui;

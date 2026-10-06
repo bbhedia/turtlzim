@@ -102,7 +102,7 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
 | Bindings | `cargo test -p zim-wasm` (8) and `web/test/notebook-core.test.ts` (16) |
 | Stores | `web/test/store.test.ts`: the same contract on both stores, including atomicity under failure (`fake-indexeddb`) |
 | Session, files, zip | `web/test/session.test.ts` (rename/delete/failed write/export paths/import rules/zip round trips and damage) |
-| **The app in Chromium** | `web/test/browser.mjs`: 31 scenarios on the built app, served by the same server `npm run serve` runs. See below. |
+| **The app in Chromium** | `web/test/browser.mjs`: the scenarios below, on the built app, served by the same server `npm run serve` runs |
 | How it looks | `npm run screenshots <dir>`: nine screenshots (light, dark, phone, dialogs, search, menu) to look at |
 
 The browser scenarios, each in a fresh profile (so a fresh IndexedDB): the editor (rendering, markup
@@ -112,7 +112,8 @@ the tree by keyboard (focus stays in it); Ctrl-click, anchors and plain names; m
 creating a page by typing; backlinks; new page and sub-page with name checks; rename (links follow;
 after a reload everything is as renamed; without link updates; refused names); delete; sections;
 search; autosave and Ctrl+S across a reload; typing kept when the page closes in the middle of a
-write, and an old draft not overwriting a newer page; a failing store; notebooks (new, switch,
+write, and an old draft not overwriting a newer page; a failing store; a browser that keeps nothing
+(the app runs from memory, says so, and can still export); notebooks (new, switch,
 rename, delete, delete the last); download and zip export read back by Python's `zipfile`; import of
 a folder with Windows files (BOM, CRLF, mixed endings, a Latin-1 file, case-clashing names, an
 invalid name, attachments, hidden files) edited and exported again; import into the open notebook;
