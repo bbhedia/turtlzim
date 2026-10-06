@@ -3,10 +3,12 @@
 // a page's file properties (byte-order mark, line endings) are kept so that export writes each page
 // back as it was read.
 import { NotebookModel, checkPageName, newPageText, pageKey, pageToPath, zimTimestamp } from "../notebook-core";
-import type { Backlink, RenameReport, ResolvedLink, SearchHit, TreeNode } from "../notebook-core";
+import type { Backlink, RenameReport, ResolvedFile, ResolvedLink, SearchHit, TreeNode } from "../notebook-core";
 import { encodePage } from "../zim";
 import type { LineEnding } from "../zim";
-import type { NotebookInfo, NotebookStore, StoredPage } from "./store";
+import { typed } from "./media";
+import { fileKey } from "./store";
+import type { FileInfo, NotebookInfo, NotebookStore, StoredFile, StoredPage } from "./store";
 import { notebookConfig } from "./zim-files";
 import type { ZipEntry } from "../zip";
 
@@ -14,7 +16,9 @@ export type SessionEvent =
   /** Pages were added, removed or renamed: the tree and every link's meaning may have changed. */
   | { kind: "structure" }
   /** The text of one page changed. */
-  | { kind: "page"; name: string };
+  | { kind: "page"; name: string }
+  /** Files were added, removed or moved (a move also announces `structure`): what refers to them may look different. */
+  | { kind: "files" };
 
 interface FileProperties {
   bom: boolean;
@@ -25,6 +29,8 @@ interface FileProperties {
 export class NotebookSession {
   model = new NotebookModel();
   private readonly files = new Map<string, FileProperties>();
+  /** What is known of each attachment (by `fileKey`): the bytes stay in the store. */
+  private readonly fileInfos = new Map<string, FileInfo>();
   private readonly listeners = new Set<(event: SessionEvent) => void>();
 
   private constructor(
@@ -42,15 +48,25 @@ export class NotebookSession {
 
   /** Read every page again from the store (after a failed write, to be sure what is there). */
   async reload(): Promise<void> {
-    const pages = await this.store.loadPages(this.info.id);
+    const [pages, stored] = await Promise.all([this.store.loadPages(this.info.id), this.store.listFiles(this.info.id)]);
     this.model.free();
     this.model = new NotebookModel();
     this.files.clear();
+    this.fileInfos.clear();
     for (const page of pages) {
       this.model.put(page.name, page.text);
       this.files.set(pageKey(page.name), { bom: page.bom, lineEnding: page.lineEnding, modified: page.modified });
     }
+    for (const file of stored) {
+      try {
+        this.model.putFile(file.path);
+        this.fileInfos.set(fileKey(file.path), file);
+      } catch {
+        // a stored path the rules refuse can't be shown or exported (the app never writes one)
+      }
+    }
     this.emit({ kind: "structure" });
+    if (this.fileInfos.size > 0) this.emit({ kind: "files" });
   }
 
   close(): void {
@@ -102,6 +118,40 @@ export class NotebookSession {
 
   names(): string[] {
     return this.model.names();
+  }
+
+  /** The attachments of a page: the files in the folder named like it. */
+  attachments(page: string): FileInfo[] {
+    return this.model.filesOf(page).flatMap((path) => this.fileInfos.get(fileKey(path)) ?? []);
+  }
+
+  /** What is known of the file at `path` (a notebook path), if the notebook has it. */
+  fileInfo(path: string): FileInfo | undefined {
+    return this.fileInfos.get(fileKey(path));
+  }
+
+  get fileCount(): number {
+    return this.model.fileCount;
+  }
+
+  /** How many attachments there are in the folder of a page and the folders below it. */
+  filesBelow(page: string): number {
+    return this.model.filesBelow(page).length;
+  }
+
+  /** Where a file reference (an image's path, a `[[./file]]` link) written on page `from` leads. */
+  resolveFile(from: string, target: string): ResolvedFile {
+    return this.model.resolveFile(from, target);
+  }
+
+  /** The text that, written on `from` as a file reference, leads to the file at `path`. */
+  fileLink(from: string, path: string): string {
+    return this.model.fileLink(from, path);
+  }
+
+  /** The bytes of an attachment, from the store. */
+  fileBlob(path: string): Promise<Blob | undefined> {
+    return this.store.loadFile(this.info.id, path);
   }
 
   tree(): TreeNode[] {
@@ -188,8 +238,16 @@ export class NotebookSession {
       const file = this.files.get(pageKey(name));
       if (file) this.files.set(pageKey(name), { ...file, modified: now });
     }
+    // The files went with their pages; what is known of each goes with it.
+    const movedInfos = report.filesMoved.map(([from, to]) => [to, this.fileInfos.get(fileKey(from))] as const);
+    for (const [from] of report.filesMoved) this.fileInfos.delete(fileKey(from));
+    for (const [to, info] of movedInfos) if (info) this.fileInfos.set(fileKey(to), { ...info, path: to });
     try {
-      await this.store.replacePages(this.info.id, { remove: report.moved.map(([old]) => old), put: [...touched].map((n) => this.record(n)) });
+      await this.store.replacePages(this.info.id, {
+        remove: report.moved.map(([old]) => old),
+        put: [...touched].map((n) => this.record(n)),
+        ...(report.filesMoved.length > 0 ? { files: { move: report.filesMoved } } : {}),
+      });
     } catch (error) {
       await this.reload();
       throw error;
@@ -199,21 +257,62 @@ export class NotebookSession {
     const movedHome = homeKey === undefined ? undefined : report.moved.find(([old]) => pageKey(old) === homeKey);
     if (movedHome) await this.setHome(movedHome[1]);
     this.emit({ kind: "structure" });
+    if (report.filesMoved.length > 0) this.emit({ kind: "files" });
     return report;
   }
 
-  /** Delete a page and everything below it. The names deleted. */
+  /** Delete a page and everything below it, and the attachments in their folders. The names deleted. */
   async delete(name: string): Promise<string[]> {
     const removed = this.model.removeTree(name);
+    const removedFiles = this.model.removeFilesBelow(name);
     for (const gone of removed) this.files.delete(pageKey(gone));
+    for (const gone of removedFiles) this.fileInfos.delete(fileKey(gone));
     try {
-      await this.store.replacePages(this.info.id, { remove: removed, put: [] });
+      await this.store.replacePages(this.info.id, { remove: removed, put: [], ...(removedFiles.length > 0 ? { files: { remove: removedFiles } } : {}) });
     } catch (error) {
       await this.reload();
       throw error;
     }
     this.emit({ kind: "structure" });
+    if (removedFiles.length > 0) this.emit({ kind: "files" });
     return removed;
+  }
+
+  /**
+   * Attach a file to a page: it is stored in the folder named like the page, under a safe name that
+   * is not in use (`wanted` is what people call it). Returns the path it was stored at; the text
+   * that refers to it from the page is `fileLink`.
+   */
+  async addFile(page: string, content: Blob, wanted: string): Promise<string> {
+    const path = this.model.attachmentPath(page, wanted);
+    const blob = typed(content, path);
+    const modified = Date.now();
+    try {
+      await this.store.replacePages(this.info.id, { remove: [], put: [], files: { put: [{ path, blob, modified }] } });
+    } catch (error) {
+      await this.reload();
+      throw error;
+    }
+    this.model.putFile(path);
+    this.fileInfos.set(fileKey(path), { path, size: blob.size, type: blob.type, modified });
+    this.emit({ kind: "files" });
+    return path;
+  }
+
+  /** Delete an attachment. Whether there was one. */
+  async removeFile(path: string): Promise<boolean> {
+    const known = this.model.filePath(path);
+    if (known === undefined) return false;
+    try {
+      await this.store.replacePages(this.info.id, { remove: [], put: [], files: { remove: [known] } });
+    } catch (error) {
+      await this.reload();
+      throw error;
+    }
+    this.model.removeFile(known);
+    this.fileInfos.delete(fileKey(known));
+    this.emit({ kind: "files" });
+    return true;
   }
 
   /** The key of the home page, if the notebook's home is a valid page name (an imported config may not be). */
@@ -232,19 +331,26 @@ export class NotebookSession {
     await this.store.updateNotebook(this.info);
   }
 
-  /** Add pages (replacing any with the same name, ignoring case): an import. */
-  async addPages(pages: StoredPage[]): Promise<void> {
+  /**
+   * Add pages and attachments (replacing any with the same name or path, ignoring case): an import.
+   * A file that replaces one keeps the spelling of the path it replaces.
+   */
+  async addPages(pages: StoredPage[], files: StoredFile[] = []): Promise<void> {
     for (const page of pages) {
       this.model.put(page.name, page.text);
       this.files.set(pageKey(page.name), { bom: page.bom, lineEnding: page.lineEnding, modified: page.modified });
     }
+    const added = files.map((file) => ({ ...file, path: this.model.filePath(file.path) ?? file.path }));
+    for (const file of added) this.model.putFile(file.path);
     try {
-      await this.store.replacePages(this.info.id, { remove: [], put: pages.map((p) => this.record(p.name)) });
+      await this.store.replacePages(this.info.id, { remove: [], put: pages.map((p) => this.record(p.name)), ...(added.length > 0 ? { files: { put: added } } : {}) });
     } catch (error) {
       await this.reload();
       throw error;
     }
+    for (const file of added) this.fileInfos.set(fileKey(file.path), { path: file.path, size: file.blob.size, type: file.blob.type, modified: file.modified });
     this.emit({ kind: "structure" });
+    if (added.length > 0) this.emit({ kind: "files" });
   }
 
   // ---- leaving
@@ -256,13 +362,18 @@ export class NotebookSession {
     return { path: pageToPath(page.name), bytes: encodePage({ text: page.text, bom: page.bom, lineEnding: page.lineEnding }), modified: new Date(page.modified) };
   }
 
-  /** The notebook as files: every page at its path with its own byte-order mark and line endings, and `notebook.zim`, so that Zim opens the folder. */
-  exportFiles(): ZipEntry[] {
+  /** The notebook as files: every page at its path with its own byte-order mark and line endings, every attachment at its path, and `notebook.zim`, so that Zim opens the folder. */
+  async exportFiles(): Promise<ZipEntry[]> {
     const modified = (name: string) => new Date(this.files.get(pageKey(name))?.modified ?? Date.now());
     const entries: ZipEntry[] = [{ path: "notebook.zim", bytes: new TextEncoder().encode(notebookConfig({ title: this.info.title, home: this.info.home })) }];
     for (const name of this.model.names()) {
       const page = this.record(name);
       entries.push({ path: pageToPath(page.name), bytes: encodePage({ text: page.text, bom: page.bom, lineEnding: page.lineEnding }), modified: modified(name) });
+    }
+    for (const path of this.model.files()) {
+      const blob = await this.store.loadFile(this.info.id, path);
+      if (!blob) throw new Error(`The file ${path} is in the notebook but the store doesn't have it, so the export would be missing it.`);
+      entries.push({ path, bytes: new Uint8Array(await blob.arrayBuffer()), modified: new Date(this.fileInfos.get(fileKey(path))?.modified ?? Date.now()) });
     }
     return entries;
   }

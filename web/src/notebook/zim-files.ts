@@ -1,7 +1,8 @@
 // The files around a Zim notebook's pages: `notebook.zim`, the small configuration file that marks
 // a folder as a notebook, and how a folder or a zip of files becomes pages.
-import { pathToPage } from "../notebook-core";
-import type { StoredPage } from "./store";
+import { checkFilePath, pathToPage } from "../notebook-core";
+import { typed } from "./media";
+import type { StoredFile, StoredPage } from "./store";
 import { decodePage } from "../zim";
 
 /** The `notebook.zim` of a notebook, as Zim writes one, so that an exported folder opens in Zim. */
@@ -46,26 +47,37 @@ export function parseNotebookConfig(text: string): { name?: string; home?: strin
 export interface ImportedFile {
   /** The path as the browser or zip gives it: `/` between folders. */
   path: string;
-  bytes: Uint8Array;
+  /** The contents, for the files that have to be read to be understood: pages and `notebook.zim`. */
+  bytes?: Uint8Array;
+  /** The file itself, for attachments: it is not read until it is stored. (`bytes` do as well.) */
+  blob?: Blob;
   /** When the file was last changed: ms since the epoch, or a Date. */
   modified?: number | Date;
 }
 
 export interface Imported {
   pages: StoredPage[];
+  /** The attachments: every other file that is not hidden and not `notebook.zim`. */
+  files: StoredFile[];
   config: { name?: string; home?: string };
-  /** Files that did not become pages, and why. */
+  /** Files that did not become pages or attachments, and why. */
   skipped: Array<{ path: string; reason: string }>;
-  /** Files other than pages and `notebook.zim` (attachments), which aren't imported yet. */
-  attachments: number;
+}
+
+/** Whether the importer has to read this file to understand it (rather than keep it as it is). */
+export function isReadToImport(path: string): boolean {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  return name === "notebook.zim" || name.endsWith(".txt");
 }
 
 /**
  * Turn the files of a notebook folder (or of a zip of one) into pages. Where a `notebook.zim` is,
  * that folder is the notebook; otherwise the first folder of every path (the one that was picked)
  * is dropped. Every `.txt` that is a valid page name and valid UTF-8 becomes a page, keeping its
- * byte-order mark and line endings so that it can be written back as it was; the rest is reported,
- * not guessed at.
+ * byte-order mark and line endings so that it can be written back as it was. Every other file that
+ * isn't hidden becomes an attachment at its path (the folder named like a page holds that page's
+ * attachments), unless its path can't be a file in a notebook or another file has the same path
+ * ignoring case. What isn't taken in is reported, not guessed at.
  */
 export function pagesFromFiles(files: ImportedFile[], now = Date.now()): Imported {
   const clean = files.map((f) => ({ ...f, path: f.path.replace(/\\/g, "/").replace(/^\/+/, "") }));
@@ -77,19 +89,37 @@ export function pagesFromFiles(files: ImportedFile[], now = Date.now()): Importe
     if (clean.every((f) => f.path.startsWith(`${first}/`))) prefix = `${first}/`;
   }
 
-  const result: Imported = { pages: [], config: {}, skipped: [], attachments: 0 };
+  const result: Imported = { pages: [], files: [], config: {}, skipped: [] };
   const seen = new Map<string, string>();
+  const seenFiles = new Map<string, string>();
   const decoder = new TextDecoder("utf-8", { fatal: false });
   for (const file of clean) {
     if (!file.path.startsWith(prefix)) continue;
     const relative = file.path.slice(prefix.length);
     if (relative.split("/").some((part) => part.startsWith("."))) continue; // hidden files and folders
     if (relative === "notebook.zim") {
-      result.config = parseNotebookConfig(decoder.decode(file.bytes));
+      if (file.bytes) result.config = parseNotebookConfig(decoder.decode(file.bytes));
       continue;
     }
     if (!relative.endsWith(".txt")) {
-      result.attachments++;
+      const problem = checkFilePath(relative);
+      if (problem) {
+        result.skipped.push({ path: relative, reason: problem });
+        continue;
+      }
+      const key = relative.toLowerCase();
+      const other = seenFiles.get(key);
+      if (other !== undefined) {
+        result.skipped.push({ path: relative, reason: `has the same name as ${other} (names ignore case)` });
+        continue;
+      }
+      seenFiles.set(key, relative);
+      const blob = file.blob ?? new Blob([(file.bytes ?? new Uint8Array()) as BlobPart]);
+      result.files.push({ path: relative, blob: typed(blob, relative), modified: file.modified instanceof Date ? file.modified.getTime() : (file.modified ?? now) });
+      continue;
+    }
+    if (!file.bytes) {
+      result.skipped.push({ path: relative, reason: "was not read" });
       continue;
     }
     let name: string;

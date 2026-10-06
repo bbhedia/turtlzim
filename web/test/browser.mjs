@@ -1020,7 +1020,7 @@ try {
     const dialog = ui.dialog();
     await dialog.waitFor();
     const text = await dialog.innerText();
-    assert(text.includes("4 pages; 1 other files (images and attachments) are not imported yet."), `the dialog counts what comes in (${text})`);
+    assert(text.includes("4 pages and 1 attachment (the files that go with pages"), `the dialog counts what comes in (${text})`);
     assert(text.includes("3 files were skipped:"), `and what doesn't (${text})`);
     assert(text.includes("Latin1.txt: not valid UTF-8"), "a file that isn't UTF-8 is named, with the reason");
     assert(/a\?b\.txt: /.test(text), "so is a name that is not a page name");
@@ -1030,7 +1030,7 @@ try {
     await ui.confirmDialog("Import");
     assertEqual(await ui.notebookTitle(), "Windows notebook", "the new notebook is open");
     assertEqual(await ui.current(), "Start", "at the home page its notebook.zim names");
-    assertEqual(await ui.status(), "Imported 4 pages as Windows notebook.", "the status says so");
+    assertEqual(await ui.status(), "Imported 4 pages and 1 attachment as Windows notebook.", "the status says so");
     assertEqual(await ui.pageCount(), 4, "four pages (Start, Mixed, Sub:Page and one of Dup and dup)");
 
     // the file is shown as a clean page; its byte-order mark and CRLF are the file's business
@@ -1061,7 +1061,8 @@ try {
     const dir = join(work, "export-windows");
     const exported = unzip(zip.bytes, dir);
     assertEqual(exported.filter((n) => /^dup\.txt$/i.test(n)).length, 1, "of the two files whose names differ only in case, one came in");
-    assertDeepEqual(exported.filter((n) => !/^dup\.txt$/i.test(n)), ["Mixed.txt", "Start.txt", "Sub/Page.txt", "notebook.zim"].sort(), "the zip holds the pages that came in");
+    assertDeepEqual(exported.filter((n) => !/^dup\.txt$/i.test(n)), ["Mixed.txt", "Start.txt", "Sub/Page.txt", "notebook.zim", "picture.png"].sort(), "the zip holds the pages and the attachment that came in");
+    assert(readFileSync(join(dir, "picture.png")).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])), "picture.png: unchanged");
     assert(readFileSync(join(dir, "Start.txt")).equals(utf8(startFile.replace("[ ] a task", "[*] a task"))), "Start.txt: the tick is the only change, and the dialect is kept");
     assert(readFileSync(join(dir, "Mixed.txt")).equals(utf8(mixedFile)), "Mixed.txt: unchanged");
     assert(readFileSync(join(dir, "Sub/Page.txt")).equals(utf8(subFile)), "Sub/Page.txt: unchanged");
@@ -1083,14 +1084,14 @@ try {
     await importHere("More pages in Sample notebook");
     assertEqual(await ui.pageCount(), SAMPLE_PAGES.length + 4, "four pages were added");
     assertEqual(await ui.notebookTitle(), "Sample notebook", "to the notebook that was open");
-    assertEqual(await ui.status(), "Imported 4 pages into Sample notebook.", "the status says so");
+    assertEqual(await ui.status(), "Imported 4 pages and 1 attachment into Sample notebook.", "the status says so");
     assert((await ui.rows()).includes("Start") && (await ui.rows()).includes("Mixed"), "they are in the tree");
     // write on one of them, then bring the folder in again: the page shown is replaced by the file's
     await ui.goto("Start");
     await ui.typeAtEnd("my own words");
     await ui.flush();
     assert((await ui.text()).endsWith("my own words"), "the page has been written on");
-    await importHere("More pages in Sample notebook (replaces 4 pages with the same names)");
+    await importHere("More pages in Sample notebook (replaces 4 pages and 1 file with the same names)");
     assertEqual(await ui.text(), startFile.slice(1).replaceAll("\r\n", "\n"), "the page shown is the file's again");
     assertEqual(await ui.pageCount(), SAMPLE_PAGES.length + 4, "and nothing was added");
   });
@@ -1109,13 +1110,14 @@ try {
       const dialog = ui.dialog();
       await dialog.waitFor();
       const text = await dialog.innerText();
-      assert(text.includes(`${pageFiles.length} pages; ${attachments} other files`), `the dialog counts the pages and the attachments (${text.slice(0, 300)})`);
+      assert(text.includes(`${pageFiles.length} pages and ${attachments} attachments`), `the dialog counts the pages and the attachments (${text.slice(0, 300)})`);
       assertEqual(await dialog.getByLabel("Notebook name").inputValue(), "manual", "the notebook is called what its notebook.zim says");
       await ui.confirmDialog("Import");
       assertEqual(await ui.notebookTitle(), "manual", "the notebook is open");
       assertEqual(await ui.current(), "Start", "at the home page notebook.zim names");
       assertEqual(await ui.pageCount(), pageFiles.length, "every page came in");
-      assertEqual(await ui.status(), `Imported ${pageFiles.length} pages as manual.`, "the status says so");
+      assertEqual(await ui.status(), `Imported ${pageFiles.length} pages and ${attachments} attachments as manual.`, "the status says so");
+      assertEqual(await page.evaluate(() => window.__zim.app.session.fileCount), attachments, "every attachment came in");
 
       const pages = await ui.allPages();
       let compared = 0;
@@ -1143,8 +1145,8 @@ try {
       assertEqual(zip.name, "manual.zip", "the zip is named for the notebook");
       const dir = join(work, "export-manual");
       const names = unzip(zip.bytes, dir);
-      assertDeepEqual(names.filter((n) => n.endsWith(".txt")), pageFiles, "the same page files, at the same paths");
-      for (const file of pageFiles) assert(readFileSync(join(dir, file)).equals(readFileSync(join(manualDir, file))), `${file} comes back unchanged`);
+      assertDeepEqual(names.filter((n) => n !== "notebook.zim"), files.filter((f) => f !== "notebook.zim"), "the same files, at the same paths: the pages and the attachments");
+      for (const file of files.filter((f) => f !== "notebook.zim")) assert(readFileSync(join(dir, file)).equals(readFileSync(join(manualDir, file))), `${file} comes back unchanged`);
       const config = readFileSync(join(dir, "notebook.zim"), "utf8");
       assert(/^name=manual$/m.test(config) && /^home=Start$/m.test(config), `notebook.zim names the notebook and its home (${config})`);
 
@@ -1159,6 +1161,7 @@ try {
         await ui.confirmDialog("Import", { "Notebook name": title });
         assertEqual(await ui.notebookTitle(), title, `${label}: the notebook is open`);
         assertEqual(await ui.pageCount(), pageFiles.length, `${label}: every page is in it`);
+        assertEqual(await page.evaluate(() => window.__zim.app.session.fileCount), attachments, `${label}: and every attachment`);
         assertDeepEqual(await ui.allPages(), pages, `${label}: and each one is what it was`);
       }
     });

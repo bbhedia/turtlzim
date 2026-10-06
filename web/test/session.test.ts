@@ -1,16 +1,18 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { linksIn, pageKey } from "../src/notebook-core";
 import { NotebookSession, createEmptyNotebook } from "../src/notebook/session";
 import { SAMPLE_PAGES, createSampleNotebook } from "../src/notebook/sample";
 import { MemoryStore } from "../src/notebook/store";
-import type { NotebookStore, StoredPage } from "../src/notebook/store";
+import type { NotebookStore, PageChange, StoredPage } from "../src/notebook/store";
 import { notebookConfig, pagesFromFiles, parseNotebookConfig } from "../src/notebook/zim-files";
 import { decodePage, initZimSync } from "../src/zim";
 import { createZip, crc32, readZip } from "../src/zip";
+import { isImageType, mediaTypeFor, typed } from "../src/notebook/media";
+import { notebookRoots } from "./support";
 
 beforeAll(() => {
   initZimSync(readFileSync(new URL("../src/zim-wasm/zim_wasm_bg.wasm", import.meta.url)));
@@ -110,7 +112,7 @@ describe("a notebook session", () => {
   it("keeps a page's byte-order mark and line endings when its text changes, and writes them back on export", async () => {
     const s = await open([page("Windows", "one\ntwo\n", { bom: true, lineEnding: "crlf" })]);
     await s.save("Windows", "one\ntwo\nthree\n");
-    const files = s.exportFiles();
+    const files = await s.exportFiles();
     const entry = files.find((f) => f.path === "Windows.txt")!;
     expect(Array.from(entry.bytes)).toEqual(Array.from(new TextEncoder().encode("﻿one\r\ntwo\r\nthree\r\n")));
     expect(files[0]?.path).toBe("notebook.zim");
@@ -119,7 +121,7 @@ describe("a notebook session", () => {
   it("exports pages at the paths Zim uses, with a notebook.zim that Zim can read", async () => {
     const s = await open([page("Home", "h"), page("Plugins:Table Editor:Basic", "b")]);
     await s.setTitle("My notebook");
-    const files = s.exportFiles();
+    const files = await s.exportFiles();
     expect(files.map((f) => f.path).sort()).toEqual(["Home.txt", "Plugins/Table_Editor/Basic.txt", "notebook.zim"]);
     const config = new TextDecoder().decode(files.find((f) => f.path === "notebook.zim")!.bytes);
     expect(parseNotebookConfig(config)).toEqual({ name: "My notebook", home: "Home" });
@@ -129,7 +131,7 @@ describe("a notebook session", () => {
   it("goes back to what the store holds when a write fails, and says so", async () => {
     class Failing extends MemoryStore {
       fail = false;
-      override async replacePages(id: string, change: { remove: string[]; put: StoredPage[] }): Promise<void> {
+      override async replacePages(id: string, change: PageChange): Promise<void> {
         if (this.fail) throw new Error("the disk is full");
         return super.replacePages(id, change);
       }
@@ -159,7 +161,132 @@ describe("a notebook session", () => {
     const s = await open([page("A", "old"), page("B", "b")]);
     await s.addPages([page("a", "new", { bom: true }), page("C", "c")]);
     expect(await stored(s)).toEqual({ A: "new", B: "b", C: "c" });
-    expect(s.exportFiles().find((f) => f.path === "A.txt")!.bytes.slice(0, 3)).toEqual(new Uint8Array([0xef, 0xbb, 0xbf]));
+    expect((await s.exportFiles()).find((f) => f.path === "A.txt")!.bytes.slice(0, 3)).toEqual(new Uint8Array([0xef, 0xbb, 0xbf]));
+  });
+
+  describe("attachments", () => {
+    const blob = (content: string, type = "") => new Blob([content], { type });
+    const sorted = (list: string[]) => [...list].sort();
+
+    it("are stored in the folder of their page under a safe name, and listed", async () => {
+      const s = await open([page("Projects", "p"), page("Projects:Garden", "g")]);
+      const events: string[] = [];
+      s.onChange((e) => events.push(e.kind));
+      const path = await s.addFile("Projects:Garden", blob("img"), "Photo 1?.PNG");
+      expect(path).toBe("Projects/Garden/Photo 1_.PNG");
+      expect(s.attachments("Projects:Garden")).toEqual([{ path, size: 3, type: "image/png", modified: expect.any(Number) }]);
+      expect(s.attachments("Projects")).toEqual([]);
+      expect(await (await s.fileBlob(path))?.text()).toBe("img");
+      expect(s.fileLink("Projects:Garden", path)).toBe("./Photo 1_.PNG");
+      expect(s.fileLink("Projects", path)).toBe("./Garden/Photo 1_.PNG");
+      expect(s.resolveFile("Projects:Garden", "./Photo 1_.PNG")).toEqual({ kind: "notebook", path, exists: true });
+      // the same name again gets a free one, and a type the file brought is kept
+      expect(await s.addFile("Projects:Garden", blob("two", "image/jpeg"), "Photo 1?.PNG")).toBe("Projects/Garden/Photo 1_ 2.PNG");
+      expect(s.fileInfo("projects/garden/photo 1_ 2.png")?.type).toBe("image/jpeg");
+      expect(events).toEqual(["files", "files"]);
+      expect(s.fileCount).toBe(2);
+      // what the store holds is what a session opened later sees
+      const again = await NotebookSession.open(s.store, s.info.id);
+      expect(sorted(again.attachments("Projects:Garden").map((f) => f.path))).toEqual(["Projects/Garden/Photo 1_ 2.PNG", "Projects/Garden/Photo 1_.PNG"]);
+      expect(await (await again.fileBlob(path))?.text()).toBe("img");
+    });
+
+    it("are deleted one at a time", async () => {
+      const s = await open([page("A", "a")]);
+      const path = await s.addFile("A", blob("x"), "x.txt");
+      expect(await s.removeFile("A/X.TXT")).toBe(true);
+      expect(await s.removeFile(path)).toBe(false);
+      expect(s.attachments("A")).toEqual([]);
+      expect(await s.store.listFiles(s.info.id)).toEqual([]);
+    });
+
+    it("move with their page, in the same write as the pages, and the references follow", async () => {
+      const s = await open([page("Foo", "{{./a.png}} [[./doc.pdf|doc]]"), page("Foo:Sub", "{{./b.png}}"), page("Index", "{{../Foo/a.png?width=5}}")]);
+      await s.addFile("Foo", blob("A", "image/png"), "a.png");
+      await s.addFile("Foo", blob("D", "application/pdf"), "doc.pdf");
+      await s.addFile("Foo:Sub", blob("B", "image/png"), "b.png");
+      await s.addFile("Elsewhere", blob("E"), "e.bin");
+      const report = await s.rename("Foo", "Bar:Baz");
+      expect(report.filesMoved.map(([from, to]) => `${from} -> ${to}`)).toEqual([
+        "Foo/a.png -> Bar/Baz/a.png",
+        "Foo/doc.pdf -> Bar/Baz/doc.pdf",
+        "Foo/Sub/b.png -> Bar/Baz/Sub/b.png",
+      ]);
+      expect(s.text("Index")).toBe("{{../Bar/Baz/a.png?width=5}}");
+      expect(s.text("Bar:Baz")).toBe("{{./a.png}} [[./doc.pdf|doc]]");
+      expect(sorted(s.attachments("Bar:Baz").map((f) => f.path))).toEqual(["Bar/Baz/a.png", "Bar/Baz/doc.pdf"]);
+      expect(s.fileInfo("Bar/Baz/Sub/b.png")).toMatchObject({ size: 1, type: "image/png" });
+      expect(s.fileInfo("Foo/a.png")).toBeUndefined();
+      expect(await (await s.fileBlob("Bar/Baz/Sub/b.png"))?.text()).toBe("B");
+      expect(await s.fileBlob("Foo/a.png")).toBeUndefined();
+      expect(sorted((await s.store.listFiles(s.info.id)).map((f) => f.path))).toEqual(["Bar/Baz/Sub/b.png", "Bar/Baz/a.png", "Bar/Baz/doc.pdf", "Elsewhere/e.bin"]);
+      expect(await stored(s)).toEqual({ "Bar:Baz": "{{./a.png}} [[./doc.pdf|doc]]", "Bar:Baz:Sub": "{{./b.png}}", Index: "{{../Bar/Baz/a.png?width=5}}" });
+    });
+
+    it("are deleted with their page and the pages below it, and no others", async () => {
+      const s = await open([page("A", "a"), page("A:B", "b"), page("AB", "x")]);
+      await s.addFile("A", blob("1"), "one.txt");
+      await s.addFile("A:B", blob("2"), "two.txt");
+      await s.addFile("AB", blob("3"), "three.txt");
+      await s.delete("A");
+      expect((await s.store.listFiles(s.info.id)).map((f) => f.path)).toEqual(["AB/three.txt"]);
+      expect(s.fileCount).toBe(1);
+      expect(s.attachments("AB").map((f) => f.path)).toEqual(["AB/three.txt"]);
+    });
+
+    it("go into an export at their paths, byte for byte, beside the pages", async () => {
+      const s = await open([page("Home", "{{./pic.bin}}")]);
+      const bytes = new Uint8Array(Array.from({ length: 300 }, (_, i) => (i * 7) & 0xff));
+      await s.addFile("Home", new Blob([bytes as BlobPart]), "pic.bin");
+      await s.addFile("Plugins:Table Editor", blob("t"), "table.png");
+      const entries = await s.exportFiles();
+      expect(entries.map((e) => e.path).sort()).toEqual(["Home.txt", "Home/pic.bin", "Plugins/Table_Editor/table.png", "notebook.zim"].sort());
+      expect(Array.from(entries.find((e) => e.path === "Home/pic.bin")!.bytes)).toEqual(Array.from(bytes));
+      // through a zip and back
+      const back = await readZip(createZip(entries));
+      expect(Array.from(back.find((e) => e.path === "Home/pic.bin")!.bytes)).toEqual(Array.from(bytes));
+    });
+
+    it("come in with imported pages, replacing those at the same path, ignoring case, and keeping the spelling that was there", async () => {
+      const s = await open([page("A", "old")]);
+      await s.addFile("A", blob("old"), "Pic.png");
+      await s.addPages([page("B", "b")], [{ path: "a/PIC.PNG", blob: blob("new", "image/png"), modified: 5 }, { path: "B/x.txt", blob: blob("x"), modified: 6 }]);
+      expect(await (await s.fileBlob("A/Pic.png"))?.text()).toBe("new");
+      expect(sorted((await s.store.listFiles(s.info.id)).map((f) => f.path))).toEqual(["A/Pic.png", "B/x.txt"]);
+      expect(s.fileInfo("A/Pic.png")).toMatchObject({ size: 3, type: "image/png", modified: 5 });
+    });
+
+    it("are rolled back with everything else when a write fails", async () => {
+      class Failing extends MemoryStore {
+        fail = false;
+        override async replacePages(id: string, change: PageChange): Promise<void> {
+          if (this.fail) throw new Error("the disk is full");
+          return super.replacePages(id, change);
+        }
+      }
+      const store = new Failing(pageKey);
+      const s = await open([page("Foo", "{{./a.png}}")], store);
+      await s.addFile("Foo", blob("A"), "a.png");
+      store.fail = true;
+      await expect(s.addFile("Foo", blob("B"), "b.png")).rejects.toThrow(/disk is full/);
+      await expect(s.rename("Foo", "Bar")).rejects.toThrow(/disk is full/);
+      await expect(s.delete("Foo")).rejects.toThrow(/disk is full/);
+      await expect(s.removeFile("Foo/a.png")).rejects.toThrow(/disk is full/);
+      expect(s.names()).toEqual(["Foo"]);
+      expect(s.attachments("Foo").map((f) => f.path)).toEqual(["Foo/a.png"]);
+      expect(s.fileCount).toBe(1);
+      expect((await store.listFiles(s.info.id)).map((f) => f.path)).toEqual(["Foo/a.png"]);
+    });
+
+    it("refuse a move that would put one file on another, changing nothing", async () => {
+      const s = await open([page("Foo", "x")]);
+      await s.addFile("Foo", blob("A"), "a.png");
+      await s.addFile("Bar", blob("other"), "a.png");
+      await expect(s.rename("Foo", "Bar")).rejects.toThrow(/Bar\/a\.png already exists/);
+      expect(s.names()).toEqual(["Foo"]);
+      expect(await (await s.fileBlob("Foo/a.png"))?.text()).toBe("A");
+      expect(await (await s.fileBlob("Bar/a.png"))?.text()).toBe("other");
+    });
   });
 
   it("starts an empty notebook with a home page", async () => {
@@ -225,12 +352,42 @@ describe("importing files", () => {
     ]);
     expect(imported.config).toEqual({ name: "Mine", home: "Start" });
     expect(imported.pages.map((p) => p.name).sort()).toEqual(["BOM", "Help:Auto Formatting", "Start"]);
-    expect(imported.attachments).toBe(1);
+    expect(imported.files.map((f) => f.path)).toEqual(["Help/Auto_Formatting/pic.png"]);
+    expect(imported.files[0]?.blob.size).toBe(6);
     expect(imported.skipped.map((s) => s.path).sort()).toEqual(["Latin1.txt", "bad*name.txt", "help/auto formatting.txt"]);
     expect(imported.skipped.find((s) => s.path === "Latin1.txt")?.reason).toContain("UTF-8");
     expect(imported.skipped.find((s) => s.path.startsWith("help"))?.reason).toContain("same name");
     const bom = imported.pages.find((p) => p.name === "BOM")!;
     expect([bom.text, bom.bom, bom.lineEnding]).toEqual(["a\nb", true, "crlf"]);
+  });
+
+  it("takes every other file as an attachment at its path, and says what it could not take", () => {
+    const picture = new Blob([new Uint8Array([1, 2, 3, 4])], { type: "image/png" });
+    const imported = pagesFromFiles([
+      { path: "Nb/notebook.zim", bytes: new TextEncoder().encode("[Notebook]\nname=Nb\n") },
+      file("Nb/Home.txt", "h"),
+      { path: "Nb/Home/pic.png", blob: picture, modified: 1234 },
+      file("Nb/Home/data.bin", new Uint8Array([9, 8, 7])),
+      file("Nb/Home/Report.PDF", "pdf"),
+      file("Nb/Home/report.pdf", "same name, other case"),
+      file("Nb/top level.svg", "<svg/>"),
+      file("Nb/Home/.hidden/secret.png", "x"),
+      file("Nb/.DS_Store", "x"),
+      file("Nb/back\\slash/a.png", "x"),
+      file("Nb/Home/tab\tname.png", "x"),
+    ]);
+    // (a backslash in a path is how Windows tools write a folder separator)
+    expect(imported.files.map((f) => f.path).sort()).toEqual(["Home/Report.PDF", "Home/data.bin", "Home/pic.png", "back/slash/a.png", "top level.svg"].sort());
+    const byPath = Object.fromEntries(imported.files.map((f) => [f.path, f]));
+    expect(byPath["Home/pic.png"]).toMatchObject({ modified: 1234 });
+    expect(byPath["Home/pic.png"]?.blob.type).toBe("image/png");
+    expect(byPath["Home/data.bin"]?.blob.type).toBe("application/octet-stream");
+    expect(byPath["Home/Report.PDF"]?.blob.type).toBe("application/pdf");
+    expect(byPath["top level.svg"]?.blob.type).toBe("image/svg+xml");
+    expect(byPath["Home/data.bin"]?.blob.size).toBe(3);
+    expect(imported.skipped.map((s) => s.path).sort()).toEqual(["Home/report.pdf", "Home/tab\tname.png"].sort());
+    expect(imported.skipped.find((s) => s.path === "Home/report.pdf")?.reason).toContain("same name");
+    expect(imported.skipped.find((s) => s.path.includes("tab"))?.reason).toContain("control");
   });
 
   it("finds the notebook inside a folder that was picked above it, and without a config drops the picked folder", () => {
@@ -303,5 +460,57 @@ describe("zip files", () => {
     const damaged = zip.slice();
     damaged[40] = (damaged[40] ?? 0) ^ 0xff; // a byte of the file's contents
     await expect(readZip(damaged)).rejects.toThrow(/checksum/);
+  });
+});
+
+describe("media types", () => {
+  it("come from the name when the file has none, and only pictures a browser draws safely count as images", () => {
+    expect(mediaTypeFor("a/b/photo.JPG")).toBe("image/jpeg");
+    expect(mediaTypeFor("logo.svg")).toBe("image/svg+xml");
+    expect(mediaTypeFor("noextension")).toBe("application/octet-stream");
+    expect(mediaTypeFor(".hidden")).toBe("application/octet-stream");
+    expect(mediaTypeFor("archive.tar.gz")).toBe("application/gzip");
+    for (const type of ["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml", "IMAGE/PNG"]) expect(isImageType(type), type).toBe(true);
+    for (const type of ["", "text/html", "application/pdf", "image/tiff", "image/svg", "video/mp4", "application/octet-stream"]) expect(isImageType(type), type).toBe(false);
+    expect(typed(new Blob(["x"]), "a.png").type).toBe("image/png");
+    expect(typed(new Blob(["x"], { type: "image/gif" }), "a.png").type).toBe("image/gif");
+  });
+});
+
+/** Every file below `root` that the importer does not ignore (hidden ones), as notebook-relative paths. */
+function filesBelow(root: string, dir = root): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...filesBelow(root, path));
+    else found.push(relative(root, path).split(sep).join("/"));
+  }
+  return found.sort();
+}
+
+const roots = notebookRoots();
+describe.skipIf(roots.length === 0)("real Zim notebooks (ZIM_GOLDEN_DIR), through import and export", () => {
+  it("come in with their attachments and go out again, every file byte for byte", async () => {
+    for (const root of roots) {
+      const originals = filesBelow(root);
+      const imported = pagesFromFiles(originals.map((path) => ({ path: `${basename(root)}/${path}`, bytes: new Uint8Array(readFileSync(join(root, path))) })));
+      // (what could not be a page or an attachment is not expected back: it was reported when it was skipped)
+      const skipped = new Set(imported.skipped.map((s) => s.path));
+      const store = new MemoryStore(pageKey);
+      const info = await store.createNotebook({ title: basename(root), home: imported.config.home ?? "Home", kind: "open" }, imported.pages, imported.files);
+      const session = await NotebookSession.open(store, info.id);
+      expect(session.pageCount, root).toBe(imported.pages.length);
+      expect(session.fileCount, root).toBe(imported.files.length);
+      const out = new Map((await readZip(createZip(await session.exportFiles()))).map((e) => [e.path, e.bytes]));
+      for (const path of originals) {
+        if (path === "notebook.zim" || skipped.has(path)) continue;
+        const bytes = out.get(path);
+        expect(bytes, `${root}: ${path} is in the export`).toBeDefined();
+        expect(Buffer.from(bytes!).equals(readFileSync(join(root, path))), `${root}: ${path} comes back unchanged`).toBe(true);
+      }
+      const expected = originals.filter((p) => p !== "notebook.zim" && !skipped.has(p));
+      expect([...out.keys()].filter((p) => p !== "notebook.zim").sort(), root).toEqual(expected);
+    }
   });
 });

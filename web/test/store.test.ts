@@ -6,7 +6,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { pageKey } from "../src/notebook-core";
 import { IndexedDbStore } from "../src/notebook/idb";
 import { MemoryStore } from "../src/notebook/store";
-import type { NotebookStore, StoredPage } from "../src/notebook/store";
+import type { NotebookStore, StoredFile, StoredPage } from "../src/notebook/store";
 import { initZimSync } from "../src/zim";
 
 beforeAll(() => {
@@ -15,6 +15,9 @@ beforeAll(() => {
 
 const page = (name: string, text = "", extra: Partial<StoredPage> = {}): StoredPage => ({ name, text, bom: false, lineEnding: "lf", modified: 1, ...extra });
 const byName = (pages: StoredPage[]) => [...pages].sort((a, b) => a.name.localeCompare(b.name));
+const file = (path: string, content = path, type = "application/octet-stream", modified = 1): StoredFile => ({ path, blob: new Blob([content], { type }), modified });
+const paths = async (store: NotebookStore, id: string) => (await store.listFiles(id)).map((f) => f.path).sort();
+const text = async (store: NotebookStore, id: string, path: string) => (await store.loadFile(id, path))?.text();
 let databases = 0;
 
 function contract(label: string, make: () => Promise<NotebookStore>) {
@@ -77,6 +80,71 @@ function contract(label: string, make: () => Promise<NotebookStore>) {
     it("says so when a notebook isn't there", async () => {
       const store = await make();
       await expect(store.replacePages("missing", { remove: [], put: [page("A")] })).rejects.toThrow();
+      await expect(store.replacePages("missing", { remove: [], put: [], files: { put: [file("a.png")] } })).rejects.toThrow();
+    });
+
+    it("keeps a notebook's files, with their bytes, type and time, and no one else's", async () => {
+      const store = await make();
+      const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 255, 128]);
+      const a = await store.createNotebook({ title: "A", home: "Home", kind: "open" }, [page("Home")], [{ path: "Home/pic.png", blob: new Blob([bytes], { type: "image/png" }), modified: 777 }, file("top.txt", "hello", "text/plain")]);
+      const b = await store.createNotebook({ title: "B", home: "Home", kind: "open" }, [], [file("Home/pic.png", "B's picture", "image/png")]);
+      expect((await store.listFiles(a.id)).sort((x, y) => x.path.localeCompare(y.path))).toEqual([
+        { path: "Home/pic.png", size: 7, type: "image/png", modified: 777 },
+        { path: "top.txt", size: 5, type: "text/plain", modified: 1 },
+      ]);
+      expect(new Uint8Array(await (await store.loadFile(a.id, "Home/pic.png"))!.arrayBuffer())).toEqual(bytes);
+      expect(await text(store, b.id, "Home/pic.png")).toBe("B's picture");
+      expect(await store.loadFile(a.id, "nope.png")).toBeUndefined();
+      await store.deleteNotebook(a.id);
+      expect(await paths(store, b.id)).toEqual(["Home/pic.png"]);
+      expect(await text(store, b.id, "Home/pic.png")).toBe("B's picture");
+    });
+
+    it("treats paths that differ only in case as one file, and keeps the spelling it was given", async () => {
+      const store = await make();
+      const n = await store.createNotebook({ title: "N", home: "Home", kind: "open" }, [], [file("Foo/a.png", "one")]);
+      expect(await text(store, n.id, "FOO/A.PNG")).toBe("one");
+      await store.replacePages(n.id, { remove: [], put: [], files: { put: [file("FOO/A.png", "two")] } });
+      expect(await store.listFiles(n.id)).toHaveLength(1);
+      expect(await text(store, n.id, "foo/a.png")).toBe("two");
+      await store.replacePages(n.id, { remove: [], put: [], files: { remove: ["foo/A.PNG"] } });
+      expect(await store.listFiles(n.id)).toEqual([]);
+    });
+
+    it("changes files together with pages: moves keep the bytes, then removals, then writes", async () => {
+      const store = await make();
+      const n = await store.createNotebook({ title: "N", home: "Home" , kind: "open" }, [page("Foo", "{{./a.png}}"), page("Other", "{{../Foo/a.png}}")], [file("Foo/a.png", "A"), file("Foo/Sub/b.png", "B"), file("Keep/c.png", "C"), file("Gone/d.png", "D")]);
+      await store.replacePages(n.id, {
+        remove: ["Foo"],
+        put: [page("Bar", "{{./a.png}}"), page("Other", "{{../Bar/a.png}}")],
+        files: { move: [["Foo/a.png", "Bar/a.png"], ["Foo/Sub/b.png", "Bar/Sub/b.png"]], remove: ["Gone/d.png"], put: [file("New/e.png", "E")] },
+      });
+      expect(byName(await store.loadPages(n.id)).map((p) => p.name)).toEqual(["Bar", "Other"]);
+      expect(await paths(store, n.id)).toEqual(["Bar/Sub/b.png", "Bar/a.png", "Keep/c.png", "New/e.png"]);
+      expect(await text(store, n.id, "Bar/a.png")).toBe("A");
+      expect(await text(store, n.id, "Bar/Sub/b.png")).toBe("B");
+      expect(await store.loadFile(n.id, "Foo/a.png")).toBeUndefined();
+      // moving a file that isn't there moves nothing; moving onto a name that is taken takes its place
+      await store.replacePages(n.id, { remove: [], put: [], files: { move: [["nothing.png", "Z.png"], ["Keep/c.png", "Bar/a.png"]] } });
+      expect(await paths(store, n.id)).toEqual(["Bar/Sub/b.png", "Bar/a.png", "New/e.png"]);
+      expect(await text(store, n.id, "Bar/a.png")).toBe("C");
+    });
+
+    it("lets files swap places, and change only the case of their path", async () => {
+      const store = await make();
+      const n = await store.createNotebook({ title: "N", home: "Home", kind: "open" }, [], [file("x.png", "X"), file("y.png", "Y"), file("Case/a.png", "A")]);
+      await store.replacePages(n.id, { remove: [], put: [], files: { move: [["x.png", "y.png"], ["y.png", "x.png"], ["Case/a.png", "case/A.png"]] } });
+      expect(await text(store, n.id, "x.png")).toBe("Y");
+      expect(await text(store, n.id, "y.png")).toBe("X");
+      expect(await paths(store, n.id)).toEqual(["case/A.png", "x.png", "y.png"]);
+    });
+
+    it("holds hundreds of files", async () => {
+      const store = await make();
+      const files = Array.from({ length: 600 }, (_, i) => file(`Section ${i % 20}/file ${i}.bin`, `content ${i}`));
+      const n = await store.createNotebook({ title: "Big", home: "Home", kind: "open" }, [], files);
+      expect(await store.listFiles(n.id)).toHaveLength(600);
+      expect(await text(store, n.id, "Section 7/file 507.bin")).toBe("content 507");
     });
   });
 }
@@ -103,6 +171,46 @@ describe("IndexedDB, beyond the contract", () => {
     // (and it is that error the caller gets, not a generic "transaction aborted")
     await expect(store.replacePages(n.id, { remove: ["A"], put: [page("D", "d"), unstorable] })).rejects.toThrow(/clone/i);
     expect(byName(await store.loadPages(n.id)).map((p) => p.name)).toEqual(["A", "B"]);
+  });
+
+  it("changes nothing when part of a change of files can't be written", async () => {
+    const store = await IndexedDbStore.open(pageKey, `atomic-files-${++databases}`);
+    const n = await store.createNotebook({ title: "N", home: "Home", kind: "open" }, [page("A", "a")], [file("a.png", "A"), file("b.png", "B")]);
+    const unstorable = { path: "c.png", blob: (() => "x") as unknown as Blob, modified: 1 };
+    await expect(
+      store.replacePages(n.id, { remove: ["A"], put: [page("D", "d")], files: { move: [["a.png", "moved.png"]], remove: ["b.png"], put: [file("e.png"), unstorable] } }),
+    ).rejects.toThrow(/clone/i);
+    expect(byName(await store.loadPages(n.id)).map((p) => p.name)).toEqual(["A"]);
+    expect(await paths(store, n.id)).toEqual(["a.png", "b.png"]);
+  });
+
+  it("opens a database made before files existed, keeps what is in it, and can then hold files", async () => {
+    const name = `version-1-${++databases}`;
+    // the database as the first version of the app made it: notebooks and pages only
+    await new Promise<void>((resolve, reject) => {
+      const opening = indexedDB.open(name, 1);
+      opening.onupgradeneeded = () => {
+        opening.result.createObjectStore("notebooks", { keyPath: "id" });
+        opening.result.createObjectStore("pages", { keyPath: ["notebook", "key"] });
+      };
+      opening.onsuccess = () => {
+        const tx = opening.result.transaction(["notebooks", "pages"], "readwrite");
+        tx.objectStore("notebooks").put({ id: "old", title: "Old", home: "Home", created: 1, kind: "open" });
+        tx.objectStore("pages").put({ notebook: "old", key: "home", name: "Home", text: "from version 1", bom: false, lineEnding: "lf", modified: 1 });
+        tx.oncomplete = () => {
+          opening.result.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+      opening.onerror = () => reject(opening.error);
+    });
+    const store = await IndexedDbStore.open(pageKey, name);
+    expect((await store.listNotebooks()).map((n) => n.title)).toEqual(["Old"]);
+    expect((await store.loadPages("old"))[0]?.text).toBe("from version 1");
+    expect(await store.listFiles("old")).toEqual([]);
+    await store.replacePages("old", { remove: [], put: [], files: { put: [file("Home/a.png", "now with files")] } });
+    expect(await text(store, "old", "Home/a.png")).toBe("now with files");
   });
 
   it("asks for persistence only where the browser can give it, and never fails", async () => {

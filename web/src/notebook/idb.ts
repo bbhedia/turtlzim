@@ -1,10 +1,18 @@
-import type { NotebookInfo, NotebookStore, StoredPage } from "./store";
+import { fileKey } from "./store";
+import type { FileChange, FileInfo, NotebookInfo, NotebookStore, PageChange, StoredFile, StoredPage } from "./store";
 
 const DATABASE = "zim-notebooks";
-const VERSION = 1;
+/** 1: notebooks and pages. 2: files (attachments). */
+const VERSION = 2;
 
 /** One page row. The key is [notebook id, page key]: all of a notebook's pages are one key range. */
 interface PageRow extends StoredPage {
+  notebook: string;
+  key: string;
+}
+
+/** One file row, keyed like a page row: all of a notebook's files are one key range. */
+interface FileRow extends StoredFile {
   notebook: string;
   key: string;
 }
@@ -38,10 +46,13 @@ export class IndexedDbStore implements NotebookStore {
 
   static async open(keyOf: (name: string) => string, name = DATABASE): Promise<IndexedDbStore> {
     const opening = indexedDB.open(name, VERSION);
-    opening.onupgradeneeded = () => {
+    opening.onupgradeneeded = (event) => {
       const db = opening.result;
-      db.createObjectStore("notebooks", { keyPath: "id" });
-      db.createObjectStore("pages", { keyPath: ["notebook", "key"] });
+      if (event.oldVersion < 1) {
+        db.createObjectStore("notebooks", { keyPath: "id" });
+        db.createObjectStore("pages", { keyPath: ["notebook", "key"] });
+      }
+      if (event.oldVersion < 2) db.createObjectStore("files", { keyPath: ["notebook", "key"] });
     };
     return new IndexedDbStore(await request(opening), keyOf);
   }
@@ -81,11 +92,12 @@ export class IndexedDbStore implements NotebookStore {
     await finished(tx);
   }
 
-  async createNotebook(info: Omit<NotebookInfo, "id" | "created">, pages: StoredPage[] = []): Promise<NotebookInfo> {
+  async createNotebook(info: Omit<NotebookInfo, "id" | "created">, pages: StoredPage[] = [], files: StoredFile[] = []): Promise<NotebookInfo> {
     const created: NotebookInfo = { ...info, id: crypto.randomUUID(), created: Date.now() };
-    await this.write(["notebooks", "pages"], (tx) => {
+    await this.write(["notebooks", "pages", "files"], (tx) => {
       tx.objectStore("notebooks").put(created);
       for (const page of pages) tx.objectStore("pages").put(this.row(created.id, page));
+      for (const file of files) tx.objectStore("files").put(this.fileRow(created.id, file));
     });
     return created;
   }
@@ -95,9 +107,10 @@ export class IndexedDbStore implements NotebookStore {
   }
 
   async deleteNotebook(id: string): Promise<void> {
-    await this.write(["notebooks", "pages"], (tx) => {
+    await this.write(["notebooks", "pages", "files"], (tx) => {
       tx.objectStore("notebooks").delete(id);
       tx.objectStore("pages").delete(IDBKeyRange.bound([id], [id, []]));
+      tx.objectStore("files").delete(IDBKeyRange.bound([id], [id, []]));
     });
   }
 
@@ -107,13 +120,28 @@ export class IndexedDbStore implements NotebookStore {
     return rows.map(({ notebook: _notebook, key: _key, ...page }) => page);
   }
 
-  async replacePages(id: string, change: { remove: string[]; put: StoredPage[] }): Promise<void> {
+  async listFiles(id: string): Promise<FileInfo[]> {
+    const tx = this.db.transaction("files", "readonly");
+    const rows = (await request(tx.objectStore("files").getAll(IDBKeyRange.bound([id], [id, []])))) as FileRow[];
+    return rows.map((r) => ({ path: r.path, size: r.blob.size, type: r.blob.type, modified: r.modified }));
+  }
+
+  async loadFile(id: string, path: string): Promise<Blob | undefined> {
+    const tx = this.db.transaction("files", "readonly");
+    const row = (await request(tx.objectStore("files").get([id, fileKey(path)]))) as FileRow | undefined;
+    return row?.blob;
+  }
+
+  async replacePages(id: string, change: PageChange): Promise<void> {
     // What went wrong inside the transaction's callback is kept here and thrown from this function:
     // an exception thrown from an event handler would be reported as an uncaught error instead.
     let missing = false;
     let problem: unknown;
+    const fail = (error: unknown) => {
+      problem = error;
+    };
     try {
-      await this.write(["notebooks", "pages"], (tx) => {
+      await this.write(change.files ? ["notebooks", "pages", "files"] : ["notebooks", "pages"], (tx) => {
         // The notebook has to exist (it may have been deleted from another tab): the check and the
         // writes are one transaction, so nothing is written for a notebook that is gone.
         const exists = tx.objectStore("notebooks").getKey(id);
@@ -127,6 +155,10 @@ export class IndexedDbStore implements NotebookStore {
             const pages = tx.objectStore("pages");
             for (const name of change.remove) pages.delete([id, this.keyOf(name)]);
             for (const page of change.put) pages.put(this.row(id, page));
+            if (change.files) this.queueFiles(tx, id, change.files, (error) => {
+              fail(error);
+              tx.abort();
+            });
           } catch (error) {
             problem = error;
             tx.abort();
@@ -139,7 +171,42 @@ export class IndexedDbStore implements NotebookStore {
     }
   }
 
+  /**
+   * Queue a change of files in `tx`: moved files are read first (the bytes stay with the file),
+   * then everything that goes is deleted and everything that comes is written. A moved file that
+   * isn't stored is skipped.
+   */
+  private queueFiles(tx: IDBTransaction, id: string, change: FileChange, fail: (error: unknown) => void): void {
+    const store = tx.objectStore("files");
+    const moves = change.move ?? [];
+    const apply = (moved: FileRow[]) => {
+      for (const [from] of moves) store.delete([id, fileKey(from)]);
+      for (const path of change.remove ?? []) store.delete([id, fileKey(path)]);
+      for (const row of moved) store.put(row);
+      for (const file of change.put ?? []) store.put(this.fileRow(id, file));
+    };
+    if (moves.length === 0) return apply([]);
+    const moved: FileRow[] = [];
+    let waiting = moves.length;
+    for (const [from, to] of moves) {
+      const read = store.get([id, fileKey(from)]);
+      read.onsuccess = () => {
+        try {
+          const row = read.result as FileRow | undefined;
+          if (row) moved.push({ ...row, path: to, key: fileKey(to) });
+          if (--waiting === 0) apply(moved);
+        } catch (error) {
+          fail(error);
+        }
+      };
+    }
+  }
+
   private row(notebook: string, page: StoredPage): PageRow {
     return { ...page, notebook, key: this.keyOf(page.name) };
+  }
+
+  private fileRow(notebook: string, file: StoredFile): FileRow {
+    return { ...file, notebook, key: fileKey(file.path) };
   }
 }

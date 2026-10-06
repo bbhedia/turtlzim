@@ -12,7 +12,7 @@ import { NotebookSession, createEmptyNotebook } from "../notebook/session";
 import type { SessionEvent } from "../notebook/session";
 import { MemoryStore } from "../notebook/store";
 import type { NotebookInfo, NotebookStore } from "../notebook/store";
-import { pagesFromFiles } from "../notebook/zim-files";
+import { isReadToImport, pagesFromFiles } from "../notebook/zim-files";
 import type { Imported, ImportedFile } from "../notebook/zim-files";
 import { createZip, readZip } from "../zip";
 import { showDialog, showMessage } from "./dialogs";
@@ -86,6 +86,9 @@ function pageFromHash(): string | null {
 const OPENABLE_PROTOCOLS = new Set(["http:", "https:", "ftp:"]);
 
 const SAVE_DELAY_MS = 700;
+
+/** "1 page", "2 pages". */
+const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? "" : "s"}`;
 
 interface Current {
   name: string;
@@ -417,11 +420,16 @@ export class App {
   }
 
   private exportNotebook(): void {
-    void this.flush().then(() => {
-      const zip = createZip(this.session.exportFiles());
-      const slug = this.session.title.replace(/[^\p{L}\p{N}._-]+/gu, "_").replace(/^_+|_+$/g, "") || "notebook";
-      this.download(`${slug}.zip`, zip, "application/zip");
-      this.say(`Exported ${this.session.pageCount} pages as ${slug}.zip. Unzip it and open the folder in Zim, or import it again here.`);
+    void this.flush().then(async () => {
+      try {
+        const zip = createZip(await this.session.exportFiles());
+        const slug = this.session.title.replace(/[^\p{L}\p{N}._-]+/gu, "_").replace(/^_+|_+$/g, "") || "notebook";
+        this.download(`${slug}.zip`, zip, "application/zip");
+        const files = this.session.fileCount;
+        this.say(`Exported ${count(this.session.pageCount, "page")}${files ? ` and ${count(files, "attachment")}` : ""} as ${slug}.zip. Unzip it and open the folder in Zim, or import it again here.`);
+      } catch (error) {
+        this.say(`Couldn't export: ${error instanceof Error ? error.message : String(error)}`);
+      }
     });
   }
 
@@ -458,7 +466,13 @@ export class App {
         files = (await readZip(new Uint8Array(await zip.arrayBuffer()))).map((e) => ({ path: e.path, bytes: e.bytes }));
         suggested = zip.name.replace(/\.zip$/i, "");
       } else {
-        files = await Promise.all(picked.map(async (f) => ({ path: f.webkitRelativePath || f.name, bytes: new Uint8Array(await f.arrayBuffer()), modified: f.lastModified })));
+        // Pages and notebook.zim are read to be understood; attachments stay as the files they are until they are stored.
+        files = await Promise.all(
+          picked.map(async (f): Promise<ImportedFile> => {
+            const path = f.webkitRelativePath || f.name;
+            return isReadToImport(path) ? { path, bytes: new Uint8Array(await f.arrayBuffer()), modified: f.lastModified } : { path, blob: f, modified: f.lastModified };
+          }),
+        );
         suggested = (picked[0]?.webkitRelativePath ?? "").split("/")[0] || "Imported notebook";
       }
       await this.confirmImport(pagesFromFiles(files), suggested);
@@ -474,30 +488,32 @@ export class App {
       await showMessage("No pages found", "There are no Zim pages (.txt files) in what you chose.", imported.skipped.length ? `${imported.skipped.length} files were skipped, for example ${imported.skipped[0]?.path}: ${imported.skipped[0]?.reason}.` : null);
       return;
     }
-    const replacing = imported.pages.filter((p) => this.session.has(p.name)).length;
-    const lines: Array<string | HTMLElement> = [`${imported.pages.length} pages`];
-    if (imported.attachments) lines.push(`${imported.attachments} other files (images and attachments) are not imported yet`);
+    const replacingPages = imported.pages.filter((p) => this.session.has(p.name)).length;
+    const replacingFiles = imported.files.filter((f) => this.session.fileInfo(f.path)).length;
+    const replacing = [replacingPages ? count(replacingPages, "page") : "", replacingFiles ? count(replacingFiles, "file") : ""].filter(Boolean).join(" and ");
+    const counted = `${count(imported.pages.length, "page")}${imported.files.length ? ` and ${count(imported.files.length, "attachment")}` : ""}`;
+    const lines: Array<string | HTMLElement> = [imported.files.length ? `${counted} (the files that go with pages: images and others)` : counted];
     const skipped = h("ul", { class: "skipped" }, ...imported.skipped.slice(0, 6).map((s) => h("li", { text: `${s.path}: ${s.reason}` })));
     if (imported.skipped.length > 6) skipped.append(h("li", { text: `… and ${imported.skipped.length - 6} more` }));
     await showDialog({
       title: "Import notebook",
       body: [h("p", { text: lines.join("; ") + "." }), imported.skipped.length ? h("div", {}, h("p", { text: `${imported.skipped.length} files were skipped:` }), skipped) : null],
       fields: [{ name: "title", label: "Notebook name", value: imported.config.name ?? suggested, validate: (v) => (v.trim() ? null : "Give the notebook a name.") }],
-      choices: [{ name: "into", label: "Import as", value: "new", options: [{ value: "new", label: "A new notebook" }, { value: "here", label: `More pages in ${this.session.title}${replacing ? ` (replaces ${replacing} pages with the same names)` : ""}` }] }],
+      choices: [{ name: "into", label: "Import as", value: "new", options: [{ value: "new", label: "A new notebook" }, { value: "here", label: `More pages in ${this.session.title}${replacing ? ` (replaces ${replacing} with the same names)` : ""}` }] }],
       confirm: "Import",
       submit: async (values) => {
         await this.flush();
         if (values.into === "here") {
-          await this.session.addPages(imported.pages);
+          await this.session.addPages(imported.pages, imported.files);
           await this.syncCurrentPage();
-          this.say(`Imported ${imported.pages.length} pages into ${this.session.title}.`);
+          this.say(`Imported ${counted} into ${this.session.title}.`);
           return;
         }
         const names = new Set(imported.pages.map((p) => p.name.toLowerCase()));
         const wanted = imported.config.home && names.has(imported.config.home.toLowerCase()) ? imported.config.home : names.has("home") ? "Home" : (imported.pages[0] as { name: string }).name;
-        const info = await this.store.createNotebook({ title: String(values.title).trim(), home: wanted, kind: "open" }, imported.pages);
+        const info = await this.store.createNotebook({ title: String(values.title).trim(), home: wanted, kind: "open" }, imported.pages, imported.files);
         await this.openNotebook(info.id);
-        this.say(`Imported ${imported.pages.length} pages as ${info.title}.`);
+        this.say(`Imported ${counted} as ${info.title}.`);
       },
     });
   }
@@ -758,9 +774,12 @@ export class App {
     await this.flush();
     const from = this.current.name;
     const below = this.session.names().filter((n) => n.toLowerCase().startsWith(`${from.toLowerCase()}:`)).length;
+    const files = this.session.filesBelow(from);
+    const goesWith = [below > 0 ? `the ${below} page${below === 1 ? "" : "s"} below it` : "", files > 0 ? `its ${files} attachment${files === 1 ? "" : "s"}` : ""].filter(Boolean);
+    const several = goesWith.length > 1 || below > 1 || files > 1;
     await showDialog({
       title: "Rename page",
-      body: [below > 0 ? `The ${below} page${below === 1 ? "" : "s"} below it move${below === 1 ? "s" : ""} with it.` : "Use a colon to move the page into another section."],
+      body: [goesWith.length > 0 ? `${goesWith.join(" and ").replace(/^./, (c) => c.toUpperCase())} ${several ? "move" : "moves"} with it.` : "Use a colon to move the page into another section."],
       fields: [{ name: "name", label: "New name", value: from, validate: (value) => { const p = checkPageName(value); return "error" in p ? p.error : null; } }],
       checks: [{ name: "links", label: "Update the links to this page", checked: true }],
       confirm: "Rename",
@@ -810,9 +829,10 @@ export class App {
     await this.flush();
     const name = this.current.name;
     const below = this.session.names().filter((n) => n.toLowerCase().startsWith(`${name.toLowerCase()}:`)).length;
+    const files = this.session.filesBelow(name);
     await showDialog({
       title: "Delete page",
-      body: [h("p", {}, "Delete ", h("strong", { text: name }), below ? ` and the ${below} page${below === 1 ? "" : "s"} below it` : "", "? This can't be undone."), "Links to deleted pages will show as missing."],
+      body: [h("p", {}, "Delete ", h("strong", { text: name }), below ? ` and the ${below} page${below === 1 ? "" : "s"} below it` : "", files ? `${below ? ", and" : " and"} ${below ? "their" : "its"} ${files} attachment${files === 1 ? "" : "s"}` : "", "? This can't be undone."), "Links to deleted pages will show as missing."],
       confirm: below ? `Delete ${below + 1} pages` : "Delete page",
       danger: true,
       submit: async () => {
