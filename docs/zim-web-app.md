@@ -117,14 +117,35 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
     where not even an SVG can run a script, and the large view is an `<img>` in a dialog; every other
     file is *downloaded*, never opened as a page (an attached `.html` or `.svg` page would run in
     the app's own origin). A picture outside the notebook (`https://…`, `/etc/…`) is never loaded:
-    a page could otherwise report that you read it. The browser test attaches an SVG and an HTML
-    file that try to set a flag and checks that neither does.
-13. **A file dropped anywhere is not shown by the browser.** The page takes any dropped file as an
+    a page could otherwise report that you read it.
+    **An SVG's address is a `data:` address, not a `blob:` one.** The address of a picture can also
+    be opened as a page of its own (the browser's "Open image in new tab", dragging a picture onto
+    the tab strip), and an SVG opened like that is a document that runs its scripts *as the site that
+    made the address*: found by an adversarial review, and reproduced (an SVG whose script opened
+    the database the notebooks are kept in did so, from a new tab). A `blob:` address belongs to this
+    site; a `data:` address has no site to run as, so the same SVG's script is refused the database.
+    Other pictures are images whatever they hold, and keep the cheaper `blob:` address
+    (`pictureAddress`). The browser test opens every address a picture is given in a new tab.
+13. **Changes to a notebook happen one at a time.** A change decides things (a free name for a
+    file, which pages a rename moves) and then waits for the store; another change in between would
+    make that decision untrue. Two files attached at the same moment, or a rename that arrives while
+    a file is being stored, used to end with two files on one name, or a file in a folder that had
+    moved. The session runs every change after the one before it; several files attached together
+    are stored in *one* write (all or none); closing a session lets what it is doing finish and
+    refuses anything asked after that; and attaching files is bound to the notebook and the page it
+    started on, whatever the person opens meanwhile.
+14. **A file dropped anywhere is not shown by the browser.** The page takes any dropped file as an
     attachment (the editor takes those dropped on the text, and says where), and the window refuses
     the rest, so a slip of the mouse cannot make the browser leave the app for a file.
-14. **Nothing goes above the header.** With no caret placed (a page just opened), a reference
+15. **Nothing goes above the header.** With no caret placed (a page just opened), a reference
     to a new attachment is added at the end of the page, on a line of its own, not at position 0: that
-    would be above the header block, which would then no longer be one.
+    would be above the header block, which would then no longer be one. This holds for a page with
+    carriage returns in it too (the parser sees no header there; the page's own first lines are
+    recognized instead).
+16. **An upgrade of the stored data waits politely.** Opening the database in a newer version waits
+    for every other tab that has it open to let go. This version lets go as soon as it is asked, and
+    says so ("reload this page"); a tab that opens the app while an older tab still holds the database
+    says why it is waiting, and goes on when that tab is closed or reloaded.
 
 ## What verifies each layer
 

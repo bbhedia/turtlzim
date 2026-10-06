@@ -5,8 +5,8 @@
 mod common;
 use common::{name, Rng};
 use zim_notebook::{
-    check_file_path, images_in, relative_file_text, safe_file_name, unique_file_name, FileTarget,
-    Notebook, PageName, RenameError,
+    check_file_path, classify, images_in, relative_file_text, safe_file_name, unique_file_name,
+    FileTarget, LinkKind, Notebook, PageName, RenameError,
 };
 
 fn with_files(files: &[&str]) -> Notebook {
@@ -224,7 +224,7 @@ fn an_attachment_is_named_so_that_it_can_be_written_in_a_link_and_never_clashes(
     assert_eq!(safe_file_name("  . trailing. "), "trailing");
     assert_eq!(safe_file_name(""), "file");
     assert_eq!(safe_file_name("..."), "file");
-    assert_eq!(safe_file_name("a\tb\nc.txt"), "a_b_c.txt");
+    assert_eq!(safe_file_name("a\tb\nc.txt"), "a_b_c.txt.text");
     let long = format!("{}.png", "x".repeat(300));
     let short = safe_file_name(&long);
     assert!(short.len() <= 120 && short.ends_with(".png"), "{short}");
@@ -262,22 +262,29 @@ fn an_attachment_is_named_so_that_it_can_be_written_in_a_link_and_never_clashes(
 
     let mut nb = with_files(&["Foo/Bar/a.png"]);
     let page = name("Foo:Bar");
-    assert_eq!(nb.attachment_path(&page, "a.png"), "Foo/Bar/a 2.png");
     assert_eq!(
-        nb.attachment_path(&page, "A.PNG"),
+        nb.attachment_path(&page, "a.png").unwrap(),
+        "Foo/Bar/a 2.png"
+    );
+    assert_eq!(
+        nb.attachment_path(&page, "A.PNG").unwrap(),
         "Foo/Bar/A 2.PNG",
         "case does not make a name free"
     );
     assert_eq!(
-        nb.attachment_path(&page, "dir/new?.png"),
+        nb.attachment_path(&page, "dir/new?.png").unwrap(),
         "Foo/Bar/new_.png"
     );
     assert_eq!(
-        nb.attachment_path(&name("Help:Auto Formatting"), "x.png"),
+        nb.attachment_path(&name("Help:Auto Formatting"), "x.png")
+            .unwrap(),
         "Help/Auto_Formatting/x.png"
     );
     nb.put_file("Foo/Bar/a 2.png").unwrap();
-    assert_eq!(nb.attachment_path(&page, "a.png"), "Foo/Bar/a 3.png");
+    assert_eq!(
+        nb.attachment_path(&page, "a.png").unwrap(),
+        "Foo/Bar/a 3.png"
+    );
     assert_eq!(nb.file_link(&page, "Foo/Bar/a 2.png"), "./a 2.png");
 }
 
@@ -606,4 +613,195 @@ fn deleting_a_page_with_its_pages_takes_its_files() {
         ["Foo/a.png", "Foo/Sub/b.png"]
     );
     assert_eq!(nb.files().collect::<Vec<_>>(), ["Foobar/c.png"]);
+}
+
+// ---- found by review
+
+#[test]
+fn a_name_that_zim_would_read_as_a_page_is_never_a_file() {
+    assert!(check_file_path("Home/notes.txt").is_err());
+    assert!(check_file_path("Home/NOTES.TXT").is_err());
+    assert!(check_file_path("notes.txt").is_err());
+    assert!(
+        check_file_path("Home/x.txt/pic.png").is_ok(),
+        "only the file's own name counts"
+    );
+    assert!(check_file_path("Home/notes.text").is_ok());
+    assert_eq!(safe_file_name("notes.txt"), "notes.txt.text");
+    assert_eq!(safe_file_name("Notes.TXT"), "Notes.TXT.text");
+    assert_eq!(safe_file_name("a.text"), "a.text");
+    let mut nb = Notebook::new();
+    nb.put(&name("Home"), "h");
+    nb.put(&name("Home:notes"), "n");
+    assert_eq!(
+        nb.attachment_path(&name("Home"), "notes.txt").unwrap(),
+        "Home/notes.txt.text",
+        "so an attachment never has the path of a page, or becomes one when the notebook is read again"
+    );
+    assert!(nb.put_file("Home/notes.txt").is_err());
+}
+
+#[test]
+fn a_new_attachment_never_takes_the_name_of_a_folder_a_page_or_a_section() {
+    let mut nb = with_files(&["A/Dir/x.png", "A/Sub/pic.png"]);
+    nb.put(&name("A"), "a");
+    nb.put(&name("A:Sub"), "s");
+    nb.put(&name("A:Sec:Child"), "c");
+    nb.put(&name("A:Plain"), "p");
+    let a = name("A");
+    assert_eq!(nb.attachment_path(&a, "Dir").unwrap(), "A/Dir 2");
+    assert_eq!(nb.attachment_path(&a, "Sub").unwrap(), "A/Sub 2");
+    assert_eq!(nb.attachment_path(&a, "sec").unwrap(), "A/sec 2");
+    assert_eq!(nb.attachment_path(&a, "Plain").unwrap(), "A/Plain 2");
+    assert_eq!(nb.attachment_path(&a, "Other").unwrap(), "A/Other");
+}
+
+#[test]
+fn a_path_is_never_both_a_file_and_a_folder() {
+    let mut nb = Notebook::new();
+    nb.put_file("A/Sub").unwrap();
+    let error = nb.put_file("A/Sub/pic.png").unwrap_err();
+    assert!(
+        error.to_string().contains("both a file and a folder"),
+        "{error}"
+    );
+    let mut nb = Notebook::new();
+    nb.put_file("A/Sub/pic.png").unwrap();
+    assert!(nb.put_file("A/Sub").is_err());
+    assert!(nb.put_file("a/SUB/other.png").is_ok());
+    assert_eq!(nb.file_count(), 2);
+    // a page whose folder is a file can't take attachments
+    let mut nb = with_files(&["A/Sub"]);
+    nb.put(&name("A:Sub"), "s");
+    let error = nb
+        .attachment_path(&name("A:Sub"), "pic.png")
+        .unwrap_err();
+    assert!(error.to_string().contains("A/Sub"), "{error}");
+}
+
+#[test]
+fn a_rename_that_would_make_a_file_a_folder_or_a_folder_a_file_changes_nothing() {
+    // the folder of the page would be a file that stays
+    let mut nb = with_files(&["X/pic.png", "A/Sub"]);
+    nb.put(&name("X"), "x");
+    assert_eq!(
+        nb.rename(&name("X"), &name("A:Sub"), true),
+        Err(RenameError::FileAndFolder("A/Sub".to_string()))
+    );
+    assert_eq!(nb.files().collect::<Vec<_>>(), ["A/Sub", "X/pic.png"]);
+    // even a page with no files of its own
+    let mut nb = with_files(&["A/Sub"]);
+    nb.put(&name("X"), "x");
+    assert_eq!(
+        nb.rename(&name("X"), &name("A:Sub"), true),
+        Err(RenameError::FileAndFolder("A/Sub".to_string()))
+    );
+    // a file moving where a folder of files that stay is
+    let mut nb = with_files(&["X/Sub", "A/Sub/pic.png"]);
+    nb.put(&name("X"), "x");
+    assert_eq!(
+        nb.rename(&name("X"), &name("A"), true),
+        Err(RenameError::FileAndFolder("A/Sub/pic.png".to_string()))
+    );
+    assert_eq!(nb.files().collect::<Vec<_>>(), ["A/Sub/pic.png", "X/Sub"]);
+    assert!(nb.has_page(&name("X")));
+    // inside a "folder" that is a file that stays
+    let mut nb = with_files(&["X/Dir/pic.png", "A/Dir"]);
+    nb.put(&name("X"), "x");
+    assert_eq!(
+        nb.rename(&name("X"), &name("A"), true),
+        Err(RenameError::FileAndFolder("A/Dir".to_string()))
+    );
+    // moving into a folder that holds other files is still fine
+    let mut nb = with_files(&["X/a.png", "A/b.png"]);
+    nb.put(&name("X"), "x");
+    nb.rename(&name("X"), &name("A"), true).unwrap();
+    assert_eq!(nb.files().collect::<Vec<_>>(), ["A/a.png", "A/b.png"]);
+}
+
+#[test]
+fn a_reference_rewritten_by_a_rename_is_still_a_reference() {
+    // `Notes:Ab` moves to `Notes`: `../report.pdf` is now `./report.pdf`, and a link that lost
+    // its slash would be a link to a page; `~t.png` and `C:x.png` read as places outside
+    let mut nb = with_files(&["Notes/report.pdf", "Notes/~t.png", "Notes/c:x.png"]);
+    nb.put(
+        &name("Notes:Ab"),
+        "[[../report.pdf|the report]] {{../~t.png}} {{../c:x.png}} {{../report.pdf}}\n",
+    );
+    nb.rename(&name("Notes:Ab"), &name("Notes"), true).unwrap();
+    let text = nb.get(&name("Notes")).unwrap().to_string();
+    assert_eq!(
+        text,
+        "[[./report.pdf|the report]] {{./~t.png}} {{./c:x.png}} {{report.pdf}}\n",
+        "a bare name stays bare only where it still reads as a file in the same folder"
+    );
+    assert_eq!(classify("./report.pdf"), LinkKind::File);
+    for image in nb.images(&name("Notes")) {
+        assert!(
+            matches!(
+                nb.resolve_file(&name("Notes"), &image.path),
+                FileTarget::Notebook { exists: true, .. }
+            ),
+            "{}",
+            image.path
+        );
+    }
+    let link = &nb.links(&name("Notes"))[0];
+    assert_eq!(classify(&link.target), LinkKind::File);
+    assert!(matches!(
+        nb.resolve_file(&name("Notes"), &link.target),
+        FileTarget::Notebook { exists: true, .. }
+    ));
+}
+
+#[test]
+fn a_reference_to_a_file_with_awkward_characters_is_escaped_so_that_it_stays_one() {
+    let files = [
+        "what?.png",
+        "a|b.png",
+        "a}}b.png",
+        "a]]b.png",
+        "50%.png",
+        "h#sh.png",
+        "br[ack]et.png",
+        "sp ace.png",
+        "\u{e9}.png",
+        "~t.png",
+        "c:x.png",
+    ];
+    let mut nb = Notebook::new();
+    nb.put(&name("A"), "x");
+    for file in files {
+        nb.put_file(&format!("A/{file}")).unwrap();
+    }
+    for file in files {
+        let text = nb.file_link(&name("A"), &format!("A/{file}"));
+        // as an image and as a link: each is one reference, and leads to this file
+        nb.put(&name("A"), format!("{{{{{text}}}}} and [[{text}|shown]]\n"));
+        let images = nb.images(&name("A"));
+        assert_eq!(images.len(), 1, "{file}: written as {text:?}");
+        let links = nb.links(&name("A"));
+        assert_eq!(links.len(), 1, "{file}: written as {text:?}");
+        assert_eq!(classify(&links[0].target), LinkKind::File, "{file}");
+        for target in [&images[0].path, &links[0].target] {
+            assert_eq!(
+                nb.resolve_file(&name("A"), target),
+                FileTarget::Notebook {
+                    path: format!("A/{file}"),
+                    exists: true
+                },
+                "{file}: written as {target:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_file_named_like_the_escaped_name_of_another_is_found_as_written_first() {
+    // (only an import could make this pair: the pair of names is why the order is documented)
+    let nb = with_files(&["A/a%7Cb.png", "A/a|b.png"]);
+    assert_eq!(
+        nb.resolve_file(&name("A"), "./a%7Cb.png"),
+        found("A/a%7Cb.png")
+    );
 }

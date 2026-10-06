@@ -41,7 +41,7 @@ pub enum FileTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileError {
     pub path: String,
-    pub reason: &'static str,
+    pub reason: String,
 }
 
 impl fmt::Display for FileError {
@@ -60,12 +60,13 @@ impl std::error::Error for FileError {}
 const MAX_NAME_BYTES: usize = 255;
 
 /// Whether `path` can be the path of a file in a notebook: relative, with every part a real name
-/// (not empty, not `.` or `..`, not hidden, no control characters, no backslash).
+/// (not empty, not `.` or `..`, not hidden, no control characters, no backslash), and not ending in
+/// `.txt` (every such file is a page to Zim).
 pub fn check_file_path(path: &str) -> Result<(), FileError> {
-    let bad = |reason| {
+    let bad = |reason: &str| {
         Err(FileError {
             path: path.to_string(),
-            reason,
+            reason: reason.to_string(),
         })
     };
     if path.is_empty() {
@@ -93,6 +94,10 @@ pub fn check_file_path(path: &str) -> Result<(), FileError> {
         if part.len() > MAX_NAME_BYTES {
             return bad("has a name that is too long");
         }
+    }
+    // Zim reads every `.txt` in a notebook as a page, so a file named like that would come back as one.
+    if path.rsplit('/').next().unwrap_or(path).to_lowercase().ends_with(".txt") {
+        return bad("ends in .txt, which Zim reads as a page");
     }
     Ok(())
 }
@@ -191,9 +196,29 @@ pub fn resolve_file(from: &PageName, target: &str, files: &dyn FileSet) -> FileT
     }
 }
 
+/// One part of a path as it is written in a reference: what would break the reference (`% ? | #`,
+/// brackets and braces, control characters) as `%XX`, which [`resolve_file`] reads back.
+fn encode_part(part: &str) -> String {
+    let mut out = String::with_capacity(part.len());
+    for c in part.chars() {
+        if c.is_control() || "%?|#[]{}".contains(c) {
+            let mut buffer = [0u8; 4];
+            for byte in c.encode_utf8(&mut buffer).bytes() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The text that, written on page `from` as a file reference, leads to `path`: `./name` for a file
 /// in the page's folder (or just `name`, with `dot_prefix` false), `../name` for one in the folder
-/// above, and so on. Checked by [`resolve_file`] to lead where it should.
+/// above, and so on. Characters that would break a link or an image are written as `%XX`; a bare
+/// name that would read as something else (`~x`, `C:x`) gets `./` after all. A link needs a `/` in
+/// it to be a file link, so for a link `dot_prefix` has to be true. Checked by [`resolve_file`] to
+/// lead where it should.
 pub fn relative_file_text(from: &PageName, path: &str, dot_prefix: bool) -> String {
     let folder = from.folder_path();
     let base: Vec<&str> = folder.split('/').collect();
@@ -207,21 +232,36 @@ pub fn relative_file_text(from: &PageName, path: &str, dot_prefix: bool) -> Stri
         common += 1;
     }
     let ups = base.len() - common;
-    let rest = target[common..].join("/");
-    if ups > 0 {
+    let rest = target[common..].iter().map(|part| encode_part(part)).collect::<Vec<_>>().join("/");
+    let text = if ups > 0 {
         format!("{}{rest}", "../".repeat(ups))
     } else if dot_prefix {
         format!("./{rest}")
     } else {
         rest
+    };
+    if is_relative(&text) {
+        text
+    } else {
+        format!("./{text}")
     }
 }
 
 /// What to call a file attached under the name `wanted`: the last part of it, with anything that
 /// would break the syntax of a link or an image (`/ \ ? # | [ ] { } < > : * " %` and control
 /// characters) replaced by `_`, no leading dot (that would hide it) and no trailing dot or space,
-/// and not too long. Never empty.
+/// and not too long. A name ending in `.txt` gets `.text` after it (Zim reads every `.txt` as a
+/// page). Never empty.
 pub fn safe_file_name(wanted: &str) -> String {
+    let name = clean_file_name(wanted);
+    if name.to_lowercase().ends_with(".txt") {
+        format!("{name}.text")
+    } else {
+        name
+    }
+}
+
+fn clean_file_name(wanted: &str) -> String {
     let last = wanted.rsplit(['/', '\\']).next().unwrap_or(wanted);
     let replaced: String = last
         .chars()

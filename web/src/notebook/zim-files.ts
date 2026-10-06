@@ -1,6 +1,6 @@
 // The files around a Zim notebook's pages: `notebook.zim`, the small configuration file that marks
 // a folder as a notebook, and how a folder or a zip of files becomes pages.
-import { checkFilePath, pathToPage } from "../notebook-core";
+import { NotebookModel, pathToPage } from "../notebook-core";
 import { typed } from "./media";
 import type { StoredFile, StoredPage } from "./store";
 import { decodePage } from "../zim";
@@ -93,57 +93,68 @@ export function pagesFromFiles(files: ImportedFile[], now = Date.now()): Importe
   const seen = new Map<string, string>();
   const seenFiles = new Map<string, string>();
   const decoder = new TextDecoder("utf-8", { fatal: false });
-  for (const file of clean) {
-    if (!file.path.startsWith(prefix)) continue;
-    const relative = file.path.slice(prefix.length);
-    if (relative.split("/").some((part) => part.startsWith("."))) continue; // hidden files and folders
-    if (relative === "notebook.zim") {
-      if (file.bytes) result.config = parseNotebookConfig(decoder.decode(file.bytes));
-      continue;
-    }
-    if (!relative.endsWith(".txt")) {
-      const problem = checkFilePath(relative);
-      if (problem) {
-        result.skipped.push({ path: relative, reason: problem });
+  // The notebook rules say which paths can be files together (not a path that is both a file and a folder, nor a name Zim would read as a page).
+  const rules = new NotebookModel();
+  try {
+    readFiles();
+  } finally {
+    rules.free();
+  }
+  return result;
+
+  function readFiles(): void {
+    for (const file of clean) {
+      if (!file.path.startsWith(prefix)) continue;
+      const relative = file.path.slice(prefix.length);
+      if (relative.split("/").some((part) => part.startsWith("."))) continue; // hidden files and folders
+      if (relative === "notebook.zim") {
+        if (file.bytes) result.config = parseNotebookConfig(decoder.decode(file.bytes));
         continue;
       }
-      const key = relative.toLowerCase();
-      const other = seenFiles.get(key);
+      if (!relative.endsWith(".txt")) {
+        const key = relative.toLowerCase();
+        const other = seenFiles.get(key);
+        if (other !== undefined) {
+          result.skipped.push({ path: relative, reason: `has the same name as ${other} (names ignore case)` });
+          continue;
+        }
+        try {
+          rules.putFile(relative);
+        } catch (error) {
+          result.skipped.push({ path: relative, reason: error instanceof Error ? error.message : String(error) });
+          continue;
+        }
+        seenFiles.set(key, relative);
+        const blob = file.blob ?? new Blob([(file.bytes ?? new Uint8Array()) as BlobPart]);
+        result.files.push({ path: relative, blob: typed(blob, relative), modified: file.modified instanceof Date ? file.modified.getTime() : (file.modified ?? now) });
+        continue;
+      }
+      if (!file.bytes) {
+        result.skipped.push({ path: relative, reason: "was not read" });
+        continue;
+      }
+      let name: string;
+      try {
+        name = pathToPage(relative);
+      } catch (error) {
+        result.skipped.push({ path: relative, reason: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+      let decoded;
+      try {
+        decoded = decodePage(file.bytes);
+      } catch {
+        result.skipped.push({ path: relative, reason: "not valid UTF-8, so not a Zim page" });
+        continue;
+      }
+      const key = name.toLowerCase();
+      const other = seen.get(key);
       if (other !== undefined) {
         result.skipped.push({ path: relative, reason: `has the same name as ${other} (names ignore case)` });
         continue;
       }
-      seenFiles.set(key, relative);
-      const blob = file.blob ?? new Blob([(file.bytes ?? new Uint8Array()) as BlobPart]);
-      result.files.push({ path: relative, blob: typed(blob, relative), modified: file.modified instanceof Date ? file.modified.getTime() : (file.modified ?? now) });
-      continue;
+      seen.set(key, relative);
+      result.pages.push({ name, text: decoded.text, bom: decoded.bom, lineEnding: decoded.lineEnding, modified: file.modified instanceof Date ? file.modified.getTime() : (file.modified ?? now) });
     }
-    if (!file.bytes) {
-      result.skipped.push({ path: relative, reason: "was not read" });
-      continue;
-    }
-    let name: string;
-    try {
-      name = pathToPage(relative);
-    } catch (error) {
-      result.skipped.push({ path: relative, reason: error instanceof Error ? error.message : String(error) });
-      continue;
-    }
-    let decoded;
-    try {
-      decoded = decodePage(file.bytes);
-    } catch {
-      result.skipped.push({ path: relative, reason: "not valid UTF-8, so not a Zim page" });
-      continue;
-    }
-    const key = name.toLowerCase();
-    const other = seen.get(key);
-    if (other !== undefined) {
-      result.skipped.push({ path: relative, reason: `has the same name as ${other} (names ignore case)` });
-      continue;
-    }
-    seen.set(key, relative);
-    result.pages.push({ name, text: decoded.text, bom: decoded.bom, lineEnding: decoded.lineEnding, modified: file.modified instanceof Date ? file.modified.getTime() : (file.modified ?? now) });
   }
-  return result;
 }

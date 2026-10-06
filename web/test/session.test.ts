@@ -11,7 +11,7 @@ import type { NotebookStore, PageChange, StoredPage } from "../src/notebook/stor
 import { notebookConfig, pagesFromFiles, parseNotebookConfig } from "../src/notebook/zim-files";
 import { decodePage, initZimSync } from "../src/zim";
 import { createZip, crc32, readZip } from "../src/zip";
-import { isImageType, mediaTypeFor, typed } from "../src/notebook/media";
+import { attachmentName, isImageType, mediaTypeFor, pictureAddress, typed } from "../src/notebook/media";
 import { notebookRoots } from "./support";
 
 beforeAll(() => {
@@ -193,8 +193,8 @@ describe("a notebook session", () => {
 
     it("are deleted one at a time", async () => {
       const s = await open([page("A", "a")]);
-      const path = await s.addFile("A", blob("x"), "x.txt");
-      expect(await s.removeFile("A/X.TXT")).toBe(true);
+      const path = await s.addFile("A", blob("x"), "x.dat");
+      expect(await s.removeFile("A/X.DAT")).toBe(true);
       expect(await s.removeFile(path)).toBe(false);
       expect(s.attachments("A")).toEqual([]);
       expect(await s.store.listFiles(s.info.id)).toEqual([]);
@@ -225,13 +225,13 @@ describe("a notebook session", () => {
 
     it("are deleted with their page and the pages below it, and no others", async () => {
       const s = await open([page("A", "a"), page("A:B", "b"), page("AB", "x")]);
-      await s.addFile("A", blob("1"), "one.txt");
-      await s.addFile("A:B", blob("2"), "two.txt");
-      await s.addFile("AB", blob("3"), "three.txt");
+      await s.addFile("A", blob("1"), "one.dat");
+      await s.addFile("A:B", blob("2"), "two.dat");
+      await s.addFile("AB", blob("3"), "three.dat");
       await s.delete("A");
-      expect((await s.store.listFiles(s.info.id)).map((f) => f.path)).toEqual(["AB/three.txt"]);
+      expect((await s.store.listFiles(s.info.id)).map((f) => f.path)).toEqual(["AB/three.dat"]);
       expect(s.fileCount).toBe(1);
-      expect(s.attachments("AB").map((f) => f.path)).toEqual(["AB/three.txt"]);
+      expect(s.attachments("AB").map((f) => f.path)).toEqual(["AB/three.dat"]);
     });
 
     it("go into an export at their paths, byte for byte, beside the pages", async () => {
@@ -250,9 +250,9 @@ describe("a notebook session", () => {
     it("come in with imported pages, replacing those at the same path, ignoring case, and keeping the spelling that was there", async () => {
       const s = await open([page("A", "old")]);
       await s.addFile("A", blob("old"), "Pic.png");
-      await s.addPages([page("B", "b")], [{ path: "a/PIC.PNG", blob: blob("new", "image/png"), modified: 5 }, { path: "B/x.txt", blob: blob("x"), modified: 6 }]);
+      await s.addPages([page("B", "b")], [{ path: "a/PIC.PNG", blob: blob("new", "image/png"), modified: 5 }, { path: "B/x.dat", blob: blob("x"), modified: 6 }]);
       expect(await (await s.fileBlob("A/Pic.png"))?.text()).toBe("new");
-      expect(sorted((await s.store.listFiles(s.info.id)).map((f) => f.path))).toEqual(["A/Pic.png", "B/x.txt"]);
+      expect(sorted((await s.store.listFiles(s.info.id)).map((f) => f.path))).toEqual(["A/Pic.png", "B/x.dat"]);
       expect(s.fileInfo("A/Pic.png")).toMatchObject({ size: 3, type: "image/png", modified: 5 });
     });
 
@@ -276,6 +276,96 @@ describe("a notebook session", () => {
       expect(s.attachments("Foo").map((f) => f.path)).toEqual(["Foo/a.png"]);
       expect(s.fileCount).toBe(1);
       expect((await store.listFiles(s.info.id)).map((f) => f.path)).toEqual(["Foo/a.png"]);
+    });
+
+    /** A store whose writes take a little while, as a real one's do. */
+    class Slow extends MemoryStore {
+      override async replacePages(id: string, change: PageChange): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        return super.replacePages(id, change);
+      }
+    }
+
+    it("never give two files the same name, however many are asked for at once", async () => {
+      const s = await open([page("Ideas", "x")], new Slow(pageKey));
+      const paths = await Promise.all([s.addFile("Ideas", blob("one"), "pic.png"), s.addFile("Ideas", blob("two"), "pic.png"), s.addFile("Ideas", blob("three"), "pic.png")]);
+      expect(paths).toEqual(["Ideas/pic.png", "Ideas/pic 2.png", "Ideas/pic 3.png"]);
+      expect(await Promise.all(paths.map(async (p) => (await s.fileBlob(p))?.text()))).toEqual(["one", "two", "three"]);
+      expect(s.attachments("Ideas")).toHaveLength(3);
+    });
+
+    it("are not left behind in the old folder by a rename or a delete that comes while they are being stored", async () => {
+      const store = new Slow(pageKey);
+      const s = await open([page("Ideas", "x")], store);
+      const adding = s.addFile("Ideas", blob("big"), "big.pdf");
+      const renaming = s.rename("Ideas", "Plans");
+      await Promise.all([adding, renaming]);
+      expect(s.attachments("Plans").map((f) => f.path)).toEqual(["Plans/big.pdf"]);
+      expect((await store.listFiles(s.info.id)).map((f) => f.path)).toEqual(["Plans/big.pdf"]);
+      const addingAgain = s.addFile("Plans", blob("more"), "more.pdf");
+      const deleting = s.delete("Plans");
+      await Promise.all([addingAgain, deleting]);
+      expect(s.fileCount).toBe(0);
+      expect(await store.listFiles(s.info.id)).toEqual([]);
+    });
+
+    it("finish what is being written when the notebook is closed, and refuse anything asked after that", async () => {
+      const store = new Slow(pageKey);
+      const s = await open([page("Ideas", "x")], store);
+      const adding = s.addFile("Ideas", blob("x"), "a.png");
+      const closing = s.close();
+      await expect(s.addFile("Ideas", blob("y"), "b.png")).rejects.toThrow(/closed/);
+      await closing;
+      expect(await adding).toBe("Ideas/a.png");
+      expect((await store.listFiles(s.info.id)).map((f) => f.path)).toEqual(["Ideas/a.png"]);
+      await expect(s.save("Ideas", "z")).rejects.toThrow(/closed/);
+      await expect(s.rename("Ideas", "Other")).rejects.toThrow(/closed/);
+      await s.close(); // closing twice is no trouble
+    });
+
+    it("are never named so that Zim would read them as pages, and no path appears twice in an export", async () => {
+      const s = await open([page("Home", "h"), page("Home:notes", "n")]);
+      expect(await s.addFile("Home", blob("some text"), "notes.txt")).toBe("Home/notes.txt.text");
+      expect(await s.addFile("Home", blob("more"), "NOTES.TXT")).toBe("Home/NOTES.TXT 2.text"); // (the first is taken, ignoring case)
+      const paths = (await s.exportFiles()).map((e) => e.path);
+      expect(new Set(paths.map((p) => p.toLowerCase())).size).toBe(paths.length);
+      expect(paths).toContain("Home/notes.txt.text");
+      expect(paths).toContain("Home/notes.txt"); // the page
+    });
+
+    it("are attached in a batch with names of their own, in one write that happens entirely or not at all", async () => {
+      class Failing extends MemoryStore {
+        fail = false;
+        writes = 0;
+        override async replacePages(id: string, change: PageChange): Promise<void> {
+          this.writes++;
+          if (this.fail) throw new Error("the disk is full");
+          return super.replacePages(id, change);
+        }
+      }
+      const store = new Failing(pageKey);
+      const s = await open([page("A", "a")], store);
+      const paths = await s.addFiles("A", [{ content: blob("1"), wanted: "pic.png" }, { content: blob("2"), wanted: "pic.png" }, { content: blob("3"), wanted: "notes.txt" }]);
+      expect(paths).toEqual(["A/pic.png", "A/pic 2.png", "A/notes.txt.text"]);
+      expect(store.writes).toBe(1);
+      store.fail = true;
+      await expect(s.addFiles("A", [{ content: blob("4"), wanted: "x.png" }, { content: blob("5"), wanted: "y.png" }])).rejects.toThrow(/disk is full/);
+      expect(s.attachments("A").map((f) => f.path).sort()).toEqual(["A/notes.txt.text", "A/pic 2.png", "A/pic.png"]);
+      expect((await store.listFiles(s.info.id)).length).toBe(3);
+      store.fail = false;
+      expect(await s.addFile("A", blob("6"), "x.png")).toBe("A/x.png");
+    });
+
+    it("never take the name of a folder, and can't be put in a folder that is a file", async () => {
+      const s = await open([page("A", "a"), page("A:Sub", "s"), page("A:Sec:Child", "c")]);
+      await s.addFile("A:Sub", blob("p"), "pic.png");
+      expect(await s.addFile("A", blob("f"), "Sub")).toBe("A/Sub 2");
+      expect(await s.addFile("A", blob("f"), "Sec")).toBe("A/Sec 2");
+      // a file that is where a page's folder would be: the page can't have attachments
+      const t = await open([page("B", "b")]);
+      await t.addFile("B", blob("file"), "Inner");
+      await t.create("B:Inner", "text");
+      await expect(t.addFile("B:Inner", blob("x"), "x.png")).rejects.toThrow(/can't hold attachments/);
     });
 
     it("refuse a move that would put one file on another, changing nothing", async () => {
@@ -386,6 +476,11 @@ describe("importing files", () => {
     expect(byPath["top level.svg"]?.blob.type).toBe("image/svg+xml");
     expect(byPath["Home/data.bin"]?.blob.size).toBe(3);
     expect(imported.skipped.map((s) => s.path).sort()).toEqual(["Home/report.pdf", "Home/tab\tname.png"].sort());
+    // a path that is both a file and a folder (the archive says `a` is a file, and puts something in `a`)
+    const clash = pagesFromFiles([file("Nb/Home.txt", "h"), file("Nb/Home/a", "a file"), file("Nb/Home/a/b.png", "inside it"), file("Nb/Home/ok.png", "fine")]);
+    expect(clash.files.map((f) => f.path)).toEqual(["Home/a", "Home/ok.png"]);
+    expect(clash.skipped.map((s) => s.path)).toEqual(["Home/a/b.png"]);
+    expect(clash.skipped[0]?.reason).toContain("both a file and a folder");
     expect(imported.skipped.find((s) => s.path === "Home/report.pdf")?.reason).toContain("same name");
     expect(imported.skipped.find((s) => s.path.includes("tab"))?.reason).toContain("control");
   });
@@ -474,6 +569,32 @@ describe("media types", () => {
     for (const type of ["", "text/html", "application/pdf", "image/tiff", "image/svg", "video/mp4", "application/octet-stream"]) expect(isImageType(type), type).toBe(false);
     expect(typed(new Blob(["x"]), "a.png").type).toBe("image/png");
     expect(typed(new Blob(["x"], { type: "image/gif" }), "a.png").type).toBe("image/gif");
+  });
+
+  it("are looked up in the table's own entries only, never in what every object has", () => {
+    for (const name of ["a.constructor", "a.toString", "a.__proto__", "a.hasOwnProperty", "constructor"]) {
+      expect(mediaTypeFor(name), name).toBe("application/octet-stream");
+    }
+    expect(attachmentName({ name: "", type: "constructor" }, new Date(2026, 9, 6, 10, 5, 3))).toBe("Pasted file 2026-10-06 10.05.03.bin");
+    expect(attachmentName({ name: "image.png", type: "image/png" }, new Date(2026, 9, 6, 10, 5, 3))).toBe("Pasted image 2026-10-06 10.05.03.png");
+    expect(attachmentName({ name: "holiday.jpg", type: "image/jpeg" })).toBe("holiday.jpg");
+  });
+});
+
+describe("the address of a picture", () => {
+  it("is a blob address for a picture that is only ever an image, and a data address for an SVG, which is a document", async () => {
+    const png = await pictureAddress(new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" }));
+    expect(png.url).toMatch(/^blob:/);
+    png.release();
+    const svgText = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><script>alert(1)</script></svg>';
+    for (const type of ["image/svg+xml", "IMAGE/SVG+XML", " image/svg+xml "]) {
+      const svg = await pictureAddress(new Blob([svgText], { type }));
+      expect(svg.url, type).toMatch(/^data:image\/svg\+xml;base64,/);
+      expect(Buffer.from(svg.url.slice(svg.url.indexOf(",") + 1), "base64").toString("utf8")).toBe(svgText);
+      expect(() => svg.release()).not.toThrow();
+    }
+    const big = await pictureAddress(new Blob(["<svg xmlns='http://www.w3.org/2000/svg'>" + "<g/>".repeat(100_000) + "</svg>"], { type: "image/svg+xml" }));
+    expect(big.url.length).toBeGreaterThan(400_000);
   });
 });
 

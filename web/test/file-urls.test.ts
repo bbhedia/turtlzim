@@ -50,6 +50,22 @@ describe("the addresses of a notebook's pictures", () => {
     urls.close();
   });
 
+  it("make a data address for an SVG, so that it can't run as this site if it is opened as a page, and release nothing for it", async () => {
+    const store = new MemoryStore(pageKey);
+    const info = await store.createNotebook({ title: "T", home: "Home", kind: "open" }, [], [{ path: "Home/evil.svg", blob: new Blob(['<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>'], { type: "image/svg+xml" }), modified: 1 }, picture("one")]);
+    const session = await NotebookSession.open(store, info.id);
+    const events = settled();
+    const urls = new FileUrls(session, events.onSettled);
+    urls.get("Home/evil.svg");
+    urls.get("Home/a.png");
+    await events.until(2);
+    expect((urls.get("Home/evil.svg") as { url: string }).url).toMatch(/^data:image\/svg\+xml;base64,/);
+    expect((urls.get("Home/a.png") as { url: string }).url).toMatch(/^blob:/);
+    const revoke = vi.spyOn(URL, "revokeObjectURL");
+    urls.close();
+    expect(revoke).toHaveBeenCalledTimes(1); // only the blob address
+  });
+
   it("say there is nothing for a file that isn't there", async () => {
     const session = await open();
     const urls = new FileUrls(session, () => {});

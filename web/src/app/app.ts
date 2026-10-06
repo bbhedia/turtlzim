@@ -8,7 +8,7 @@ import { anchorsIn, checkPageName, classifyLink, newPageText, pageKey, zimTimest
 import type { Backlink, SearchHit } from "../notebook-core";
 import { FileUrls } from "../notebook/file-urls";
 import { IndexedDbStore } from "../notebook/idb";
-import { attachmentName, formatSize, isImageType } from "../notebook/media";
+import { attachmentName, formatSize, isImageType, pictureAddress } from "../notebook/media";
 import { createSampleNotebook } from "../notebook/sample";
 import { NotebookSession, createEmptyNotebook } from "../notebook/session";
 import type { SessionEvent } from "../notebook/session";
@@ -109,6 +109,8 @@ export class App {
   private readonly linkCache = new Map<string, LinkStatus>();
   /** Addresses for the pictures of the open notebook. */
   private urls: FileUrls | null = null;
+  private stopListening: (() => void) | null = null;
+  private warning: string | null = null;
   private saveTimer: number | undefined;
   private dirty = false;
   private saveFailed = false;
@@ -160,14 +162,20 @@ export class App {
   static async start(root: HTMLElement): Promise<App> {
     let store: NotebookStore;
     let keptInMemory = false;
+    let app: App | undefined;
     try {
-      store = await IndexedDbStore.open(pageKey);
+      store = await IndexedDbStore.open(pageKey, undefined, {
+        // an older version of this app, open in another tab, holds the database and must let go before it can be upgraded
+        onBlocked: () => root.replaceChildren(h("p", { class: "loading", text: "This app is open in another tab, in an older version. Close that tab, or reload it, and this one will go on." })),
+        // and the other way round: another tab wants a newer version of the database
+        onVersionChange: () => app?.warn("This app was updated in another tab. Reload this page to go on (what you typed is kept)."),
+      });
       void IndexedDbStore.requestPersistence();
     } catch {
       store = new MemoryStore(pageKey);
       keptInMemory = true;
     }
-    const app = new App(root, store, keptInMemory);
+    app = new App(root, store, keptInMemory);
     await app.openInitialNotebook();
     return app;
   }
@@ -356,7 +364,8 @@ export class App {
   async openNotebook(id: string, pageName: string | null = null): Promise<void> {
     await this.flush();
     const session = await NotebookSession.open(this.store, id);
-    this.session?.close();
+    const previous = this.session;
+    this.stopListening?.();
     this.urls?.close();
     this.session = session;
     this.urls = new FileUrls(session, () => {
@@ -364,7 +373,9 @@ export class App {
       this.renderAttachments();
     });
     this.current = null;
-    session.onChange((event) => this.onSessionEvent(event));
+    this.stopListening = session.onChange((event) => this.onSessionEvent(event));
+    // The notebook that was open finishes whatever it was writing (a file being attached, say), then lets go.
+    void previous?.close();
     prefs.set("notebook", id);
     this.els.notebookButton.replaceChildren(h("span", { class: "notebook-title", text: session.title }), h("span", { class: "caret-down", "aria-hidden": "true" }));
     this.els.notebookButton.title = "Notebooks";
@@ -651,7 +662,9 @@ export class App {
   }
 
   private renderNotice(): void {
-    if (this.current && !this.current.exists) {
+    if (this.warning) {
+      this.showNotice(this.warning);
+    } else if (this.current && !this.current.exists) {
       const section = this.session.exists(this.current.name);
       this.showNotice(section ? "This is a section: it has pages below it but no text of its own. Type to give it some." : "This page doesn't exist yet. Type to create it.");
     } else if (this.keptInMemory) {
@@ -662,6 +675,12 @@ export class App {
   private showNotice(text: string): void {
     this.els.notice.textContent = text;
     this.els.notice.hidden = false;
+  }
+
+  /** Something the person needs to know for as long as this page is open: it stays above every page. */
+  warn(text: string): void {
+    this.warning = text;
+    this.renderNotice();
   }
 
   private renderBacklinks(): void {
@@ -733,30 +752,30 @@ export class App {
   /** The text that refers to an attachment of the open page: a picture, or a link with the file's name. */
   private referenceTo(path: string): string {
     const link = this.session.fileLink(this.current?.name ?? "", path);
-    const name = path.slice(path.lastIndexOf("/") + 1);
+    // (the name is shown as the link's text: brackets and bars in it would end the link early)
+    const name = path.slice(path.lastIndexOf("/") + 1).replace(/[[\]|]/g, "_");
     return isImageType(this.session.fileInfo(path)?.type ?? "") ? `{{${link}}}` : `[[${link}|${name}]]`;
   }
 
   /** Attach files to the open page and put what refers to them in the text: where they were dropped, or at the caret. */
   private async attachFiles(files: File[], at?: number | "end"): Promise<void> {
     if (!this.current) return;
+    // The files belong to the page and the notebook they were given to, even if the person moves on while they are stored.
+    const session = this.session;
     const page = this.current.name;
-    const attached: string[] = [];
-    const problems: string[] = [];
-    for (const file of files) {
-      try {
-        attached.push(await this.session.addFile(page, file, attachmentName(file)));
-      } catch (error) {
-        problems.push(`${file.name || "a file"}: ${error instanceof Error ? error.message : String(error)}`);
-      }
+    let attached: string[];
+    try {
+      // one write for all of them: they are attached together or not at all
+      attached = await session.addFiles(page, files.map((file) => ({ content: file, wanted: attachmentName(file) })));
+    } catch (error) {
+      this.say("");
+      await showMessage("The files could not be attached", h("p", { text: error instanceof Error ? error.message : String(error) }));
+      return;
     }
-    if (attached.length > 0) {
-      // (the page may have been left while the files were stored: then they are attached, but nothing is inserted)
-      if (this.current?.name === page) this.editor.insert(attached.map((path) => this.referenceTo(path)).join("\n"), at);
-      const first = attached[0] as string;
-      this.say(`Attached ${attached.length === 1 ? first.slice(first.lastIndexOf("/") + 1) : count(attached.length, "file")} to ${page}.${problems.length ? ` ${problems.length} could not be attached.` : ""}`);
-    }
-    if (problems.length > 0) await showMessage("Some files could not be attached", ...problems.map((p) => h("p", { text: p })));
+    // (if the page or the notebook was left meanwhile, the files are attached, but nothing is inserted anywhere else)
+    if (this.session === session && this.current?.name === page) this.editor.insert(attached.map((path) => this.referenceTo(path)).join("\n"), at);
+    const first = attached[0] as string;
+    this.say(`Attached ${attached.length === 1 ? first.slice(first.lastIndexOf("/") + 1) : count(attached.length, "file")} to ${page}.`);
   }
 
   private renderAttachments(): void {
@@ -803,7 +822,7 @@ export class App {
 
   /** A picture, large, in a dialog. It is an <img> and nothing else, so that nothing in it can run, whatever the file. */
   private async showPicture(name: string, blob: Blob): Promise<void> {
-    const url = URL.createObjectURL(blob);
+    const { url, release } = await pictureAddress(blob);
     try {
       await showDialog({
         title: name,
@@ -812,7 +831,7 @@ export class App {
         noCancel: true,
       });
     } finally {
-      URL.revokeObjectURL(url);
+      release();
     }
   }
 
@@ -985,9 +1004,10 @@ export class App {
         const moved = report.moved.find(([old]) => old.toLowerCase() === from.toLowerCase());
         const mine = this.current ? report.moved.find(([old]) => old.toLowerCase() === this.current?.name.toLowerCase()) : undefined;
         if (this.current && mine) this.current.name = mine[1];
-        // links are judged from the page they are on, and this page has a new name
+        // links are judged from the page they are on, and this page has a new name; so are its attachments
         this.linkCache.clear();
         this.editor.refreshLinks();
+        this.renderAttachments();
         await this.refreshCurrentText();
         this.tree.setCurrent(this.current?.name ?? null);
         history.replaceState(null, "", hashFor(this.current?.name ?? from));

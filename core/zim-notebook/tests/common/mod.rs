@@ -356,6 +356,11 @@ pub fn rename_checked(
         match target {
             FileTarget::Notebook { path, exists: true } => {
                 let want = map_file(path);
+                // (a link that is no longer written with a `/` is a link to a page, not to a file)
+                assert!(
+                    *is_image || classify(&text_after) == LinkKind::File,
+                    "{context}: renaming {old} to {new}: {text:?} on {from_before} became {text_after:?} on {from_after}, which is not a file link"
+                );
                 match nb.resolve_file(&from_after, &text_after) {
                     FileTarget::Notebook { path: now, exists: true } => assert_eq!(
                         now.to_lowercase(),

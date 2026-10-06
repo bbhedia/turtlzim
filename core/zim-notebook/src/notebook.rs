@@ -121,6 +121,9 @@ pub enum RenameError {
     Taken(PageName),
     /// A file of the pages moving would land on this file, which stays where it is.
     FileTaken(String),
+    /// The move would make this path both a file and a folder (a file that stays is where a folder
+    /// of the pages moving would be, or a folder of files that stay is where a file would land).
+    FileAndFolder(String),
 }
 
 impl std::fmt::Display for RenameError {
@@ -130,6 +133,7 @@ impl std::fmt::Display for RenameError {
             RenameError::IntoItself => write!(f, "A page can't be moved below itself."),
             RenameError::Taken(name) => write!(f, "A page called {name} already exists."),
             RenameError::FileTaken(path) => write!(f, "A file called {path} already exists."),
+            RenameError::FileAndFolder(path) => write!(f, "{path} would be both a file and a folder."),
         }
     }
 }
@@ -234,11 +238,56 @@ impl Notebook {
     // ---- files (attachments)
 
     /// Record that the notebook has a file at `path` (a path relative to the notebook, with `/`
-    /// between folders). A file that is already there keeps its spelling.
+    /// between folders). A file that is already there keeps its spelling. A path can't be both a
+    /// file and a folder, so this refuses one that has a file for a folder above it, or that is the
+    /// folder of files already here.
     pub fn put_file(&mut self, path: &str) -> Result<(), FileError> {
         check_file_path(path)?;
-        self.files.entry(path.to_lowercase()).or_insert_with(|| path.to_string());
+        let key = path.to_lowercase();
+        if self.files.contains_key(&key) {
+            return Ok(());
+        }
+        if let Some(other) = self.file_folder_clash(&key) {
+            return Err(FileError {
+                path: path.to_string(),
+                reason: format!("would be both a file and a folder (see {other})"),
+            });
+        }
+        self.files.insert(key, path.to_string());
         Ok(())
+    }
+
+    /// A file that stops `key` (a lower-case path, not itself a file) from being a file: one that is
+    /// a folder above it, or one that has it for a folder.
+    fn file_folder_clash(&self, key: &str) -> Option<String> {
+        if let Some(file) = self.folder_blocked_by_file(key) {
+            return Some(file);
+        }
+        let below = format!("{key}/");
+        self.files
+            .range(below.clone()..)
+            .next()
+            .filter(|(k, _)| k.starts_with(&below))
+            .map(|(_, path)| path.clone())
+    }
+
+    /// A file that stops `folder` (a lower-case path) from being a folder: itself, or one above it.
+    fn folder_blocked_by_file(&self, folder: &str) -> Option<String> {
+        folder
+            .match_indices('/')
+            .map(|(at, _)| &folder[..at])
+            .chain(std::iter::once(folder))
+            .find_map(|prefix| self.files.get(prefix).cloned())
+    }
+
+    /// Whether `path` is already taken for a new file: by a file, by a folder some file is in, or by
+    /// the folder of a page or section.
+    fn path_in_use(&self, path: &str) -> bool {
+        let key = path.to_lowercase();
+        let below = format!("{key}/");
+        self.files.contains_key(&key)
+            || self.files.range(below.clone()..).next().is_some_and(|(k, _)| k.starts_with(&below))
+            || PageName::from_folder_path(path).ok().is_some_and(|name| self.find(&name).is_some())
     }
 
     /// Forget the file at `path`. Whether there was one.
@@ -304,11 +353,19 @@ impl Notebook {
     }
 
     /// The path for a new attachment of `page` that people call `wanted`: in the page's folder, with
-    /// a name that is safe in a link and not in use.
-    pub fn attachment_path(&self, page: &PageName, wanted: &str) -> String {
+    /// a name that is safe in a link, doesn't end in `.txt`, and isn't in use, not even as the name
+    /// of a folder or of a page below it. Refused, with the reason, if a file is where the page's
+    /// folder would be.
+    pub fn attachment_path(&self, page: &PageName, wanted: &str) -> Result<String, FileError> {
         let folder = page.folder_path();
-        let name = unique_file_name(&safe_file_name(wanted), |n| self.files.contains_key(&format!("{folder}/{n}").to_lowercase()));
-        format!("{folder}/{name}")
+        if let Some(file) = self.folder_blocked_by_file(&folder.to_lowercase()) {
+            return Err(FileError {
+                path: folder,
+                reason: format!("can't hold attachments: there is a file called {file}"),
+            });
+        }
+        let name = unique_file_name(&safe_file_name(wanted), |n| self.path_in_use(&format!("{folder}/{n}")));
+        Ok(format!("{folder}/{name}"))
     }
 
     /// The text that, written on `from` as a file reference, leads to the file at `path`.
@@ -509,12 +566,39 @@ impl Notebook {
             }
         }
         let moving_files: HashSet<&String> = file_moves.iter().map(|(key, _, _)| key).collect();
+        let stays = |key: &str| !moving_files.contains(&key.to_string());
+        // a file that stays and is, or is above, `folder` (a lower-case path)
+        let file_in_the_way = |folder: &str| -> Option<String> {
+            folder
+                .match_indices('/')
+                .map(|(at, _)| &folder[..at])
+                .chain(std::iter::once(folder))
+                .find_map(|prefix| self.files.get(prefix).filter(|_| stays(prefix)).cloned())
+        };
         for (_, _, new_path) in &file_moves {
             let key = new_path.to_lowercase();
             if let Some(existing) = self.files.get(&key) {
-                if !moving_files.contains(&key) {
+                if stays(&key) {
                     return Err(RenameError::FileTaken(existing.clone()));
                 }
+            }
+            // not inside a "folder" that is a file that stays
+            if let Some((at, _)) = key.rmatch_indices('/').next() {
+                if let Some(file) = file_in_the_way(&key[..at]) {
+                    return Err(RenameError::FileAndFolder(file));
+                }
+            }
+            // and not where a folder of files that stay is
+            let below = format!("{key}/");
+            if let Some((_, file)) = self.files.range(below.clone()..).take_while(|(k, _)| k.starts_with(&below)).find(|(k, _)| stays(k)) {
+                return Err(RenameError::FileAndFolder(file.clone()));
+            }
+        }
+        // the folders of the pages that move can't be files that stay either
+        for key in &moving {
+            let destination = renamed(&self.pages[key].name).folder_path().to_lowercase();
+            if let Some(file) = file_in_the_way(&destination) {
+                return Err(RenameError::FileAndFolder(file));
             }
         }
         let moved_file: HashMap<String, String> = file_moves.iter().map(|(key, _, new)| (key.clone(), new.clone())).collect();
@@ -627,7 +711,9 @@ impl Notebook {
             };
             let leads_to_want = matches!(resolve_file(&entry.name, target, self), FileTarget::Notebook { exists: true, ref path } if path.to_lowercase() == job.want.to_lowercase());
             if !leads_to_want {
-                let text = relative_file_text(&entry.name, &job.want, target.trim_start().starts_with("./"));
+                // an image may be written without `./`; a link has to have a `/` to be a file link at all
+                let dot = matches!(job.what, FileRef::Link(_)) || target.trim_start().starts_with("./");
+                let text = relative_file_text(&entry.name, &job.want, dot);
                 edits.entry(key).or_default().push((start, end, text));
             }
         }

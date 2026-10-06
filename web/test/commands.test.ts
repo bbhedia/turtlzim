@@ -337,6 +337,28 @@ describe("inserting a reference to an attachment", () => {
   });
 });
 
+describe("inserting a reference into a page with carriage returns in it", () => {
+  // such a page (mixed line endings) is kept exactly as it is, and the parser sees no header in it
+  const page = "Content-Type: text/x-zim-wiki\r\nWiki-Format: zim 0.6\r\n\r\n====== Title ======\nSome text here.\n";
+  const run = (caret: number) => {
+    const state = EditorState.create({ doc: page, selection: EditorSelection.cursor(caret), extensions: zimExtensions({ exactLineBreaks: true }) });
+    return state.update(insertReference(state, "{{./a.png}}")).state.doc.toString();
+  };
+
+  it("still keeps the header whole: a caret in it means the end of the page", () => {
+    for (const caret of [0, 5, page.indexOf("Wiki-Format") + 4, page.indexOf("\r\n\r\n") + 2]) {
+      expect(run(caret), `caret ${caret}`).toBe(`${page}{{./a.png}}\n`);
+    }
+  });
+
+  it("puts it where the caret is, once the caret is below the header", () => {
+    const at = page.indexOf("text here");
+    expect(run(at)).toBe(page.slice(0, at) + "{{./a.png}}" + page.slice(at));
+    const title = page.indexOf("====== Title");
+    expect(run(title)).toBe(page.slice(0, title) + "{{./a.png}}" + page.slice(title));
+  });
+});
+
 describe("appending a reference to the end of the page", () => {
   it("puts it on a line of its own at the end, wherever the caret is", () => {
     const page = "Content-Type: text/x-zim-wiki\n\n====== Title ======\nSome text here.\n";

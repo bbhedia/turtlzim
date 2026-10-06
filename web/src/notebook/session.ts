@@ -32,6 +32,9 @@ export class NotebookSession {
   /** What is known of each attachment (by `fileKey`): the bytes stay in the store. */
   private readonly fileInfos = new Map<string, FileInfo>();
   private readonly listeners = new Set<(event: SessionEvent) => void>();
+  /** The end of what has been asked of the session so far: each change waits for the one before it. */
+  private lock: Promise<unknown> = Promise.resolve();
+  private closing = false;
 
   private constructor(
     readonly store: NotebookStore,
@@ -69,7 +72,27 @@ export class NotebookSession {
     if (this.fileInfos.size > 0) this.emit({ kind: "files" });
   }
 
-  close(): void {
+  /**
+   * Run `work` once everything asked of the session before it has finished, and nothing after it
+   * until it has. A change decides things (a free name for a file, which pages a rename moves) and
+   * then waits for the store; if another change got in between, what was decided would no longer
+   * be true.
+   */
+  private exclusive<T>(work: () => Promise<T>): Promise<T> {
+    if (this.closing) return Promise.reject(new Error("This notebook was closed."));
+    const run = this.lock.then(work);
+    this.lock = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Close the session once what it is doing has finished; changes asked for after this are refused. */
+  async close(): Promise<void> {
+    if (this.closing) {
+      await this.lock;
+      return;
+    }
+    this.closing = true;
+    await this.lock;
     this.model.free();
     this.listeners.clear();
   }
@@ -196,7 +219,11 @@ export class NotebookSession {
    * Set a page's text and write it to the store, creating the page if there isn't one. If the
    * write fails the notebook is read back from the store, so what is shown is what is kept.
    */
-  async save(name: string, text: string): Promise<void> {
+  save(name: string, text: string): Promise<void> {
+    return this.exclusive(() => this.saveNow(name, text));
+  }
+
+  private async saveNow(name: string, text: string): Promise<void> {
     const existed = this.model.has(name);
     this.model.put(name, text);
     const key = pageKey(name);
@@ -213,18 +240,24 @@ export class NotebookSession {
   }
 
   /** Make a new page, as Zim starts one (header and title) unless given text. Returns its name. */
-  async create(name: string, text?: string): Promise<string> {
-    const spelled = this.spell(name);
-    if (this.model.has(spelled)) throw new Error(`A page called ${this.model.find(spelled) ?? spelled} already exists.`);
-    await this.save(spelled, text ?? newPageText(spelled, zimTimestamp()));
-    return this.model.find(spelled) ?? spelled;
+  create(name: string, text?: string): Promise<string> {
+    return this.exclusive(async () => {
+      const spelled = this.spell(name);
+      if (this.model.has(spelled)) throw new Error(`A page called ${this.model.find(spelled) ?? spelled} already exists.`);
+      await this.saveNow(spelled, text ?? newPageText(spelled, zimTimestamp()));
+      return this.model.find(spelled) ?? spelled;
+    });
   }
 
   /**
    * Move a page and everything below it. With `updateLinks`, links are rewritten so that every one
    * still leads where it did. Throws, with a message to show, if it can't be done.
    */
-  async rename(from: string, to: string, updateLinks = true): Promise<RenameReport> {
+  rename(from: string, to: string, updateLinks = true): Promise<RenameReport> {
+    return this.exclusive(() => this.renameNow(from, to, updateLinks));
+  }
+
+  private async renameNow(from: string, to: string, updateLinks: boolean): Promise<RenameReport> {
     const report = this.model.rename(from, to, updateLinks);
     for (const [oldName, newName] of report.moved) {
       const key = pageKey(oldName);
@@ -255,14 +288,18 @@ export class NotebookSession {
     // If the home page moved, the notebook's home moves with it.
     const homeKey = this.homeKey();
     const movedHome = homeKey === undefined ? undefined : report.moved.find(([old]) => pageKey(old) === homeKey);
-    if (movedHome) await this.setHome(movedHome[1]);
+    if (movedHome) await this.setHomeNow(movedHome[1]);
     this.emit({ kind: "structure" });
     if (report.filesMoved.length > 0) this.emit({ kind: "files" });
     return report;
   }
 
   /** Delete a page and everything below it, and the attachments in their folders. The names deleted. */
-  async delete(name: string): Promise<string[]> {
+  delete(name: string): Promise<string[]> {
+    return this.exclusive(() => this.deleteNow(name));
+  }
+
+  private async deleteNow(name: string): Promise<string[]> {
     const removed = this.model.removeTree(name);
     const removedFiles = this.model.removeFilesBelow(name);
     for (const gone of removed) this.files.delete(pageKey(gone));
@@ -284,23 +321,47 @@ export class NotebookSession {
    * that refers to it from the page is `fileLink`.
    */
   async addFile(page: string, content: Blob, wanted: string): Promise<string> {
-    const path = this.model.attachmentPath(page, wanted);
-    const blob = typed(content, path);
+    return (await this.addFiles(page, [{ content, wanted }]))[0] as string;
+  }
+
+  /**
+   * Attach several files to a page in one go: each gets a name of its own in the page's folder, and
+   * all are stored in one write, which happens entirely or not at all. Returns their paths, in order.
+   */
+  addFiles(page: string, files: Array<{ content: Blob; wanted: string }>): Promise<string[]> {
+    return this.exclusive(() => this.addFilesNow(page, files));
+  }
+
+  private async addFilesNow(page: string, files: Array<{ content: Blob; wanted: string }>): Promise<string[]> {
     const modified = Date.now();
+    const added: StoredFile[] = [];
     try {
-      await this.store.replacePages(this.info.id, { remove: [], put: [], files: { put: [{ path, blob, modified }] } });
+      for (const { content, wanted } of files) {
+        const path = this.model.attachmentPath(page, wanted);
+        this.model.putFile(path); // taken from here on, so that the next file gets a name of its own
+        added.push({ path, blob: typed(content, path), modified });
+      }
+    } catch (error) {
+      for (const { path } of added) this.model.removeFile(path);
+      throw error;
+    }
+    try {
+      await this.store.replacePages(this.info.id, { remove: [], put: [], files: { put: added } });
     } catch (error) {
       await this.reload();
       throw error;
     }
-    this.model.putFile(path);
-    this.fileInfos.set(fileKey(path), { path, size: blob.size, type: blob.type, modified });
+    for (const file of added) this.fileInfos.set(fileKey(file.path), { path: file.path, size: file.blob.size, type: file.blob.type, modified });
     this.emit({ kind: "files" });
-    return path;
+    return added.map((file) => file.path);
   }
 
   /** Delete an attachment. Whether there was one. */
-  async removeFile(path: string): Promise<boolean> {
+  removeFile(path: string): Promise<boolean> {
+    return this.exclusive(() => this.removeFileNow(path));
+  }
+
+  private async removeFileNow(path: string): Promise<boolean> {
     const known = this.model.filePath(path);
     if (known === undefined) return false;
     try {
@@ -321,21 +382,31 @@ export class NotebookSession {
     return "name" in parsed ? pageKey(parsed.name) : undefined;
   }
 
-  async setHome(name: string): Promise<void> {
+  setHome(name: string): Promise<void> {
+    return this.exclusive(() => this.setHomeNow(name));
+  }
+
+  private async setHomeNow(name: string): Promise<void> {
     this.info = { ...this.info, home: name };
     await this.store.updateNotebook(this.info);
   }
 
-  async setTitle(title: string): Promise<void> {
-    this.info = { ...this.info, title };
-    await this.store.updateNotebook(this.info);
+  setTitle(title: string): Promise<void> {
+    return this.exclusive(async () => {
+      this.info = { ...this.info, title };
+      await this.store.updateNotebook(this.info);
+    });
   }
 
   /**
    * Add pages and attachments (replacing any with the same name or path, ignoring case): an import.
    * A file that replaces one keeps the spelling of the path it replaces.
    */
-  async addPages(pages: StoredPage[], files: StoredFile[] = []): Promise<void> {
+  addPages(pages: StoredPage[], files: StoredFile[] = []): Promise<void> {
+    return this.exclusive(() => this.addPagesNow(pages, files));
+  }
+
+  private async addPagesNow(pages: StoredPage[], files: StoredFile[]): Promise<void> {
     for (const page of pages) {
       this.model.put(page.name, page.text);
       this.files.set(pageKey(page.name), { bom: page.bom, lineEnding: page.lineEnding, modified: page.modified });
@@ -363,7 +434,11 @@ export class NotebookSession {
   }
 
   /** The notebook as files: every page at its path with its own byte-order mark and line endings, every attachment at its path, and `notebook.zim`, so that Zim opens the folder. */
-  async exportFiles(): Promise<ZipEntry[]> {
+  exportFiles(): Promise<ZipEntry[]> {
+    return this.exclusive(() => this.exportFilesNow());
+  }
+
+  private async exportFilesNow(): Promise<ZipEntry[]> {
     const modified = (name: string) => new Date(this.files.get(pageKey(name))?.modified ?? Date.now());
     const entries: ZipEntry[] = [{ path: "notebook.zim", bytes: new TextEncoder().encode(notebookConfig({ title: this.info.title, home: this.info.home })) }];
     for (const name of this.model.names()) {

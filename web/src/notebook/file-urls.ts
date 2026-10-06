@@ -2,6 +2,7 @@
 // and `URL.createObjectURL` makes one that lives until it is revoked. Making one is asynchronous (the
 // bytes come from the store), so a picture is "loading" the first time it is asked for, and the host
 // is told when it is ready to ask again.
+import { pictureAddress } from "./media";
 import type { NotebookSession } from "./session";
 import { fileKey } from "./store";
 
@@ -10,6 +11,7 @@ export type PictureState = { status: "ready"; url: string } | { status: "loading
 interface Loaded {
   path: string;
   url: string;
+  release: () => void;
   /** What the file was like when the address was made: if it changes, the address is stale. */
   size: number;
   modified: number;
@@ -46,8 +48,12 @@ export class FileUrls {
     try {
       const blob = await this.session.fileBlob(path);
       const info = this.session.fileInfo(path);
-      if (this.closed) return;
-      if (blob && info) this.loaded.set(key, { path: info.path, url: URL.createObjectURL(blob), size: info.size, modified: info.modified });
+      const address = blob && info ? await pictureAddress(blob) : null;
+      if (this.closed) {
+        address?.release();
+        return;
+      }
+      if (address && info) this.loaded.set(key, { path: info.path, ...address, size: info.size, modified: info.modified });
       else this.failed.add(key);
     } catch {
       if (!this.closed) this.failed.add(key);
@@ -62,7 +68,7 @@ export class FileUrls {
     for (const [key, entry] of this.loaded) {
       const now = this.session.fileInfo(entry.path);
       if (!now || now.size !== entry.size || now.modified !== entry.modified) {
-        URL.revokeObjectURL(entry.url);
+        entry.release();
         this.loaded.delete(key);
       }
     }
@@ -72,7 +78,7 @@ export class FileUrls {
   /** The notebook was closed: release every address. */
   close(): void {
     this.closed = true;
-    for (const entry of this.loaded.values()) URL.revokeObjectURL(entry.url);
+    for (const entry of this.loaded.values()) entry.release();
     this.loaded.clear();
     this.loading.clear();
     this.failed.clear();

@@ -470,6 +470,13 @@ export function insertReference(state: EditorState, text: string, at?: number | 
   const spans = spansOf(state);
   // the header block and the blank line that ends it: the body starts below that
   let bodyStart = spans.length > 0 && spans.kind(0) === Kind.Header ? spans.end(0) : 0;
+  if (bodyStart === 0 && state.doc.length > 0) {
+    // A page with carriage returns in it (mixed line endings) is kept as it is, and then the parser sees no
+    // header at all; its header is still there, and still not a place to put anything.
+    const head = state.sliceDoc(0, Math.min(state.doc.length, 4000));
+    const found = /^Content-Type:[^\n]*\n(?:[A-Za-z][A-Za-z0-9_-]*:[^\n]*\n)*/.exec(head);
+    if (found) bodyStart = found[0].length;
+  }
   while (bodyStart > 0 && bodyStart < state.doc.length && /[\r\n]/.test(state.sliceDoc(bodyStart, bodyStart + 1))) bodyStart++;
   const main = state.selection.main;
   const from = at === "end" ? 0 : (at ?? main.from);

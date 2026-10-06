@@ -474,6 +474,37 @@ fn moving_into_a_section_that_exists_merges_with_it() {
     );
 }
 
+/// How a page refers to a file, worked out here (and not by the library function whose work it
+/// checks): the path from the page's folder, `./` or `../`, with what would break a reference
+/// written as `%XX`.
+fn reference_text(page: &PageName, file: &str, dot: bool) -> String {
+    let folder: Vec<String> = page.folder_path().split('/').map(str::to_lowercase).collect();
+    let parts: Vec<&str> = file.split('/').collect();
+    let (dir, last) = parts.split_at(parts.len() - 1);
+    let mut common = 0;
+    while common < folder.len() && common < dir.len() && folder[common] == dir[common].to_lowercase() {
+        common += 1;
+    }
+    let escape = |part: &str| -> String {
+        part.chars()
+            .map(|c| match c {
+                '%' | '?' | '|' | '#' | '[' | ']' | '{' | '}' => format!("%{:02X}", c as u32),
+                c => c.to_string(),
+            })
+            .collect()
+    };
+    let rest: Vec<String> = dir[common..].iter().chain(last.iter()).map(|p| escape(p)).collect();
+    let up = folder.len() - common;
+    let text = format!("{}{}", "../".repeat(up), rest.join("/"));
+    if up == 0 && dot {
+        format!("./{text}")
+    } else if up == 0 && (text.starts_with('~') || text.chars().nth(1) == Some(':')) {
+        format!("./{text}") // read as a place outside the notebook otherwise
+    } else {
+        text
+    }
+}
+
 /// Random notebooks from a small alphabet, so that names collide and shadow each other constantly,
 /// with pages that link to each other in every style.
 fn random_notebook(rng: &mut Rng, pages: usize) -> Notebook {
@@ -498,9 +529,12 @@ fn random_notebook(rng: &mut Rng, pages: usize) -> Notebook {
     let all: Vec<PageName> = nb.names().cloned().collect();
     // Files: in the folders of pages, in folders no page has, and at the top.
     let mut file_paths: Vec<String> = Vec::new();
+    // (some with names that would break a reference if it were written as they are)
+    let awkward = ["w?.png", "p|q.png", "c}}d.png", "50%.png", "h#.png", "~t.png", "x:y.png", "b[r].png", "s p.png"];
     for page in &all {
         for k in 0..rng.below(3) {
-            file_paths.push(format!("{}/f{k}.png", page.folder_path()));
+            let file = if rng.below(4) == 0 { awkward[rng.below(awkward.len())].to_string() } else { format!("f{k}.png") };
+            file_paths.push(format!("{}/{file}", page.folder_path()));
         }
     }
     for k in 0..rng.below(3) {
@@ -521,9 +555,9 @@ fn random_notebook(rng: &mut Rng, pages: usize) -> Notebook {
         for _ in 0..rng.below(4) {
             let pick = |rng: &mut Rng| file_paths[rng.below(file_paths.len())].clone();
             let (wanted, link_ok) = match rng.below(7) {
-                0..=2 if !file_paths.is_empty() => (zim_notebook::relative_file_text(page, &pick(rng), true), true),
-                3 if !file_paths.is_empty() => (zim_notebook::relative_file_text(page, &pick(rng), false), false),
-                4 if !file_paths.is_empty() => (zim_notebook::relative_file_text(page, &pick(rng), true).to_uppercase(), true),
+                0..=2 if !file_paths.is_empty() => (reference_text(page, &pick(rng), true), true),
+                3 if !file_paths.is_empty() => (reference_text(page, &pick(rng), false), false),
+                4 if !file_paths.is_empty() => (reference_text(page, &pick(rng), true).to_uppercase(), true),
                 5 => ("/abs/outside.png".to_string(), true),
                 _ => ("./missing.png".to_string(), true),
             };

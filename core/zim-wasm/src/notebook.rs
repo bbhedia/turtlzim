@@ -425,7 +425,9 @@ impl Notebook {
     /// with a safe name that is not in use. Throws if `page` isn't a valid page name.
     #[wasm_bindgen(js_name = attachmentPath)]
     pub fn attachment_path(&self, page: &str, wanted: &str) -> Result<String, JsError> {
-        Ok(self.inner.attachment_path(&name(page)?, wanted))
+        self.inner
+            .attachment_path(&name(page)?, wanted)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// The text that, written on `from` as a file reference, leads to the file at `path`.

@@ -59,8 +59,27 @@ A reference to a file that isn't there still says where it would be. `relative_f
 the text that leads to a file from a page (`./a.png`, `../a.png`), checked by resolving it.
 `safe_file_name` and `Notebook::attachment_path` name a new attachment so that it can't break a
 link or an image (no `/ \ ? # | [ ] { } < > : * " %`, no leading dot) and doesn't clash with another
-file (`a.png`, `a 2.png`, …). `images_in` reads `{{path?query|alt}}` (the parser's own reading,
-`zim_format::inline::parse_image`).
+file, a folder or a page (`a.png`, `a 2.png`, …). `images_in` reads `{{path?query|alt}}` (the
+parser's own reading, `zim_format::inline::parse_image`).
+
+Three things a notebook of files has to keep true, because Zim and a file system would not:
+
+* **No file ends in `.txt`.** Zim reads every `.txt` in a notebook folder as a page, so an attachment
+  with that name would come back as a page (or be dropped as one that isn't UTF-8) after an export.
+  `check_file_path` refuses such a path and `safe_file_name` gives it `.text` after it
+  (`notes.txt` is stored as `notes.txt.text`).
+* **A path is not both a file and a folder.** `put_file` refuses a path that has a file above it or
+  files below it; `attachment_path` never picks the name of a folder some file is in, nor of a page
+  or section below the page (an attachment `Sub` beside the page `A:Sub`), and refuses a page whose
+  folder would be a file; a rename that would put a moved file on a folder of files that stay (or a
+  page's folder on a file that stays) is refused, changing nothing (`FileAndFolder`).
+* **What is written to refer to a file refers to it.** `relative_file_text` writes the characters
+  that would break a reference (`% ? | # [ ] { }`) as `%XX`, which resolution reads back, and a name
+  that would read as something else (`~x`, `C:x`) gets `./`. A link needs a `/` in it to be a file
+  link at all, so a link rewritten by a rename keeps one (`../a.pdf` becomes `./a.pdf`, never
+  `a.pdf`, which would be a link to a page); an image may stay bare. (A file named like another's
+  escaped name, `a%7Cb.png` beside `a|b.png`, is found as written first, which hides the other from
+  references; only an import can make such a pair.)
 
 **Rename moves the folder too**: a page and everything below it take the files in their folders
 along (`Foo/a.png` to `Bar/a.png`), also those of a section with no text of its own, and a move that
@@ -99,10 +118,15 @@ A rename that can't be done (nothing there, onto a page that exists, below itsel
   and snippets over text with markup in it, and `tests/files.rs` (resolution, relative text,
   attachment names, images, and every rename behaviour for files).
 * The random rename test (6,000 notebooks) now also has files in the page folders, in folders no page
-  has, and at the top, and pages that refer to them in every style (right, wrong, outside, shouting
-  in capitals), and checks after each rename that every reference that led to a file still does, that
-  the files moved are exactly those in the renamed folder, and that a refused rename moved nothing.
-  Breaking the rewrite, losing a moved file, or not refusing a file clash each fail it.
+  has, and at the top, with names that would break a reference if written as they are (`w?.png`,
+  `p|q.png`, `~t.png`, …), and pages that refer to them in every style (right, wrong, outside, shouting
+  in capitals). The references are written by a function in the test itself, not by the library's
+  (a test that generates its inputs with the code under test cannot see that code's mistakes: this one
+  did not, at first, see references that were not escaped). After each rename it checks that every
+  reference that led to a file still does, that a rewritten link is still a file link, that the files
+  moved are exactly those in the renamed folder, and that a refused rename moved nothing. Breaking the
+  rewrite, losing a moved file, not refusing a file clash, not escaping, or letting a link lose its
+  slash each fail it.
 * **Zim's own manual notebook** (81 pages): all 301 page links resolve to existing pages. Weakening
   the lookup to "beside the page only" breaks 79 of them, and dropping underscore-as-space breaks
   161, so the test does discriminate.

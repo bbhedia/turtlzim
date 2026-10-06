@@ -44,7 +44,17 @@ export class IndexedDbStore implements NotebookStore {
     private readonly keyOf: (name: string) => string,
   ) {}
 
-  static async open(keyOf: (name: string) => string, name = DATABASE): Promise<IndexedDbStore> {
+  /**
+   * Open the database, upgrading it if it is older. An upgrade has to wait for every other tab that has the
+   * database open to let go of it, so `onBlocked` says when this one is being kept waiting (and the
+   * open goes on when they do), and a connection made here lets go as soon as another tab asks to
+   * upgrade, saying so through `onVersionChange`: after that this store can't be used any more.
+   */
+  static async open(
+    keyOf: (name: string) => string,
+    name = DATABASE,
+    events: { onBlocked?: () => void; onVersionChange?: () => void } = {},
+  ): Promise<IndexedDbStore> {
     const opening = indexedDB.open(name, VERSION);
     opening.onupgradeneeded = (event) => {
       const db = opening.result;
@@ -54,7 +64,13 @@ export class IndexedDbStore implements NotebookStore {
       }
       if (event.oldVersion < 2) db.createObjectStore("files", { keyPath: ["notebook", "key"] });
     };
-    return new IndexedDbStore(await request(opening), keyOf);
+    opening.onblocked = () => events.onBlocked?.();
+    const db = await request(opening);
+    db.onversionchange = () => {
+      db.close();
+      events.onVersionChange?.();
+    };
+    return new IndexedDbStore(db, keyOf);
   }
 
   /** Ask the browser to keep this site's data until the user says otherwise (a secure origin only). */

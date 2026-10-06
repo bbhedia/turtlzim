@@ -1425,7 +1425,7 @@ try {
   await app("files stay with their page when it is renamed, and go when it is deleted", {}, async (ui) => {
     const { page } = ui;
     await ui.goto("Projects:Garden");
-    await ui.attachInput().setInputFiles([{ name: "Bed 1.png", mimeType: "image/png", buffer: green }, { name: "notes.txt", mimeType: "text/plain", buffer: utf8("remember the beans") }]);
+    await ui.attachInput().setInputFiles([{ name: "Bed 1.png", mimeType: "image/png", buffer: green }, { name: "notes.csv", mimeType: "text/csv", buffer: utf8("remember,the beans") }]);
     await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 2);
     await ui.flush();
     await page.getByRole("button", { name: "Rename", exact: true }).click();
@@ -1436,9 +1436,9 @@ try {
     await dialog.getByRole("button", { name: "Rename", exact: true }).click();
     await dialog.waitFor({ state: "detached" });
     await ui.waitCurrent("Projects:Allotment");
-    assertDeepEqual(await ui.attachmentNames(), ["Bed 1.png", "notes.txt"], "the page still has its attachments");
+    assertDeepEqual(await ui.attachmentNames(), ["Bed 1.png", "notes.csv"], "the page still has its attachments");
     assertDeepEqual((await ui.picture()).natural, [320, 180], "and still shows the picture");
-    assertDeepEqual(await page.evaluate(() => window.__zim.app.session.attachments("Projects:Allotment").map((f) => f.path)), ["Projects/Allotment/Bed 1.png", "Projects/Allotment/notes.txt"], "they are in the folder of the new name");
+    assertDeepEqual(await page.evaluate(() => window.__zim.app.session.attachments("Projects:Allotment").map((f) => f.path)), ["Projects/Allotment/Bed 1.png", "Projects/Allotment/notes.csv"], "they are in the folder of the new name");
     assertEqual(await page.evaluate(() => window.__zim.app.session.attachments("Projects:Garden").length), 0, "and not in the old one");
     // after a reload, still
     await ui.reload();
@@ -1450,7 +1450,7 @@ try {
     });
     const dir = join(work, "export-attached");
     const names = unzip(zip.bytes, dir);
-    assert(names.includes("Projects/Allotment/Bed 1.png") && names.includes("Projects/Allotment/notes.txt"), `the export has them at those paths (${names.filter((n) => !n.endsWith(".txt") || n.includes("notes")).join(", ")})`);
+    assert(names.includes("Projects/Allotment/Bed 1.png") && names.includes("Projects/Allotment/notes.csv"), `the export has them at those paths (${names.filter((n) => !n.endsWith(".txt") || n.includes("notes")).join(", ")})`);
     assert(readFileSync(join(dir, "Projects/Allotment/Bed 1.png")).equals(green), "byte for byte");
     // deleting the page deletes them, and the dialog says so
     await page.locator(".page-actions").getByRole("button", { name: "Delete", exact: true }).click();
@@ -1490,6 +1490,215 @@ try {
     await ui.settle();
     assertEqual(await page.evaluate(() => window.__pwned), 0, "nothing in either of them ran");
     assertEqual(context.pages().length, pagesBefore, "and no window was opened for them");
+  });
+
+  await app("an SVG picture opened as a page of its own, as the browser's Open image in new tab does, cannot reach the notebooks", {}, async (ui) => {
+    const { page, context } = ui;
+    await ui.goto("Ideas");
+    // a picture whose script tries to read the database the notebooks are kept in
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><script>
+      try { const request = indexedDB.open("zim-notebooks"); request.onsuccess = () => { document.title = "ACCESSED " + location.origin; }; request.onerror = () => { document.title = "BLOCKED " + request.error.name; }; }
+      catch (error) { document.title = "BLOCKED " + error.name; }
+    </script><rect width="40" height="20" fill="red"/></svg>`;
+    await ui.attachInput().setInputFiles([{ name: "evil.svg", mimeType: "image/svg+xml", buffer: utf8(svg) }, { name: "plain.png", mimeType: "image/png", buffer: png(8, 8, [1, 2, 3]) }]);
+    await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 2);
+    assertDeepEqual((await ui.picture(0)).natural, [40, 20], "the SVG is drawn");
+    // every address a picture is given: in the page, in the panel
+    const addresses = await page.evaluate(() => [...document.querySelectorAll("img.cm-zim-image, .attachment-list .thumb img")].map((img) => img.src));
+    assert(addresses.some((a) => a.startsWith("data:image/svg+xml")), `the SVG has a data address (${addresses.map((a) => a.slice(0, 30)).join(" | ")})`);
+    assert(!addresses.some((a) => a.startsWith("blob:") && a.length < 0), "(no address is checked twice)");
+    for (const address of new Set(addresses.filter((a) => a.startsWith("data:") || a.startsWith("blob:")))) {
+      const tab = await context.newPage();
+      await tab.goto(address);
+      await tab.waitForTimeout(400);
+      const title = await tab.title();
+      assert(!title.startsWith("ACCESSED"), `a picture opened as a page reached the notebooks (${address.slice(0, 30)}…: ${title})`);
+      if (address.startsWith("data:image/svg")) assert(title.startsWith("BLOCKED"), `the SVG's script ran, and could not reach them (${title})`);
+      await tab.close();
+    }
+    // the large view uses the same kind of address
+    await page.locator("img.cm-zim-image").first().click({ modifiers: ["Control"] });
+    await ui.dialog().waitFor();
+    assert((await page.locator(".viewer-image").getAttribute("src")).startsWith("data:image/svg+xml"), "and so does the viewer");
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+  });
+
+  await app("the attachments panel follows a renamed page, also when it holds a file that is not a picture", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Ideas");
+    await ui.attachInput().setInputFiles([{ name: "plan.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4") }]);
+    await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 1);
+    await page.getByRole("button", { name: "Rename", exact: true }).click();
+    const dialog = ui.dialog();
+    await dialog.waitFor();
+    await dialog.getByLabel("New name").fill("Ideas renamed");
+    await dialog.getByRole("button", { name: "Rename", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    await ui.waitCurrent("Ideas renamed");
+    await ui.settle();
+    assertDeepEqual(await ui.attachmentNames(), ["plan.pdf"], "the panel still lists it");
+    assertEqual(await page.locator(".attachments").isVisible(), true, "and is shown");
+    assertEqual(await page.locator(".attachments summary .count").innerText(), "(1)", "with its count");
+  });
+
+  await app("files attached at the same moment get names of their own, and each keeps its own bytes", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Ideas");
+    await page.evaluate(() => {
+      const store = window.__zim.app.session.store;
+      const write = store.replacePages.bind(store);
+      store.replacePages = async (...args) => {
+        await new Promise((resolve) => setTimeout(resolve, 60)); // a store that takes its time
+        return write(...args);
+      };
+    });
+    await page.evaluate(() => {
+      const file = (text) => new File([text], "pic.png", { type: "image/png" });
+      void window.__zim.app.attachFiles([file("first")]);
+      void window.__zim.app.attachFiles([file("second")]);
+      void window.__zim.app.attachFiles([file("third")]);
+    });
+    await page.waitForFunction(() => window.__zim.app.session.attachments("Ideas").length === 3);
+    await ui.settle();
+    const stored = await page.evaluate(async () => {
+      const session = window.__zim.app.session;
+      return Promise.all(session.attachments("Ideas").map(async (f) => [f.path, await (await session.fileBlob(f.path)).text()]));
+    });
+    assertDeepEqual(stored.sort(), [["Ideas/pic 2.png", "second"], ["Ideas/pic 3.png", "third"], ["Ideas/pic.png", "first"]], "three files, three names, each its own bytes");
+    const text = await ui.text();
+    for (const name of ["pic.png", "pic 2.png", "pic 3.png"]) assert(text.includes(`{{./${name}}}`), `the page refers to ${name}`);
+  });
+
+  await app("leaving the notebook while files are being attached finishes the job in the notebook where it started", {}, async (ui) => {
+    const { page } = ui;
+    await ui.chooseFromMenu("New notebook…");
+    await ui.confirmDialog("Create", { Name: "Other notebook" });
+    assertEqual(await ui.notebookTitle(), "Other notebook", "a second notebook");
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitemradio", { name: "Sample notebook" }).click();
+    await page.waitForFunction(() => document.querySelector(".notebook-title")?.textContent === "Sample notebook");
+    await ui.goto("Ideas");
+    const otherHome = await page.evaluate(async () => {
+      const { app } = window.__zim;
+      const notebooks = await app.store.listNotebooks();
+      const other = notebooks.find((n) => n.title === "Other notebook");
+      const pages = await app.store.loadPages(other.id);
+      return { id: other.id, home: pages.find((p) => p.name === "Home").text };
+    });
+    await page.evaluate(() => {
+      const store = window.__zim.app.session.store;
+      const write = store.replacePages.bind(store);
+      store.replacePages = async (...args) => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return write(...args);
+      };
+    });
+    // two files being attached to Ideas in the sample notebook, and at once, the person opens the other notebook
+    await page.evaluate((id) => {
+      const file = (name) => new File([name], name, { type: "image/png" });
+      void window.__zim.app.attachFiles([file("one.png"), file("two.png")]);
+      void window.__zim.app.openNotebook(id);
+    }, otherHome.id);
+    await page.waitForFunction(() => document.querySelector(".notebook-title")?.textContent === "Other notebook");
+    // the files are on their way to the store (it takes its time): wait until they have arrived
+    const look = (id) =>
+      page.evaluate(async (id) => {
+        const { app } = window.__zim;
+        const notebooks = await app.store.listNotebooks();
+        const sample = notebooks.find((n) => n.title === "Sample notebook");
+        return {
+          sample: (await app.store.listFiles(sample.id)).map((f) => f.path).sort(),
+          other: (await app.store.listFiles(id)).map((f) => f.path),
+          otherHome: (await app.store.loadPages(id)).find((p) => p.name === "Home").text,
+        };
+      }, id);
+    let result = await look(otherHome.id);
+    for (let tries = 0; result.sample.length < 2 && tries < 60; tries++) {
+      await page.waitForTimeout(50);
+      result = await look(otherHome.id);
+    }
+    await ui.settle();
+    assertEqual(await page.locator("dialog").count(), 0, "no complaint was shown");
+    // both files are in the sample notebook, nothing went into the other
+    assertDeepEqual(result.sample, ["Ideas/one.png", "Ideas/two.png"], "both files went where they were given");
+    assertDeepEqual(result.other, [], "and none went into the notebook that was opened");
+    assertEqual(result.otherHome, otherHome.home, "whose home page is as it was");
+  });
+
+  await app("a file that Zim would read as a page is attached under a name that it doesn't", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Ideas");
+    await ui.attachInput().setInputFiles([{ name: "notes.txt", mimeType: "text/plain", buffer: utf8("some text I attach") }]);
+    await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 1);
+    assertDeepEqual(await ui.attachmentNames(), ["notes.txt.text"], "it keeps its name, and gains .text");
+    const zip = await ui.download(async () => {
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "Export notebook (zip)" }).click();
+    });
+    const names = unzip(zip.bytes, join(work, "export-txt"));
+    assertEqual(names.length, new Set(names).size, "no path is in the zip twice");
+    assert(names.includes("Ideas/notes.txt.text") && !names.includes("Ideas/notes.txt"), "and it is not mistaken for a page");
+  });
+
+  await app("a reference to an imported file with awkward characters in its name is written so that it works", {}, async (ui) => {
+    const { page } = ui;
+    const folder = join(work, "Awkward notebook");
+    const names = ["what?.png", "a|b.png", "a}}b.png", "50%.png", "h#sh.png", "sp ace.png"];
+    writeFiles(folder, {
+      "notebook.zim": "[Notebook]\nname=Awkward\nhome=Start\n",
+      "Start.txt": "Content-Type: text/x-zim-wiki\n\n====== Start ======\n",
+      ...Object.fromEntries(names.map((n) => [`Start/${n}`, png(6, 6, [9, 9, 9])])),
+    });
+    await page.locator("input[webkitdirectory]").setInputFiles(folder);
+    const dialog = ui.dialog();
+    await dialog.waitFor();
+    await ui.confirmDialog("Import");
+    await ui.waitCurrent("Start");
+    assertDeepEqual((await ui.attachmentNames()).sort(), [...names].sort(), "every file came in under its own name");
+    for (const name of names) {
+      await page.locator(".attachment-list li", { hasText: name }).getByRole("button", { name: "Insert" }).click();
+    }
+    await ui.flush();
+    await ui.settle();
+    const pictures = [];
+    for (let i = 0; i < names.length; i++) pictures.push((await ui.picture(i)).natural.join("x"));
+    assertDeepEqual(pictures, names.map(() => "6x6"), `each reference leads to its file (the page says ${JSON.stringify((await ui.text()).split("\n").slice(4))})`);
+  });
+
+  await app("an upgrade of the database waits for an older tab to let go, says so, and then goes on", {}, async (ui) => {
+    const { page, context } = ui;
+    // another tab, with an older version of the app, holding the database open (and not letting go of it)
+    const holder = await context.newPage();
+    await holder.goto(`${origin}/no-such-page`);
+    await holder.evaluate(
+      () =>
+        new Promise((resolve, reject) => {
+          indexedDB.deleteDatabase("zim-notebooks");
+          const opening = indexedDB.open("zim-notebooks", 1);
+          opening.onupgradeneeded = () => {
+            opening.result.createObjectStore("notebooks", { keyPath: "id" });
+            opening.result.createObjectStore("pages", { keyPath: ["notebook", "key"] });
+          };
+          opening.onsuccess = () => {
+            window.__older = opening.result;
+            resolve(null);
+          };
+          opening.onerror = () => reject(opening.error);
+          opening.onblocked = () => {}; // (the app in the first tab has it open: it lets go when asked)
+        }),
+    );
+    // the app, in a new tab, finds the database kept by the older one
+    const second = await context.newPage();
+    second.on("pageerror", (error) => problems.push(`[page error] ${error.message}`));
+    await second.goto(`${origin}/`);
+    await second.waitForFunction(() => document.querySelector(".loading")?.textContent.includes("open in another tab"));
+    assert(await second.evaluate(() => window.__zim === undefined), "it has not started");
+    await holder.evaluate(() => window.__older.close());
+    await second.waitForFunction(() => window.__zim !== undefined, null, { timeout: 15_000 });
+    assertEqual(await second.locator(".notebook-title").innerText(), "Sample notebook", "and then it starts");
+    await second.close();
+    await holder.close();
+    void page;
   });
 
   await app("a link that could run code is not followed; a web address opens in a window that can't reach this one", {}, async (ui) => {

@@ -213,6 +213,47 @@ describe("IndexedDB, beyond the contract", () => {
     expect(await text(store, "old", "Home/a.png")).toBe("now with files");
   });
 
+  it("says when an upgrade is kept waiting by another tab, and goes on when that tab lets go", async () => {
+    const name = `blocked-${++databases}`;
+    // an older version of the app, in another tab, with the database open (and not letting go of it)
+    const older = await new Promise<IDBDatabase>((resolve, reject) => {
+      const opening = indexedDB.open(name, 1);
+      opening.onupgradeneeded = () => {
+        opening.result.createObjectStore("notebooks", { keyPath: "id" });
+        opening.result.createObjectStore("pages", { keyPath: ["notebook", "key"] });
+      };
+      opening.onsuccess = () => resolve(opening.result);
+      opening.onerror = () => reject(opening.error);
+    });
+    let blocked = 0;
+    const opening = IndexedDbStore.open(pageKey, name, { onBlocked: () => blocked++ });
+    let opened = false;
+    void opening.then(() => (opened = true));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(blocked).toBe(1);
+    expect(opened).toBe(false);
+    older.close(); // the other tab closes
+    const store = await opening;
+    expect(await store.listNotebooks()).toEqual([]);
+  });
+
+  it("lets go of the database when another tab wants a newer one, and says so", async () => {
+    const name = `versionchange-${++databases}`;
+    let changed = 0;
+    const store = await IndexedDbStore.open(pageKey, name, { onVersionChange: () => changed++ });
+    await new Promise<void>((resolve, reject) => {
+      const newer = indexedDB.open(name, 3);
+      newer.onblocked = () => reject(new Error("the store did not let go"));
+      newer.onsuccess = () => {
+        newer.result.close();
+        resolve();
+      };
+      newer.onerror = () => reject(newer.error);
+    });
+    expect(changed).toBe(1);
+    await expect(store.listNotebooks()).rejects.toThrow(); // closed: this tab has to be reloaded
+  });
+
   it("asks for persistence only where the browser can give it, and never fails", async () => {
     expect(typeof (await IndexedDbStore.requestPersistence())).toBe("boolean");
   });
