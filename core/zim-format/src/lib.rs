@@ -20,6 +20,7 @@ pub mod file;
 pub mod header;
 pub mod highlight;
 pub mod inline;
+pub mod plain;
 
 pub use block::{
     Block, CheckboxState, Heading, HorizontalRule, ListBlock, ListItem, ListMarker, NumberStyle,
@@ -28,6 +29,7 @@ pub use block::{
 pub use file::{LineEnding, PageFile};
 pub use header::HeaderField;
 pub use highlight::{highlight, to_utf16, utf16_offsets, Span, SpanKind};
+pub use plain::plain_text;
 pub use inline::{Image, Inline, Link};
 
 /// A parsed Zim wiki `.txt` page: an optional header block plus a body of

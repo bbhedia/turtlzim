@@ -8,6 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use zim_format::plain_text;
+
 use crate::link::{link_to, links_in, resolve, Link, LinkRef, PageSet};
 use crate::name::PageName;
 
@@ -16,6 +18,25 @@ struct Entry {
     text: String,
     /// The `[[links]]` in `text`, found once when the text is set.
     links: Vec<LinkRef>,
+    /// What the page reads as with its markup tidied away (see `zim_format::plain_text`), and that in
+    /// lower case: what a search looks through.
+    plain: String,
+    plain_lower: String,
+}
+
+impl Entry {
+    fn new(name: PageName, text: String) -> Entry {
+        let mut entry = Entry { name, text: String::new(), links: Vec::new(), plain: String::new(), plain_lower: String::new() };
+        entry.set_text(text);
+        entry
+    }
+
+    fn set_text(&mut self, text: String) {
+        self.links = links_in(&text);
+        self.plain = plain_text(&text);
+        self.plain_lower = self.plain.to_lowercase();
+        self.text = text;
+    }
 }
 
 /// The pages of a notebook.
@@ -131,21 +152,10 @@ impl Notebook {
     /// Set a page's text, creating the page if need be. A page that exists keeps its spelling.
     pub fn put(&mut self, name: &PageName, text: impl Into<String>) {
         let text = text.into();
-        let links = links_in(&text);
         match self.pages.get_mut(&name.key()) {
-            Some(entry) => {
-                entry.text = text;
-                entry.links = links;
-            }
+            Some(entry) => entry.set_text(text),
             None => {
-                self.pages.insert(
-                    name.key(),
-                    Entry {
-                        name: name.clone(),
-                        text,
-                        links,
-                    },
-                );
+                self.pages.insert(name.key(), Entry::new(name.clone(), text));
             }
         }
     }
@@ -271,7 +281,7 @@ impl Notebook {
                 if let Link::Page { page, .. } = resolve(&entry.name, &link.target, self) {
                     if page.same_page(target) {
                         if count == 0 {
-                            context = line_around(&entry.text, link.start);
+                            context = context_line(&entry.text, link.start);
                         }
                         count += 1;
                     }
@@ -297,7 +307,7 @@ impl Notebook {
         }
         let mut scored: Vec<(u32, &Entry, bool, usize)> = Vec::new();
         for (key, entry) in &self.pages {
-            let lower = entry.text.to_lowercase();
+            let lower = &entry.plain_lower;
             let mut score = 0u32;
             let mut in_name = false;
             let mut first_at: Option<usize> = None;
@@ -319,11 +329,7 @@ impl Notebook {
                 // `lower` can differ in length from the text (a few letters change size), so the
                 // match is carried over by counting characters, not bytes.
                 let chars_before = first_at.map_or(0, |at| lower[..at].chars().count());
-                let at = entry
-                    .text
-                    .char_indices()
-                    .nth(chars_before)
-                    .map_or(0, |(i, _)| i);
+                let at = entry.plain.char_indices().nth(chars_before).map_or(0, |(i, _)| i);
                 scored.push((score, entry, in_name, at));
             }
         }
@@ -336,7 +342,7 @@ impl Notebook {
             .take(limit)
             .map(|(_, entry, in_name, at)| Hit {
                 page: entry.name.clone(),
-                snippet: snippet_around(&entry.text, at),
+                snippet: snippet_around(&entry.plain, at),
                 in_name,
             })
             .collect()
@@ -454,8 +460,7 @@ impl Notebook {
             for (start, end, replacement) in changes {
                 text.replace_range(start..end, &replacement);
             }
-            entry.links = links_in(&text);
-            entry.text = text;
+            entry.set_text(text);
             report.rewritten.push(entry.name.clone());
         }
         report.moved.sort_by_key(|(from, _)| from.key());
@@ -488,16 +493,32 @@ fn rewritten_target(from: &PageName, original: &str, want: &PageName, pages: &No
     )
 }
 
-/// The line of `text` holding byte `at`, trimmed and cut to a readable length.
-fn line_around(text: &str, at: usize) -> String {
-    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
-    let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
-    let line = text[start..end].trim();
+/// The line of `text` holding the link at byte `at`, as plain text (without its markup), cut to a
+/// readable length. A line that is nothing but markup is shown as written.
+fn context_line(text: &str, at: usize) -> String {
+    let raw = line_around(text, at);
+    let plain = plain_text(&raw);
+    let plain = plain.trim();
+    if plain.is_empty() {
+        raw
+    } else {
+        cut(plain)
+    }
+}
+
+fn cut(line: &str) -> String {
     if line.chars().count() <= 160 {
         line.to_string()
     } else {
         format!("{}…", line.chars().take(160).collect::<String>())
     }
+}
+
+/// The line of `text` holding byte `at`, trimmed.
+fn line_around(text: &str, at: usize) -> String {
+    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    text[start..end].trim().to_string()
 }
 
 /// About 160 characters of `text` around byte `at`, on one line. A window that would leave out only

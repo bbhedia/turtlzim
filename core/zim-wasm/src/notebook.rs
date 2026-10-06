@@ -390,11 +390,11 @@ mod tests {
         );
         assert_eq!(
             nb.backlinks("Help"),
-            r#"[{"from":"Help:Links","count":1,"context":"back to [[Help]] and [[Start]] and [[nowhere]] and [[https://example.org]]"}]"#
+            r#"[{"from":"Help:Links","count":1,"context":"back to Help and Start and nowhere and https://example.org"}]"#
         );
         assert_eq!(
             nb.search("example", 5),
-            r#"[{"page":"Help:Links","snippet":"back to [[Help]] and [[Start]] and [[nowhere]] and [[https://example.org]]","inName":false}]"#
+            r#"[{"page":"Help:Links","snippet":"back to Help and Start and nowhere and https://example.org","inName":false}]"#
         );
     }
 

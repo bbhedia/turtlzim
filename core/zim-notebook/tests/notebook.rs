@@ -131,7 +131,8 @@ fn backlinks_are_the_pages_whose_links_resolve_to_the_page() {
     );
     assert_eq!(
         plan[0].context,
-        "See [[Plan]] and [[+Plan|the plan]] and [[Other]]"
+        // shown as plain text: without its markup
+        "See Plan and the plan and Other"
     );
     let garden: Vec<String> = nb
         .backlinks(&name("Projects:Garden"))
@@ -219,6 +220,26 @@ fn search_finds_pages_with_every_word_and_puts_name_matches_first() {
     assert!(nb.search("tomatoes zebra", 10).is_empty());
     assert!(nb.search("   ", 10).is_empty());
     assert_eq!(nb.search("tomatoes", 2).len(), 2, "the limit");
+}
+
+#[test]
+fn search_reads_what_a_person_reads_not_the_markup_or_the_header() {
+    let nb = notebook(&[
+        ("Garden", "Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\nCreation-Date: 2026-10-06T09:00:00+00:00\n\n====== Garden ======\nPlant **tomatoes** in //spring//, see [[Plan|the plan]].\n"),
+        ("Plan", "no match here\n"),
+    ]);
+    // header lines are page properties, not text: no page matches them
+    assert!(nb.search("Creation-Date", 10).is_empty());
+    assert!(nb.search("zim-wiki", 10).is_empty());
+    // markup characters aren't text either, and a link's target is not shown when it has display text
+    assert!(nb.search("**", 10).is_empty());
+    assert!(nb.search("[[plan", 10).is_empty());
+    // what is shown is found, and shown as prose
+    let hit = &nb.search("tomatoes spring", 10)[0];
+    assert_eq!(hit.page.as_str(), "Garden");
+    assert_eq!(hit.snippet, "Garden Plant tomatoes in spring, see the plan.");
+    // the page *name* is still searchable
+    assert_eq!(nb.search("garden", 10)[0].page.as_str(), "Garden");
 }
 
 #[test]

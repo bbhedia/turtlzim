@@ -44,8 +44,15 @@ the manual's own example).
 
 `Notebook` holds `name -> text` and derives the rest: `tree()` (sections and pages in display order,
 case-insensitive, sections with no text marked), `backlinks(page)` (pages with a link that *resolves*
-to it, with the line of the first), `search(words)` (every word in the name or text, name matches
-first), `resolve`, `link_to`, and `rename(old, new, update_links)`.
+to it, with the line of the first), `search(words)` (every word in the name or in the text as a
+person reads it, name matches first), `resolve`, `link_to`, and `rename(old, new, update_links)`.
+
+**Search reads the page, not its markup.** Each page keeps `plain_text(text)` (`zim-format`,
+`plain.rs`): the text without what the editor hides when the caret is elsewhere (heading markers and
+the header block, `**`, `//`, link brackets and the target of `[[target|shown]]`, bullets and
+checkbox glyphs, rules, image and anchor sources). Searching for `bold` finds `**bold**`; searching
+for `**` finds nothing; a code block is searched as written because it is shown as written. Snippets
+and backlink contexts are cut from the same text, so they read as prose.
 
 **Rename** moves the page and everything below it (`Foo` and `Foo:Bar` become `Baz` and `Baz:Bar`).
 With `update_links`, **every link that led to an existing page still leads to it afterwards**:
@@ -58,7 +65,8 @@ A rename that can't be done (nothing there, onto a page that exists, below itsel
 
 ## What verifies it
 
-* 47 tests: hand-written cases, including the manual's own worked example of relative links.
+* 49 tests: hand-written cases, including the manual's own worked example of relative links, and
+  search and snippets over text with markup in it.
 * **Zim's own manual notebook** (81 pages): all 301 page links resolve to existing pages. Weakening
   the lookup to "beside the page only" breaks 79 of them, and dropping underscore-as-space breaks
   161, so the test does discriminate.
@@ -74,5 +82,6 @@ A rename that can't be done (nothing there, onto a page that exists, below itsel
 
 Unicode normalization (macOS file systems return decomposed names), Windows reserved names (`CON`),
 attachments and images (`./pic.png` is classified as a file link, nothing resolves it), the
-notebook's `home` page and journal sections, tags, and full-text search beyond substring matching
-(the core's SQLite FTS covers encrypted notebooks).
+journal sections, tags, and full-text search beyond word matching (the core's SQLite FTS covers
+encrypted notebooks). The notebook's `home` page is the web app's business (`zim-web-app.md`): it
+comes from `notebook.zim` and follows the page when it is renamed.
