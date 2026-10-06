@@ -13,7 +13,8 @@
     "serve": "node scripts/serve.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:browser": "node test/browser.mjs"
+    "test:browser": "node test/browser.mjs",
+    "screenshots": "node test/screenshots.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.1",

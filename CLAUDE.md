@@ -109,18 +109,19 @@ cargo build --release              # in core-rs
 # Core (web / WASM)
 wasm-pack build --target web        # produces the WASM package the web UI imports
 
-# Zim format crate and its wasm bindings (from the repo root)
-cargo test -p zim-format -p zim-wasm   # unit, fuzz and file-layer tests
-scripts/zim-golden.sh                  # byte-identical round trips on real Zim pages (clones Zim once)
+# Zim format crate, notebook rules and their wasm bindings (from the repo root)
+cargo test -p zim-format -p zim-notebook -p zim-wasm   # unit, property, fuzz and file-layer tests
+scripts/zim-golden.sh                  # real Zim notebooks: byte-identical round trips, every link resolves, renames keep links (clones Zim once)
 
-# Web app / Zim editor (web/; see docs/zim-editor-plan.md)
+# Web app: Zim editor + notebook app (web/; see docs/zim-editor-plan.md and docs/zim-web-app.md)
 cd web && npm install
 npm run wasm                        # build core/zim-wasm into web/src/zim-wasm (needs wasm-pack)
 npm run dev                         # dev server
 npm run build                       # typecheck + production build into web/dist
 npm test                            # Vitest: editor logic, headless (ZIM_GOLDEN_DIR=... adds real pages)
 scripts/setup-browser.sh            # once: Chromium + libraries + a font, no root
-npm run test:browser                # the built editor in a real browser (keystrokes, clicks, files)
+npm run test:browser                # the built app in a real browser: 31 scenarios (ZIM_GOLDEN_DIR=... adds the real Zim manual; ONLY=text picks some)
+npm run screenshots <dir>           # nine pictures of the app to look at (light, dark, phone, dialogs)
 scripts/serve.sh start --host :: --port 8080   # serve web/dist in the background (see docs/zim-editor-plan.md: trying it from another machine)
 
 # Desktop (Tauri)
@@ -152,6 +153,10 @@ docker compose up                   # Postgres + server (define compose file)
   `core/zim-format/tests/golden_real_notebooks.rs`), and the corpus-free fuzz test runs in every
   `cargo test -p zim-format`. Run both after touching `core/zim-format`.
 - Never copy Zim source into this repo; reimplement the format from its documented syntax.
+- Notebook rules (what a name or a link means, tree, backlinks, search, rename) live in
+  `core/zim-notebook` and nowhere else: the web app calls them through wasm and holds none of its own.
+  A UI change is not done until it has been looked at (`npm run screenshots`) and driven in the real
+  browser test (`npm run test:browser`); the unit tests cannot see layout, focus or timing.
 
 ---
 
@@ -190,4 +195,7 @@ docker compose up                   # Postgres + server (define compose file)
 - Zim wiki text format spec (implementation spec for `core/zim-format`): `docs/zim-wiki-format-spec.md`
 - `core-rs` revival notes (getting it building/testing on current toolchains): `docs/core-rs-revival-notes.md`
 - WASM port plan (crypto/storage/networking/concurrency approach + research): `docs/wasm-port-plan.md`
+- The Zim editor (decisions, span model, keys, performance, serving it): `docs/zim-editor-plan.md`
+- Notebook rules (names, links, tree, backlinks, search, rename): `docs/zim-notebook.md`
+- The notebook app in the browser (stores, saving, import/export, what verifies it, gaps): `docs/zim-web-app.md`
 - Claude Code docs: https://docs.claude.com/en/docs/claude-code/overview
