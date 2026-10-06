@@ -175,7 +175,7 @@ npm run build                               # typecheck + production build
 scripts/setup-browser.sh                    # once: Chromium, system libraries and a font, no root
 npm run test:browser                        # the built app in a real browser
 SCREENSHOTS=dir npm run test:browser        # a failing scenario leaves a screenshot of the page in dir
-npm run screenshots dir                     # nine pictures of the app (light, dark, phone, dialogs): look at them
+npm run screenshots dir                     # twelve pictures of the app (light, dark, phone, dialogs, pictures): look at them
 ```
 
 **A browser needs a font to edit text.** On a machine with no fonts at all (typical for a server)
