@@ -13,12 +13,12 @@
 // CHROME_LIB_PATH (libraries Chromium needs that the system lacks; default:
 // ~/.cache/turtlzim-browser-libs/root/usr/lib/x86_64-linux-gnu if that exists),
 // SCREENSHOTS (a directory to write screenshots of the editor into).
-import http from "node:http";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, extname, join, normalize } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { createStaticServer } from "../scripts/serve.mjs";
 
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 if (!existsSync(join(dist, "index.html"))) {
@@ -53,24 +53,9 @@ function fontConfig() {
   return existsSync(file) ? { FONTCONFIG_FILE: file } : {};
 }
 
-const types = {
-  ".html": "text/html",
-  ".js": "text/javascript",
-  ".css": "text/css",
-  ".wasm": "application/wasm",
-  ".json": "application/json",
-};
-
-const server = http.createServer((req, res) => {
-  const pathname = decodeURIComponent(new URL(req.url, "http://localhost").pathname);
-  const file = normalize(join(dist, pathname === "/" ? "index.html" : pathname));
-  if (!file.startsWith(dist) || !existsSync(file) || !statSync(file).isFile()) {
-    res.writeHead(404).end("not found");
-    return;
-  }
-  res.writeHead(200, { "content-type": types[extname(file)] || "application/octet-stream", "cache-control": "no-store" });
-  res.end(readFileSync(file));
-});
+// The same server that `npm run serve` runs, so the editor is tested under the headers it ships
+// with: any Content-Security-Policy violation is a console error here, and fails the scenario.
+const server = createStaticServer({ dir: dist });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 

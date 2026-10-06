@@ -121,6 +121,7 @@ npm run build                       # typecheck + production build into web/dist
 npm test                            # Vitest: editor logic, headless (ZIM_GOLDEN_DIR=... adds real pages)
 scripts/setup-browser.sh            # once: Chromium + libraries + a font, no root
 npm run test:browser                # the built editor in a real browser (keystrokes, clicks, files)
+scripts/serve.sh start --host :: --port 8080   # serve web/dist in the background (see docs/zim-editor-plan.md: trying it from another machine)
 
 # Desktop (Tauri)
 npm run tauri dev

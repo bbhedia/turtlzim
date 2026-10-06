@@ -122,6 +122,46 @@ is a single block holding thousands of *unmatched* inline openers; see the spec'
 | Editor logic: spans + selection → decorations, commands | `web/src/editor/` | Vitest, headless (CodeMirror's state layer needs no DOM) |
 | Editor in a browser: rendering, keystrokes, clicks, open/save | `web/test/browser.mjs` | real Chromium: every real Zim page loads and renders; typing and undo; checkbox clicks; Ctrl-click links; a CRLF+BOM file opened, edited and saved byte for byte; a mixed-endings file; a non-UTF-8 file refused |
 
+## Trying it from another machine
+
+The built editor is a folder of static files (`web/dist`: a page, one script, one stylesheet, a 72 KB
+wasm), so anything that serves files can host it. `web/scripts/serve.mjs` is a small server for it
+that is meant to be put on a network: no dependencies, only `dist` (no directory listings, no
+dotfiles, no way out of the folder through `..`, encoded or double-encoded tricks, or symlinks), GET
+and HEAD only, `application/wasm` and gzip, long caching for the hashed assets, connection limits and
+timeouts, an optional password, and a strict Content-Security-Policy (`script-src 'self'
+'wasm-unsafe-eval'`: no inline script, no eval). The browser test runs the editor through this same
+server, so any policy violation fails it.
+
+```bash
+cd web && npm run build                       # refreshes dist/; a running server serves the new files at once
+scripts/serve.sh start --host :: --port 8080  # in the background, survives logout (IPv4 and IPv6)
+scripts/serve.sh status | log [-f] | stop | restart
+ZIM_WEB_AUTH=name:password scripts/serve.sh start --host ::   # ask visitors for a password
+npm run serve                                 # in the foreground instead (127.0.0.1:8080 unless told otherwise)
+```
+
+It listens on 127.0.0.1 unless told otherwise. Ways to reach it, easiest first:
+
+1. **SSH tunnel** (nothing to configure, nothing exposed): `ssh -L 8080:127.0.0.1:8080 you@server`, then
+   open `http://localhost:8080`. The same works for the Vite dev server (`-L 5173:127.0.0.1:5173`).
+2. **Open the port.** Start with `--host ::` (or `0.0.0.0`) and let the port through the firewall:
+   `sudo ufw allow 8080/tcp`, or only from your address:
+   `sudo ufw allow from YOUR.IP to any port 8080 proto tcp` (undo: `sudo ufw delete allow 8080/tcp`).
+   Behind a router (a private 192.168.x.x address) the router must also forward the port.
+3. **Copy `web/dist` to a web server you already have** (`rsync -av web/dist/ host:/var/www/zim/`).
+   The build uses relative URLs, so it works from any folder; make sure `.wasm` is served as
+   `application/wasm`.
+4. **Live reload:** `npm run dev -- --host 0.0.0.0` (Vite's dev server: fine on a private network,
+   not something to leave on the internet).
+
+What visiting exposes: the editor's own files, nothing else. Everything the editor does happens in the
+visitor's browser; a page opened from their disk never reaches the server, and the server stores
+nothing. Plain HTTP is enough for this editor. Basic authentication over HTTP is sent in clear, so it
+keeps casual visitors out but protects nothing on an untrusted network (use the tunnel, or TLS in
+front). The real app will need HTTPS: browsers only offer OPFS storage, service workers and
+`crypto.subtle` to secure contexts (`localhost` counts, a bare IP address does not).
+
 ## Running it
 
 ```bash

@@ -10,6 +10,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "serve": "node scripts/serve.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:browser": "node test/browser.mjs"
