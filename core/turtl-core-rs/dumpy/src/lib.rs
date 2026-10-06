@@ -375,6 +375,18 @@ impl Dumpy {
         conn.execute("DELETE FROM dumpy_kv WHERE key = $1", &[&key])?;
         Ok(())
     }
+
+    /// The keys that start with `prefix`, in order. (Compared as text, not as a `LIKE` pattern, so that a
+    /// prefix with a `%` or `_` in it means just those characters.)
+    pub fn kv_keys_with_prefix(&self, conn: &Connection, prefix: &str) -> DResult<Vec<String>> {
+        let mut stmt = conn.prepare("SELECT key FROM dumpy_kv WHERE substr(key, 1, length($1)) = $1 ORDER BY key")?;
+        let rows = stmt.query_map(&[&prefix], |row| row.get::<_, String>(0))?;
+        let mut keys = Vec::new();
+        for key in rows {
+            keys.push(key?);
+        }
+        Ok(keys)
+    }
 }
 
 
@@ -528,5 +540,19 @@ mod tests {
         dumpy.kv_delete(&conn, "some_setting").unwrap();
         let val = dumpy.kv_get(&conn, "some_setting").unwrap();
         assert_eq!(val, None);
+    }
+
+    #[test]
+    fn kv_keys_by_prefix() {
+        let (conn, dumpy) = pre_test();
+        dumpy.init(&conn).unwrap();
+        for key in &["acct:zed", "acct:amy", "acct_x", "acc", "other", "acct:", "100%:a", "100x:b"] {
+            dumpy.kv_set(&conn, key, &String::from("v")).unwrap();
+        }
+        assert_eq!(dumpy.kv_keys_with_prefix(&conn, "acct:").unwrap(), vec!["acct:", "acct:amy", "acct:zed"]);
+        // `_` and `%` are not wildcards here
+        assert_eq!(dumpy.kv_keys_with_prefix(&conn, "acct_").unwrap(), vec!["acct_x"]);
+        assert_eq!(dumpy.kv_keys_with_prefix(&conn, "100%").unwrap(), vec!["100%:a"]);
+        assert_eq!(dumpy.kv_keys_with_prefix(&conn, "nothing").unwrap(), Vec::<String>::new());
     }
 }

@@ -149,6 +149,10 @@ async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             let token = User::get_login_token(turtl)?;
             Ok(Value::String(token))
         }
+        // the accounts made on this device by a core that runs without a server (`local_only`)
+        "user:local-accounts" => {
+            Ok(jedi::to_val(&User::local_accounts(turtl)?)?)
+        }
         "user:save-login" => {
             let key = User::save_login(turtl)?;
             Ok(json!({"user_id": turtl.user_id()?, "key": key}))

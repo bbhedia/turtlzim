@@ -16,9 +16,23 @@ use crate::models::storable::Storable;
 
 use crate::error::TResult;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! {
+    /// A folder that the databases of the test running on this thread are kept in, as files (`None`: they
+    /// are in memory, which is what a test gets unless it asks for this). For the tests of what
+    /// survives a restart and of what is on disk.
+    pub static TEST_DATA_FOLDER: ::std::cell::RefCell<Option<String>> = ::std::cell::RefCell::new(None);
+}
+
 /// Given a db filename, return the foll path we'll use for the db file
 pub fn db_location(db_name: &String) -> TResult<String> {
     if cfg!(test) {
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        {
+            if let Some(folder) = TEST_DATA_FOLDER.with(|folder| folder.borrow().clone()) {
+                return Ok(format!("{}/{}.sqlite", folder, db_name));
+            }
+        }
         return Ok(String::from(":memory:"))
     }
     let data_folder = config::get::<String>(&["data_folder"])?;
@@ -204,6 +218,11 @@ impl Storage {
 
     pub fn kv_delete(&self, key: &str) -> TResult<()> {
         Ok(self.dumpy.kv_delete(&self.conn, key)?)
+    }
+
+    /// The keys of the k/v store that start with `prefix`, in order
+    pub fn kv_keys_with_prefix(&self, prefix: &str) -> TResult<Vec<String>> {
+        Ok(self.dumpy.kv_keys_with_prefix(&self.conn, prefix)?)
     }
 
     /// Make sure the table that holds attachments exists. (Made on first use, not by the dumpy schema:
@@ -396,6 +415,11 @@ mod tests {
         assert_eq!(storage.kv_get("get a job").unwrap().unwrap(), "no way");
         storage.kv_delete("get a job").unwrap();
         assert_eq!(storage.kv_get("get a job").unwrap(), None);
+
+        storage.kv_set("jobs:b", &String::from("2")).unwrap();
+        storage.kv_set("jobs:a", &String::from("1")).unwrap();
+        storage.kv_set("hobbies:c", &String::from("3")).unwrap();
+        assert_eq!(storage.kv_keys_with_prefix("jobs:").unwrap(), vec!["jobs:a", "jobs:b"]);
     }
 
     crypto_test!(saves_retrieves_models, saves_retrieves_models_body);

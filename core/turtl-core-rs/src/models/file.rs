@@ -315,7 +315,7 @@ impl FileData {
         // this would normally write an object to the "files" table, but since
         // we've overwritten db_save() to do NOTHING we can rest easy here knowing
         // we won't get random records in tables that shouldn't exist.
-        match self.outgoing(SyncAction::Add, &user_id, db, false) {
+        match self.outgoing(SyncAction::Add, &user_id, db, turtl.local_only) {
             Ok(_) => (),
             Err(e) => {
                 match FileData::store_delete(db, Some(&user_id), Some(&note_id)) {

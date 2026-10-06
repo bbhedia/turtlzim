@@ -601,6 +601,17 @@ mod tests {
         assert_eq!(key, vec![191, 247, 89, 55, 132, 218, 68, 194, 90, 194, 233, 50, 99, 98, 25, 230, 102, 217, 215, 59, 136, 61, 249, 107, 127, 124, 62, 119, 145, 56, 216, 191]);
     }
 
+    /// The cost an account that lives on a device alone is made at (`user::Kdf::local()`): scrypt with
+    /// N = 2^17, r = 8, p = 1. The expected key is what Python's `hashlib.scrypt` (OpenSSL, nothing to do
+    /// with libsodium) makes of the same password and salt, so this is checked independently, and it runs
+    /// on wasm32 too, where the 128 MiB has to be there for libsodium.js to use.
+    fn can_generate_keys_at_the_local_cost_body() {
+        let password = String::from("not at all, to some extent (always the same), very much so, don't know");
+        let salt = sha256(String::from("don't know").as_bytes()).unwrap();
+        let key = gen_key(password.as_bytes(), &salt[0..KEYGEN_SALT_LEN], 4194304, 134217728).unwrap();
+        assert_eq!(key, vec![167, 213, 125, 195, 82, 239, 125, 166, 3, 28, 84, 176, 113, 127, 140, 59, 186, 221, 5, 30, 32, 30, 235, 1, 158, 112, 240, 99, 253, 34, 97, 105]);
+    }
+
     fn can_encrypt_chacha20poly1305_body() {
         let key = from_base64(&String::from("v/dZN4TaRMJawukyY2IZ5mbZ1zuIPflrf3w+d5E42L8=")).unwrap();
         let plaintext = get_string("minimum wage");
@@ -741,6 +752,7 @@ mod tests {
     crypto_test!(random_int_works, random_int_works_body);
     crypto_test!(random_float_works, random_float_works_body);
     crypto_test!(can_generate_keys, can_generate_keys_body);
+    crypto_test!(can_generate_keys_at_the_local_cost, can_generate_keys_at_the_local_cost_body);
     crypto_test!(can_encrypt_chacha20poly1305, can_encrypt_chacha20poly1305_body);
     crypto_test!(can_decrypt_chacha20poly1305, can_decrypt_chacha20poly1305_body);
     crypto_test!(auth_failure, auth_failure_body);

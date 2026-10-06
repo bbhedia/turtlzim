@@ -86,6 +86,13 @@ pub fn get_time() -> ::time::Timespec {
 pub fn file_folder(suffix: Option<&str>) -> TResult<String> {
     let integration = config::get::<String>(&["integration_tests", "data_folder"])?;
     if cfg!(test) {
+        // (a test that keeps its databases in a folder of its own keeps the files there too)
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        {
+            if let Some(folder) = crate::storage::TEST_DATA_FOLDER.with(|folder| folder.borrow().clone()) {
+                return Ok(folder);
+            }
+        }
         return Ok(integration);
     }
     let data_folder = config::get::<String>(&["data_folder"])?;

@@ -69,6 +69,60 @@ protected! {
     }
 }
 
+/// What it costs to try a passphrase: the limits of the scrypt that turns it into a key (libsodium's
+/// `opslimit` and `memlimit`; the cost is mostly the memory, which is what makes guessing in bulk dear).
+/// An account on a server has the cost every Turtl account has ever had (`Default`); one that lives on this
+/// device alone has no server to slow guesses down, and is within reach of whoever gets at the browser's
+/// storage, so it is made with `Kdf::local()` and keeps the cost it was made with.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct Kdf {
+    ops: usize,
+    mem: usize,
+}
+
+impl Default for Kdf {
+    fn default() -> Kdf {
+        Kdf { ops: crypto::KEYGEN_OPS_DEFAULT, mem: crypto::KEYGEN_MEM_DEFAULT }
+    }
+}
+
+impl Kdf {
+    /// scrypt with N = 2^17, r = 8, p = 1: 128 MiB, eight times the work of the default, which is about
+    /// as much memory as a wasm instance in a browser can be asked for without risk (libsodium's
+    /// "sensitive" level is 1 GiB).
+    fn local() -> Kdf {
+        Kdf { ops: 4194304, mem: 134217728 }
+    }
+}
+
+/// What a core without a server keeps of an account (in the key-value store, under
+/// `local-account:<username>`): what the server would keep, which is the auth to check a passphrase
+/// against and the user's data (its private part is encrypted with the key the passphrase makes), and
+/// the cost the passphrase was made into a key at.
+#[derive(Serialize, Deserialize)]
+struct LocalAccount {
+    id: String,
+    auth: String,
+    #[serde(default)]
+    kdf: Kdf,
+    data: Value,
+}
+
+fn local_account_key(username: &str) -> String {
+    format!("local-account:{}", username)
+}
+
+/// A user id for an account made on this device. Users have numbers for ids (the server hands them out, and
+/// what a user owns carries it as a JSON number: see `util::ser::int_converter`), so this is a random
+/// positive number, of 52 bits so that a JavaScript host reads it back exactly.
+fn random_local_user_id() -> TResult<String> {
+    let hash = crypto::random_hash()?;
+    match u64::from_str_radix(&hash[..13], 16) {
+        Ok(id) => Ok(id.max(1).to_string()),
+        Err(e) => TErr!(TError::Msg(format!("user::random_local_user_id() -- {}", e))),
+    }
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct LoginToken {
     id: String,
@@ -139,13 +193,14 @@ impl MemorySaver for User {
     }
 }
 
-/// Generate a user's key given some variables or something
-fn generate_key(username: &String, password: &String, version: u16) -> TResult<Key> {
+/// Generate a user's key given some variables or something. `ops` and `mem` are what trying a passphrase
+/// costs (scrypt's limits, see `Kdf`).
+fn generate_key(username: &String, password: &String, version: u16, ops: usize, mem: usize) -> TResult<Key> {
     let key: Key = match version {
         0 => {
             let hashme = format!("v{}/{}", version, username);
             let salt = crypto::sha512(hashme.as_bytes())?;
-            crypto::gen_key(password.as_bytes(), &salt[0..crypto::KEYGEN_SALT_LEN], crypto::KEYGEN_OPS_DEFAULT, crypto::KEYGEN_MEM_DEFAULT)?
+            crypto::gen_key(password.as_bytes(), &salt[0..crypto::KEYGEN_SALT_LEN], ops, mem)?
         },
         _ => return TErr!(TError::NotImplemented),
     };
@@ -154,10 +209,16 @@ fn generate_key(username: &String, password: &String, version: u16) -> TResult<K
 
 /// Generate a user's auth token given some variables or something
 pub fn generate_auth(username: &String, password: &String, version: u16) -> TResult<(Key, String)> {
+    generate_auth_with(username, password, version, &Kdf::default())
+}
+
+/// `generate_auth()` with a cost of our choosing: the key and auth an account has are made from its name,
+/// its passphrase, and what trying a passphrase costs.
+fn generate_auth_with(username: &String, password: &String, version: u16, kdf: &Kdf) -> TResult<(Key, String)> {
     info!("user::generate_auth() -- generating v{} auth", version);
     let key_auth = match version {
         0 => {
-            let key = generate_key(username, password, version)?;
+            let key = generate_key(username, password, version, kdf.ops, kdf.mem)?;
             let nonce_len = crypto::noncelen();
             let nonce = (crypto::sha512(username.as_bytes())?)[0..nonce_len].to_vec();
             let pw_hash = crypto::to_hex(&crypto::sha512(&password.as_bytes())?)?;
@@ -230,6 +291,9 @@ impl User {
     /// out of versions.
     pub async fn login(turtl: &Turtl, username: String, password: String, version: u16) -> TResult<()> {
         let username = username.to_lowercase();
+        if turtl.local_only {
+            return User::login_local(turtl, username, password);
+        }
         let mut version = version;
         loop {
             let (key, auth) = generate_auth(&username, &password, version)?;
@@ -262,10 +326,77 @@ impl User {
         Ok(())
     }
 
+    /// Make an account on this device alone: what the server would be given (the auth and the encrypted user
+    /// data) is kept in the key-value store, and the user is logged in. The key is made from the username
+    /// and passphrase exactly as for an account on a server (the username is part of the salt, so a core
+    /// that stands alone should be given a name of its own that nobody else has).
+    fn join_local(turtl: &Turtl, username: String, key: Key, auth: String, kdf: Kdf, userdata: Value) -> TResult<()> {
+        let kv_key = local_account_key(&username);
+        // (the kv lock is held from the check to the write, so two joins of one name can't both succeed)
+        let kv_guard = lockw!(turtl.kv);
+        if kv_guard.kv_get(&kv_key)?.is_some() {
+            return TErr!(TError::Api(StatusCode::CONFLICT, json!({"error": "that account already exists on this device"})));
+        }
+        let id = random_local_user_id()?;
+        let record = LocalAccount { id: id.clone(), auth: auth.clone(), kdf, data: userdata.clone() };
+
+        let mut user_guard_w = lockw!(turtl.user);
+        user_guard_w.merge_fields(&userdata)?;
+        user_guard_w.id = Some(id);
+        user_guard_w.do_login(key, auth);
+        if let Err(e) = user_guard_w.deserialize().and_then(|_| kv_guard.kv_set(&kv_key, &jedi::stringify(&record)?)) {
+            // an account that could not be kept is not an account: nobody is logged in
+            user_guard_w.do_logout();
+            return Err(e);
+        }
+        drop(user_guard_w);
+        debug!("user::join_local() -- joined and logged in, on this device only");
+        Ok(())
+    }
+
+    /// Log in to an account made with `join_local`: the passphrase has to make the key and auth that were
+    /// made when the account was. (There is nothing to ask but the account's record, so a wrong passphrase
+    /// and a missing account are the same answer.)
+    fn login_local(turtl: &Turtl, username: String, password: String) -> TResult<()> {
+        let bad_login = || TErr!(TError::Api(StatusCode::UNAUTHORIZED, json!({"error": "bad login"})));
+        let record: LocalAccount = {
+            let kv_guard = lockr!(turtl.kv);
+            match kv_guard.kv_get(&local_account_key(&username))? {
+                Some(stored) => jedi::parse(&stored)?,
+                None => return bad_login(),
+            }
+        };
+        // (the cost is read from storage, so it is held to what a device can do: a record that asks for
+        // more memory than there is would take the whole page down)
+        if record.kdf.mem > 1 << 30 {
+            return TErr!(TError::BadValue(format!("user::login_local() -- the account asks for {} bytes of memory to log in", record.kdf.mem)));
+        }
+        let (key, auth) = generate_auth_with(&username, &password, CURRENT_AUTH_VERSION, &record.kdf)?;
+        if auth != record.auth {
+            return bad_login();
+        }
+        let mut user_guard_w = lockw!(turtl.user);
+        user_guard_w.merge_fields(&record.data)?;
+        user_guard_w.id = Some(record.id);
+        user_guard_w.do_login(key, auth);
+        user_guard_w.deserialize()?;
+        drop(user_guard_w);
+        debug!("user::login_local() -- logged in, on this device only");
+        Ok(())
+    }
+
+    /// The names of the accounts made on this device with `join_local`.
+    pub fn local_accounts(turtl: &Turtl) -> TResult<Vec<String>> {
+        let kv_guard = lockr!(turtl.kv);
+        kv_guard.kv_keys_with_prefix("local-account:")
+            .map(|keys| keys.into_iter().map(|k| k["local-account:".len()..].to_string()).collect())
+    }
+
     pub async fn join(turtl: &Turtl, username: String, password: String) -> TResult<()> {
         validate_user(&username, &password)?;
         let username = username.to_lowercase();
-        let (key, auth) = generate_auth(&username, &password, CURRENT_AUTH_VERSION)?;
+        let kdf = if turtl.local_only { Kdf::local() } else { Kdf::default() };
+        let (key, auth) = generate_auth_with(&username, &password, CURRENT_AUTH_VERSION, &kdf)?;
         let (pk, sk) = crypto::asym::keygen()?;
         let userdata = {
             let mut user = User::default();
@@ -276,6 +407,9 @@ impl User {
             Protected::serialize(&mut user)?
         };
 
+        if turtl.local_only {
+            return User::join_local(turtl, username, key, auth, kdf, userdata);
+        }
         turtl.api.set_auth(username.clone(), auth.clone())?;
         let joindata: Value = turtl.api.post("/users")?
             .json(&json!({

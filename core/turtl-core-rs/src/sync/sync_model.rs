@@ -155,6 +155,8 @@ pub trait MemorySaver: Protected {
 pub fn save_model<T>(action: SyncAction, turtl: &Turtl, model: &mut T, skip_remote_sync: bool) -> TResult<Value>
     where T: Protected + Storable + Keyfinder + SyncModel + MemorySaver + Validate + Sync + Send
 {
+    // a core without a server has nobody to sync with: nothing is queued
+    let skip_remote_sync = skip_remote_sync || turtl.local_only;
     model.do_validate(model.model_type())?;
     {
         let db_guard = lock!(turtl.db);
@@ -226,6 +228,7 @@ pub fn save_model<T>(action: SyncAction, turtl: &Turtl, model: &mut T, skip_remo
 pub fn delete_model<T>(turtl: &Turtl, id: &String, skip_remote_sync: bool) -> TResult<()>
     where T: Protected + Storable + SyncModel + MemorySaver
 {
+    let skip_remote_sync = skip_remote_sync || turtl.local_only;
     let mut model: T = Default::default();
     model.set_id(id.clone());
 

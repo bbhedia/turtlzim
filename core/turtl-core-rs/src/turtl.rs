@@ -120,6 +120,10 @@ pub struct Turtl {
     incoming_sync_held: AtomicBool,
     /// Whether or not we're connected to the API
     pub connected: RwLock<bool>,
+    /// Whether the core runs without a server (`local_only: true` in the config): accounts are made and
+    /// logged into on this device alone, what is saved is not queued for syncing, and nothing talks to
+    /// the API. The data is encrypted exactly as it is with a server; see `User::join_local`.
+    pub local_only: bool,
 }
 
 impl Turtl {
@@ -154,6 +158,7 @@ impl Turtl {
             connected: RwLock::new(false),
             incoming_sync_lock: Mutex::new(()),
             incoming_sync_held: AtomicBool::new(false),
+            local_only: config::get::<bool>(&["local_only"]).unwrap_or(false),
         };
         Ok(turtl)
     }
@@ -259,14 +264,31 @@ impl Turtl {
         Ok(())
     }
 
+    /// Without a server there is no `sync_start()` to load the profile and index the notes once a user
+    /// is in, so this does that part of it (and only that part: nothing is started).
+    fn local_start(&self) -> TResult<()> {
+        self.load_profile()?;
+        messaging::ui_event("profile:loaded", &())?;
+        self.index_notes()?;
+        messaging::ui_event("profile:indexed", &())?;
+        Ok(())
+    }
+
     /// Log a user in
     pub async fn login(&self, username: String, password: String) -> TResult<()> {
         User::login(self, username, password, user::CURRENT_AUTH_VERSION).await?;
-        self.post_login()
+        self.post_login()?;
+        if self.local_only {
+            self.local_start()?;
+        }
+        Ok(())
     }
 
     /// Log a user in using a login token
     pub async fn login_token(&self, token: String) -> TResult<()> {
+        if self.local_only {
+            return TErr!(TError::Msg(String::from("a core without a server can't log in with a token")));
+        }
         User::login_token(self, token).await?;
         self.post_login()
     }
@@ -279,6 +301,11 @@ impl Turtl {
         let mut db_guard = lock!(self.db);
         *db_guard = Some(db);
         drop(db_guard);
+        if self.local_only {
+            // (no default spaces: whoever uses the core on its own makes the ones they want)
+            messaging::ui_event("user:login", &Value::Null)?;
+            return self.local_start();
+        }
         User::post_join(self, migrate_data)?;
         messaging::ui_event("user:login", &Value::Null)?;
         Ok(())
@@ -339,6 +366,9 @@ impl Turtl {
 
     /// Change the current user's username/password
     pub async fn change_user_password(&self, current_username: String, current_password: String, new_username: String, new_password: String) -> TResult<()> {
+        if self.local_only {
+            return TErr!(TError::Msg(String::from("a core without a server can't change the passphrase yet")));
+        }
         self.assert_connected()?;
         User::change_password(self, current_username, current_password, new_username, new_password).await?;
         // all the local data is WRONG. clear it out, after shutting down sync.
@@ -394,6 +424,9 @@ impl Turtl {
     /// Start our sync system. This should happen after a user is logged in, and
     /// we definitely have a Turtl.db object available.
     pub async fn sync_start(&self) -> TResult<()> {
+        if self.local_only {
+            return TErr!(TError::Msg(String::from("a core without a server has nothing to sync with")));
+        }
         // it's possible that login/join return before the db is initialized. in
         // that case, we wait for it here, up to 5s. if after then we don't have
         // our heroic db, error out ='[
@@ -545,7 +578,7 @@ impl Turtl {
             static ref RE_API_FORMAT: Regex = Regex::new(r"(?i)[^a-z0-9]").expect("turtl::Turtl.get_user_db_location() -- failed to compile regex");
         }
         let api_endpoint = config::get::<String>(&["api", "endpoint"])?;
-        let server = RE_API_FORMAT.replace_all(&api_endpoint, "");
+        let server = if self.local_only { String::from("local") } else { RE_API_FORMAT.replace_all(&api_endpoint, "").to_string() };
         let user_db = format!("turtl-user-{}-srv-{}", user_id, server);
         storage::db_location(&user_db)
     }
@@ -561,9 +594,13 @@ impl Turtl {
     #[cfg(target_arch = "wasm32")]
     pub fn get_user_db_location(&self, user_id: &String) -> TResult<String> {
         let api_endpoint = config::get::<String>(&["api", "endpoint"])?;
-        let server: String = api_endpoint.chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect();
+        // (a core without a server names its databases for no server: they must not depend on the
+        // address of one that is never used)
+        let server: String = if self.local_only {
+            String::from("local")
+        } else {
+            api_endpoint.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+        };
         let user_db = format!("turtl-user-{}-srv-{}", user_id, server);
         storage::db_location(&user_db)
     }

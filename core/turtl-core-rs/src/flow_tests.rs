@@ -701,6 +701,247 @@ async fn change_password() {
 }
 async_test!(change_password_flow, change_password());
 
+/// A core that runs without a server (`local_only`): accounts are made and logged into on this device,
+/// what is saved is encrypted and never queued for a server, no request ever goes out, and what only a
+/// server could do is refused.
+async fn local_only() {
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.local_only = true;
+
+    assert_eq!(ask(&turtl, json!(["l1", "user:local-accounts"])).await["d"], json!([]));
+
+    // the rules for a passphrase are the same, and a refusal leaves nothing behind
+    let refused = ask(&turtl, json!(["l2", "user:join", "Vault-One", "abc"])).await;
+    assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("validation")), "{}", refused);
+    assert!(!lockr!(turtl.user).logged_in);
+    assert_eq!(ask(&turtl, json!(["l3", "user:local-accounts"])).await["d"], json!([]));
+
+    // joining makes the account and logs in, with no spaces: nothing is made that wasn't asked for
+    let joined = ask(&turtl, json!(["l4", "user:join", "Vault-One", "a passphrase to keep"])).await;
+    assert_eq!(joined["e"], json!(0), "{}", joined);
+    assert_eq!(joined["d"]["username"], json!("vault-one"));
+    let user_id = String::from(joined["d"]["id"].as_str().unwrap());
+    assert!(!user_id.is_empty() && user_id != "42");
+    {
+        let user_guard = lockr!(turtl.user);
+        assert!(user_guard.logged_in);
+        assert!(user_guard.pubkey.is_some() && user_guard.privkey.is_some());
+    }
+    assert_eq!(turtl.user_id().unwrap(), user_id);
+    assert_eq!(lockr!(turtl.profile).spaces.len(), 0);
+    assert_eq!(ask(&turtl, json!(["l5", "user:local-accounts"])).await["d"], json!(["vault-one"]));
+
+    // nothing but a passphrase stands between this data and whoever copies it, so the passphrase costs
+    // 128 MiB (scrypt, N = 2^17) to try, and the account says so: it is what logging in will use
+    let record: Value = jedi::parse(&lockr!(turtl.kv).kv_get("local-account:vault-one").unwrap().unwrap()).unwrap();
+    assert_eq!(record["kdf"], json!({"ops": 4194304, "mem": 134217728}));
+
+    // a name can be had once; asking again changes nothing, whoever is logged in stays logged in
+    let again = ask(&turtl, json!(["l6", "user:join", "VAULT-ONE", "another passphrase"])).await;
+    assert_eq!((&again["e"], &again["d"]["subtype"]), (&json!(1), &json!("Conflict")), "{}", again);
+    assert_eq!(turtl.user_id().unwrap(), user_id);
+
+    // a space for a notebook and notes for its pages: saved, searchable, and not queued for anybody
+    let space = ask(&turtl, json!(["l7", "profile:sync:model", "add", "space", {"user_id": "0", "title": "Journal", "color": "#408080"}])).await;
+    assert_eq!(space["e"], json!(0), "{}", space);
+    let space_id = String::from(space["d"]["id"].as_str().unwrap());
+    assert_eq!(space["d"]["title"], json!("Journal"));
+    let home_text = "====== Home ======\nThe vault door code is 7391.\n";
+    for (mid, title, text) in &[("l8", "Home", home_text), ("l9", "Notes:Later", "Nothing to see.\n")] {
+        let page = ask(&turtl, json!([mid, "profile:sync:model", "add", "note", {
+            "space_id": space_id, "user_id": "0", "type": "text", "title": title, "text": text,
+        }])).await;
+        assert_eq!(page["e"], json!(0), "{}", page);
+    }
+    let found = ask(&turtl, json!(["l10", "profile:find-notes", {"space_id": space_id, "text": "vault"}])).await;
+    assert_eq!(found["e"], json!(0), "{}", found);
+    assert_eq!(found["d"]["total"], json!(1));
+    assert_eq!(found["d"]["notes"][0]["title"], json!("Home"));
+    assert_eq!(found["d"]["notes"][0]["text"], json!(home_text));
+    // a note with a file, which is stored encrypted too, and is not queued for upload either
+    let picture: Vec<u8> = vec![137, 80, 78, 71, 0, 255, 13, 10, 26, 10];
+    let file_note = ask(&turtl, json!(["l10b", "profile:sync:model", "add", "note", {
+        "space_id": space_id, "user_id": "0", "type": "file", "title": "Notes/picture.png",
+        "file": {"name": "picture.png", "type": "image/png", "filedata": {"data": crypto::to_base64(&picture).unwrap()}},
+    }])).await;
+    assert_eq!(file_note["e"], json!(0), "{}", file_note);
+    let file_note_id = String::from(file_note["d"]["id"].as_str().unwrap());
+    let read = ask(&turtl, json!(["l10c", "profile:note:get-file", file_note_id])).await;
+    assert_eq!(read["e"], json!(0), "{}", read);
+    assert_eq!(crypto::from_base64(&String::from(read["d"].as_str().unwrap())).unwrap(), picture);
+    let waiting = sync_records(&turtl.db);
+    assert!(waiting.is_empty(), "nothing is queued for a server, but {} records are", waiting.len());
+
+    // what only a server can do is refused
+    for (mid, args) in &[
+        ("l11", json!(["sync:start"])),
+        ("l12", json!(["user:login-from-token", "abc"])),
+        ("l13", json!(["user:change-password", "vault-one", "a passphrase to keep", "vault-one", "a new passphrase"])),
+        ("l14", json!(["user:delete-account"])),
+    ] {
+        let mut message = vec![json!(mid)];
+        message.extend(args.as_array().unwrap().iter().cloned());
+        let refused = ask(&turtl, Value::Array(message)).await;
+        assert_eq!(refused["e"], json!(1), "{} was not refused: {}", args[0], refused);
+    }
+
+    // logging in again needs the passphrase that was used, and an account that exists
+    turtl.logout().unwrap();
+    assert!(!lockr!(turtl.user).logged_in);
+    for (mid, name, passphrase) in &[("l15", "vault-one", "not the passphrase"), ("l16", "nobody", "a passphrase to keep")] {
+        let res = ask(&turtl, json!([mid, "user:login", name, passphrase])).await;
+        assert_eq!((&res["e"], &res["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "{}", res);
+        assert!(!lockr!(turtl.user).logged_in);
+    }
+    let res = ask(&turtl, json!(["l17", "user:login", "VAULT-one", "a passphrase to keep"])).await;
+    assert_eq!(res["e"], json!(0), "{}", res);
+    assert_eq!(res["d"]["id"], json!(user_id));
+    // the private part of the user record came back, so the key the passphrase makes is the right one
+    assert!(lockr!(turtl.user).privkey.is_some());
+
+    // not once did it ask a server for anything
+    assert_eq!(requests(&server).await, Vec::<String>::new());
+
+    // (natively the file is a file of the test run's, which is not left behind)
+    {
+        let mut db_guard = lock!(turtl.db);
+        crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&file_note_id)).unwrap();
+    }
+}
+async_test!(local_only_flow, local_only());
+
+/// A folder for the databases of the test on this thread, kept as files for as long as this lives (and
+/// deleted when it goes). Without it the databases of a test are in memory.
+#[cfg(not(target_arch = "wasm32"))]
+struct DiskFolder {
+    path: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DiskFolder {
+    fn new(name: &str) -> DiskFolder {
+        let nanos = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = ::std::env::temp_dir().join(format!("turtl-test-{}-{}-{}", name, ::std::process::id(), nanos));
+        ::std::fs::create_dir_all(&path).unwrap();
+        let path = String::from(path.to_str().unwrap());
+        crate::storage::TEST_DATA_FOLDER.with(|folder| *folder.borrow_mut() = Some(path.clone()));
+        DiskFolder { path }
+    }
+
+    /// Every byte of every file in the folder, with the file's name (there are no folders in it).
+    fn files(&self) -> Vec<(String, Vec<u8>)> {
+        let mut files = Vec::new();
+        for entry in ::std::fs::read_dir(&self.path).unwrap() {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_file(), "{:?} is not a file", entry.path());
+            files.push((entry.file_name().to_string_lossy().to_string(), ::std::fs::read(entry.path()).unwrap()));
+        }
+        files
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DiskFolder {
+    fn drop(&mut self) {
+        crate::storage::TEST_DATA_FOLDER.with(|folder| *folder.borrow_mut() = None);
+        let _ = ::std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+/// Without a server, with the databases on disk: a notebook's pages and files are still there after the
+/// core is started again and the account logged into, and nothing that was written (names, texts, file
+/// names, file bytes, the passphrase) can be found in any of the files, which do hold the ids.
+#[cfg(not(target_arch = "wasm32"))]
+async fn local_only_on_disk() {
+    let folder = DiskFolder::new("local-only");
+    let server = start_server().await;
+    let passphrase = "correct horse battery staple 8213";
+    let secrets = [
+        "Zebra Journal", "Secret Plans Page", "the vault door code is 7391", "diagram-4417.png",
+        "ATTACHMENT-BYTES-5529", "image/x-secret", passphrase,
+    ];
+
+    let (user_id, space_id, page_id, file_note_id) = {
+        let mut turtl = test_turtl(&server);
+        turtl.local_only = true;
+        let joined = ask(&turtl, json!(["d1", "user:join", "Disk-Vault", passphrase])).await;
+        assert_eq!(joined["e"], json!(0), "{}", joined);
+        let user_id = String::from(joined["d"]["id"].as_str().unwrap());
+        let space = ask(&turtl, json!(["d2", "profile:sync:model", "add", "space", {"user_id": "0", "title": secrets[0], "color": "#439645"}])).await;
+        assert_eq!(space["e"], json!(0), "{}", space);
+        let space_id = String::from(space["d"]["id"].as_str().unwrap());
+        let page = ask(&turtl, json!(["d3", "profile:sync:model", "add", "note", {
+            "space_id": space_id, "user_id": "0", "type": "text", "title": secrets[1], "text": format!("{}.\n", secrets[2]),
+        }])).await;
+        assert_eq!(page["e"], json!(0), "{}", page);
+        let page_id = String::from(page["d"]["id"].as_str().unwrap());
+        let bytes = crypto::to_base64(&Vec::from(format!("\u{0}\u{1}{}\u{ff}", secrets[4]).as_bytes())).unwrap();
+        let file_note = ask(&turtl, json!(["d4", "profile:sync:model", "add", "note", {
+            "space_id": space_id, "user_id": "0", "type": "file", "title": "an attachment",
+            "file": {"name": secrets[3], "type": secrets[5], "filedata": {"data": bytes}},
+        }])).await;
+        assert_eq!(file_note["e"], json!(0), "{}", file_note);
+        let file_note_id = String::from(file_note["d"]["id"].as_str().unwrap());
+        turtl.logout().unwrap();
+        (user_id, space_id, page_id, file_note_id)
+    };
+
+    // the core is started again: a new Turtl over the same files, which knows nothing but them
+    let mut turtl = test_turtl(&server);
+    turtl.local_only = true;
+    assert_eq!(ask(&turtl, json!(["d5", "user:local-accounts"])).await["d"], json!(["disk-vault"]));
+    let wrong = ask(&turtl, json!(["d6", "user:login", "disk-vault", "correct horse battery staple 8214"])).await;
+    assert_eq!((&wrong["e"], &wrong["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "{}", wrong);
+    assert!(lockr!(turtl.profile).spaces.is_empty(), "a refused login shows nothing");
+    let login = ask(&turtl, json!(["d7", "user:login", "disk-vault", passphrase])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    assert_eq!(login["d"]["id"], json!(user_id));
+
+    let profile = ask(&turtl, json!(["d8", "profile:load"])).await;
+    assert_eq!(profile["d"]["spaces"].as_array().unwrap().len(), 1, "{}", profile);
+    assert_eq!(profile["d"]["spaces"][0]["id"], json!(space_id));
+    assert_eq!(profile["d"]["spaces"][0]["title"], json!(secrets[0]));
+    let notes = ask(&turtl, json!(["d9", "profile:find-notes", {"space_id": space_id, "per_page": 100}])).await;
+    assert_eq!(notes["d"]["total"], json!(2), "{}", notes);
+    let page = notes["d"]["notes"].as_array().unwrap().iter().find(|note| note["id"] == json!(page_id)).unwrap().clone();
+    assert_eq!(page["title"], json!(secrets[1]));
+    assert_eq!(page["text"], json!(format!("{}.\n", secrets[2])));
+    let file = ask(&turtl, json!(["d10", "profile:note:get-file", file_note_id])).await;
+    assert_eq!(file["e"], json!(0), "{}", file);
+    assert_eq!(
+        crypto::from_base64(&String::from(file["d"].as_str().unwrap())).unwrap(),
+        Vec::from(format!("\u{0}\u{1}{}\u{ff}", secrets[4]).as_bytes()),
+    );
+    // and the search the core builds when the account is logged into finds the page
+    let found = ask(&turtl, json!(["d11", "profile:find-notes", {"space_id": space_id, "text": "vault"}])).await;
+    assert_eq!(found["d"]["total"], json!(1), "{}", found);
+    turtl.logout().unwrap();
+    drop(turtl);
+
+    // what is on disk: the ids are there (so the files are the right ones to look in), the secrets aren't
+    let files = folder.files();
+    let names: Vec<&String> = files.iter().map(|file| &file.0).collect();
+    assert!(names.iter().any(|name| name.contains("turtl-kv")), "the kv store is there: {:?}", names);
+    assert!(names.iter().any(|name| name.contains("turtl-user-")), "the user's database is there: {:?}", names);
+    assert!(names.iter().any(|name| name.ends_with(".enc")), "the encrypted file is there: {:?}", names);
+    for (id, what) in &[(&space_id, "the space's id"), (&page_id, "a page's id")] {
+        assert!(files.iter().any(|(_, bytes)| bytes_contain(bytes, id.as_bytes())), "{} should be in the files", what);
+    }
+    for secret in &secrets {
+        for (name, bytes) in &files {
+            assert!(!bytes_contain(bytes, secret.as_bytes()), "{:?} is in {}", secret, name);
+        }
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+async_test!(local_only_on_disk_flow, local_only_on_disk());
+
 /// What a JS host sees of the core on wasm32 (wasm_host.rs): everything the core sends goes to the
 /// message handler, the same JSON as on native; without a handler it queues up for the poll
 /// functions; and the core can be stopped. Driven here the way a host would drive it.

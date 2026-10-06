@@ -64,6 +64,7 @@ const POOL_CAPACITY: u32 = 16;
 /// there is persistent storage) and logging goes to the JS console.
 const DEFAULT_CONFIG: &str = r#"{
     "wrap_errors": false,
+    "local_only": false,
     "data_folder": ":memory:",
     "integration_tests": {"data_folder": ":memory:"},
     "messaging": {
