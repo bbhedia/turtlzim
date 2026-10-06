@@ -10,7 +10,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use zim_format::plain_text;
 
-use crate::link::{link_to, links_in, resolve, Link, LinkRef, PageSet};
+use crate::files::{
+    check_file_path, images_in, relative_file_text, resolve_file, safe_file_name, unique_file_name, FileError, FileSet, FileTarget,
+    ImageRef,
+};
+use crate::link::{classify, link_to, links_in, resolve, Link, LinkKind, LinkRef, PageSet};
 use crate::name::PageName;
 
 struct Entry {
@@ -18,6 +22,8 @@ struct Entry {
     text: String,
     /// The `[[links]]` in `text`, found once when the text is set.
     links: Vec<LinkRef>,
+    /// The `{{images}}` in `text`.
+    images: Vec<ImageRef>,
     /// What the page reads as with its markup tidied away (see `zim_format::plain_text`), and that in
     /// lower case: what a search looks through.
     plain: String,
@@ -26,13 +32,14 @@ struct Entry {
 
 impl Entry {
     fn new(name: PageName, text: String) -> Entry {
-        let mut entry = Entry { name, text: String::new(), links: Vec::new(), plain: String::new(), plain_lower: String::new() };
+        let mut entry = Entry { name, text: String::new(), links: Vec::new(), images: Vec::new(), plain: String::new(), plain_lower: String::new() };
         entry.set_text(text);
         entry
     }
 
     fn set_text(&mut self, text: String) {
         self.links = links_in(&text);
+        self.images = images_in(&text);
         self.plain = plain_text(&text);
         self.plain_lower = self.plain.to_lowercase();
         self.text = text;
@@ -44,6 +51,15 @@ impl Entry {
 pub struct Notebook {
     /// By key (the name in lower case), so that lookups ignore case and a walk is in name order.
     pages: BTreeMap<String, Entry>,
+    /// The paths of the files (attachments) by key (the path in lower case), as spelled. The bytes
+    /// are not here: a storage backend keeps them.
+    files: BTreeMap<String, String>,
+}
+
+impl FileSet for Notebook {
+    fn find_file(&self, path: &str) -> Option<String> {
+        self.files.get(&path.to_lowercase()).cloned()
+    }
 }
 
 impl PageSet for Notebook {
@@ -103,6 +119,8 @@ pub enum RenameError {
     IntoItself,
     /// A page called this already exists.
     Taken(PageName),
+    /// A file of the pages moving would land on this file, which stays where it is.
+    FileTaken(String),
 }
 
 impl std::fmt::Display for RenameError {
@@ -111,6 +129,7 @@ impl std::fmt::Display for RenameError {
             RenameError::NothingThere(name) => write!(f, "There is no page called {name}."),
             RenameError::IntoItself => write!(f, "A page can't be moved below itself."),
             RenameError::Taken(name) => write!(f, "A page called {name} already exists."),
+            RenameError::FileTaken(path) => write!(f, "A file called {path} already exists."),
         }
     }
 }
@@ -124,8 +143,11 @@ pub struct RenameReport {
     pub moved: Vec<(PageName, PageName)>,
     /// The pages (by their names after the move) whose text had links rewritten.
     pub rewritten: Vec<PageName>,
-    /// How many links were rewritten.
+    /// How many links (and images) were rewritten.
     pub links_changed: usize,
+    /// Every file that moved with the pages (a page's folder holds its attachments), from its old
+    /// path to its new one.
+    pub files_moved: Vec<(String, String)>,
 }
 
 /// The text of a new page, as Zim starts one: its header and a title heading.
@@ -207,6 +229,91 @@ impl Notebook {
     /// The shortest link text that, written on `from`, leads to `to`.
     pub fn link_to(&self, from: &PageName, to: &PageName) -> String {
         link_to(from, to, self)
+    }
+
+    // ---- files (attachments)
+
+    /// Record that the notebook has a file at `path` (a path relative to the notebook, with `/`
+    /// between folders). A file that is already there keeps its spelling.
+    pub fn put_file(&mut self, path: &str) -> Result<(), FileError> {
+        check_file_path(path)?;
+        self.files.entry(path.to_lowercase()).or_insert_with(|| path.to_string());
+        Ok(())
+    }
+
+    /// Forget the file at `path`. Whether there was one.
+    pub fn remove_file(&mut self, path: &str) -> bool {
+        self.files.remove(&path.to_lowercase()).is_some()
+    }
+
+    pub fn has_file(&self, path: &str) -> bool {
+        self.files.contains_key(&path.to_lowercase())
+    }
+
+    /// The path of the file as the notebook spells it, if there is one.
+    pub fn file_path(&self, path: &str) -> Option<&str> {
+        self.files.get(&path.to_lowercase()).map(String::as_str)
+    }
+
+    /// Every file, in path order (ignoring case).
+    pub fn files(&self) -> impl Iterator<Item = &str> {
+        self.files.values().map(String::as_str)
+    }
+
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// The files in the folder named like `page`: its attachments, not those of the pages below it.
+    pub fn files_of(&self, page: &PageName) -> Vec<String> {
+        let prefix = format!("{}/", page.folder_path().to_lowercase());
+        self.files
+            .iter()
+            .filter(|(key, _)| key.strip_prefix(&prefix).is_some_and(|rest| !rest.contains('/')))
+            .map(|(_, path)| path.clone())
+            .collect()
+    }
+
+    /// The files in the folder named like `page` and in every folder below it: what goes with the
+    /// page when it is moved or deleted.
+    pub fn files_below(&self, page: &PageName) -> Vec<String> {
+        let prefix = format!("{}/", page.folder_path().to_lowercase());
+        self.files
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(_, path)| path.clone())
+            .collect()
+    }
+
+    /// Forget the files [`files_below`](Notebook::files_below) lists, and return them.
+    pub fn remove_files_below(&mut self, page: &PageName) -> Vec<String> {
+        let prefix = format!("{}/", page.folder_path().to_lowercase());
+        let keys: Vec<String> = self.files.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+        keys.iter().filter_map(|k| self.files.remove(k)).collect()
+    }
+
+    /// Where the file reference `target` (the path of an image, or of a `[[./file]]` link),
+    /// written on page `from`, leads in this notebook.
+    pub fn resolve_file(&self, from: &PageName, target: &str) -> FileTarget {
+        resolve_file(from, target, self)
+    }
+
+    /// The `{{images}}` in a page's text.
+    pub fn images(&self, name: &PageName) -> &[ImageRef] {
+        self.pages.get(&name.key()).map_or(&[], |e| &e.images)
+    }
+
+    /// The path for a new attachment of `page` that people call `wanted`: in the page's folder, with
+    /// a name that is safe in a link and not in use.
+    pub fn attachment_path(&self, page: &PageName, wanted: &str) -> String {
+        let folder = page.folder_path();
+        let name = unique_file_name(&safe_file_name(wanted), |n| self.files.contains_key(&format!("{folder}/{n}").to_lowercase()));
+        format!("{folder}/{name}")
+    }
+
+    /// The text that, written on `from` as a file reference, leads to the file at `path`.
+    pub fn file_link(&self, from: &PageName, path: &str) -> String {
+        relative_file_text(from, path, true)
     }
 
     /// The keys of the page called `key` and of every page below it.
@@ -390,6 +497,28 @@ impl Notebook {
             }
         }
 
+        // The files go with the pages: a page's folder (its attachments, and the files of the pages
+        // below it) moves to the folder named like the new page.
+        let old_folder = format!("{}/", old.folder_path().to_lowercase());
+        let new_folder = new.folder_path();
+        let mut file_moves: Vec<(String, String, String)> = Vec::new(); // old key, old path, new path
+        for (key, path) in &self.files {
+            if key.starts_with(&old_folder) {
+                let rest: Vec<&str> = path.split('/').skip(old.depth()).collect();
+                file_moves.push((key.clone(), path.clone(), format!("{new_folder}/{}", rest.join("/"))));
+            }
+        }
+        let moving_files: HashSet<&String> = file_moves.iter().map(|(key, _, _)| key).collect();
+        for (_, _, new_path) in &file_moves {
+            let key = new_path.to_lowercase();
+            if let Some(existing) = self.files.get(&key) {
+                if !moving_files.contains(&key) {
+                    return Err(RenameError::FileTaken(existing.clone()));
+                }
+            }
+        }
+        let moved_file: HashMap<String, String> = file_moves.iter().map(|(key, _, new)| (key.clone(), new.clone())).collect();
+
         // Where every link led before: only the links that led to a page count, and each remembers
         // the page it must lead to afterwards.
         struct Job {
@@ -420,6 +549,36 @@ impl Notebook {
             }
         }
 
+        // The same for links and images that lead to a file in the notebook.
+        enum FileRef {
+            Link(usize),
+            Image(usize),
+        }
+        struct FileJob {
+            page_key: String,
+            what: FileRef,
+            want: String,
+        }
+        let mut file_jobs = Vec::new();
+        if update_links {
+            for (page_key, entry) in &self.pages {
+                let mut consider = |what: FileRef, target: &str| {
+                    if let FileTarget::Notebook { path, exists: true } = resolve_file(&entry.name, target, self) {
+                        let want = moved_file.get(&path.to_lowercase()).cloned().unwrap_or(path);
+                        file_jobs.push(FileJob { page_key: page_key.clone(), what, want });
+                    }
+                };
+                for (index, link) in entry.links.iter().enumerate() {
+                    if classify(&link.target) == LinkKind::File {
+                        consider(FileRef::Link(index), &link.target);
+                    }
+                }
+                for (index, image) in entry.images.iter().enumerate() {
+                    consider(FileRef::Image(index), &image.path);
+                }
+            }
+        }
+
         // The move itself.
         let mut report = RenameReport::default();
         let mut after_key: HashMap<String, String> = HashMap::new();
@@ -433,6 +592,13 @@ impl Notebook {
             after_key.insert(old_page_key, name.key());
             self.pages.insert(name.key(), Entry { name, ..entry });
         }
+        for (old_key, _, _) in &file_moves {
+            self.files.remove(old_key);
+        }
+        for (_, _, new_path) in &file_moves {
+            self.files.insert(new_path.to_lowercase(), new_path.clone());
+        }
+        report.files_moved = file_moves.iter().map(|(_, old, new)| (old.clone(), new.clone())).collect();
 
         // Rewrite what no longer leads where it did.
         let mut edits: BTreeMap<String, Vec<(usize, usize, String)>> = BTreeMap::new();
@@ -452,6 +618,19 @@ impl Notebook {
                     .push((link.target_start, link.target_end, text));
             }
         }
+        for job in file_jobs {
+            let key = after_key.get(&job.page_key).cloned().unwrap_or(job.page_key);
+            let entry = &self.pages[&key];
+            let (target, start, end) = match job.what {
+                FileRef::Link(i) => (entry.links[i].target.as_str(), entry.links[i].target_start, entry.links[i].target_end),
+                FileRef::Image(i) => (entry.images[i].path.as_str(), entry.images[i].path_start, entry.images[i].path_end),
+            };
+            let leads_to_want = matches!(resolve_file(&entry.name, target, self), FileTarget::Notebook { exists: true, ref path } if path.to_lowercase() == job.want.to_lowercase());
+            if !leads_to_want {
+                let text = relative_file_text(&entry.name, &job.want, target.trim_start().starts_with("./"));
+                edits.entry(key).or_default().push((start, end, text));
+            }
+        }
         for (key, mut changes) in edits {
             changes.sort_by_key(|c| std::cmp::Reverse(c.0));
             let entry = self.pages.get_mut(&key).expect("the page is there");
@@ -463,6 +642,7 @@ impl Notebook {
             entry.set_text(text);
             report.rewritten.push(entry.name.clone());
         }
+        report.files_moved.sort_by_key(|(from, _)| from.to_lowercase());
         report.moved.sort_by_key(|(from, _)| from.key());
         report.rewritten.sort_by_key(|n| n.key());
         Ok(report)

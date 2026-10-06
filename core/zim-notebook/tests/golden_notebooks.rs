@@ -13,10 +13,11 @@
 mod common;
 use std::collections::BTreeMap;
 
-use common::{notebook_roots, read_notebook, Pages};
-use zim_notebook::{links_in, resolve, Link, PageName};
+use common::{notebook_roots, read_files, read_notebook, Pages};
+use zim_notebook::{classify, images_in, links_in, resolve, FileTarget, Link, LinkKind, PageName};
 
-fn notebooks() -> Vec<(String, BTreeMap<String, String>)> {
+/// The notebooks below `ZIM_GOLDEN_DIR`: their folder, their pages, and their other files.
+fn notebooks() -> Vec<(String, BTreeMap<String, String>, Vec<String>)> {
     let var = std::env::var_os("ZIM_GOLDEN_DIR")
         .expect("ZIM_GOLDEN_DIR is not set (see this file's docs)");
     let roots = notebook_roots(&var);
@@ -26,14 +27,14 @@ fn notebooks() -> Vec<(String, BTreeMap<String, String>)> {
     );
     roots
         .into_iter()
-        .map(|root| (root.display().to_string(), read_notebook(&root)))
+        .map(|root| (root.display().to_string(), read_notebook(&root), read_files(&root)))
         .collect()
 }
 
 #[test]
 #[ignore = "needs real Zim notebooks: set ZIM_GOLDEN_DIR (see the module docs)"]
 fn every_page_link_in_a_real_notebook_leads_to_a_page() {
-    for (root, pages) in notebooks() {
+    for (root, pages, _) in notebooks() {
         let set = Pages(pages.keys().map(|n| PageName::parse(n).unwrap()).collect());
         let (mut by_kind, mut broken): (BTreeMap<&str, usize>, Vec<String>) =
             (BTreeMap::new(), Vec::new());
@@ -79,7 +80,7 @@ fn every_page_link_in_a_real_notebook_leads_to_a_page() {
 #[test]
 #[ignore = "needs real Zim notebooks: set ZIM_GOLDEN_DIR (see the module docs)"]
 fn renaming_in_a_real_notebook_keeps_every_link_leading_where_it_led() {
-    for (root, pages) in notebooks() {
+    for (root, pages, files) in notebooks() {
         // The renames a person might do: a section, a nested page, a page into a section it isn't in,
         // a page to the top, and the front page.
         let candidates: Vec<(&str, &str)> = vec![
@@ -98,6 +99,9 @@ fn renaming_in_a_real_notebook_keeps_every_link_leading_where_it_led() {
             for (name, text) in &pages {
                 nb.put(&PageName::parse(name).unwrap(), text.as_str());
             }
+            for file in &files {
+                nb.put_file(file).unwrap_or_else(|e| panic!("{root}: {e}"));
+            }
             if !nb.names().any(|n| n.same_page(&old) || n.is_inside(&old)) {
                 continue; // this notebook has no such page (the website's pages, for one)
             }
@@ -105,8 +109,9 @@ fn renaming_in_a_real_notebook_keeps_every_link_leading_where_it_led() {
                 common::rename_checked(&mut nb, &old, &new, &format!("{root}: {old} -> {new}"))
                     .unwrap_or_else(|e| panic!("{root}: {old} -> {new}: {e}"));
             println!(
-                "{root}: {old} -> {new}: {} pages moved, {} links rewritten on {} pages",
+                "{root}: {old} -> {new}: {} pages and {} files moved, {} links rewritten on {} pages",
                 report.moved.len(),
+                report.files_moved.len(),
                 report.links_changed,
                 report.rewritten.len()
             );
@@ -117,7 +122,7 @@ fn renaming_in_a_real_notebook_keeps_every_link_leading_where_it_led() {
 #[test]
 #[ignore = "needs real Zim notebooks: set ZIM_GOLDEN_DIR (see the module docs)"]
 fn the_tree_and_backlinks_of_a_real_notebook_make_sense() {
-    for (root, pages) in notebooks() {
+    for (root, pages, _) in notebooks() {
         let mut nb = zim_notebook::Notebook::new();
         for (name, text) in &pages {
             nb.put(&PageName::parse(name).unwrap(), text.as_str());
@@ -167,5 +172,64 @@ fn the_tree_and_backlinks_of_a_real_notebook_make_sense() {
             with_backlinks += usize::from(!got.is_empty());
         }
         println!("{root}: {} tree lines, {} top-level entries, {with_backlinks} of {} pages have backlinks", tree.len(), top.len(), pages.len());
+    }
+}
+
+#[test]
+#[ignore = "needs real Zim notebooks: set ZIM_GOLDEN_DIR (see the module docs)"]
+fn every_image_and_file_link_in_a_real_notebook_leads_to_a_file_that_is_there() {
+    for (root, pages, files) in notebooks() {
+        let mut nb = zim_notebook::Notebook::new();
+        for (name, text) in &pages {
+            nb.put(&PageName::parse(name).unwrap(), text.as_str());
+        }
+        for file in &files {
+            nb.put_file(file).unwrap_or_else(|e| panic!("{root}: {e}"));
+        }
+        assert_eq!(nb.file_count(), files.len(), "{root}: every file is a valid, distinct path");
+
+        let (mut images, mut file_links, mut outside, mut broken) = (0, 0, 0, Vec::new());
+        let mut referenced = std::collections::BTreeSet::new();
+        for name in nb.names().cloned().collect::<Vec<_>>() {
+            let mut refs: Vec<(String, &str)> = images_in(nb.get(&name).unwrap()).into_iter().map(|i| (i.path, "image")).collect();
+            refs.extend(
+                links_in(nb.get(&name).unwrap())
+                    .into_iter()
+                    .filter(|l| classify(&l.target) == LinkKind::File)
+                    .map(|l| (l.target, "link")),
+            );
+            for (target, what) in refs {
+                match nb.resolve_file(&name, &target) {
+                    FileTarget::Notebook { path, exists: true } => {
+                        referenced.insert(path.to_lowercase());
+                        if what == "image" { images += 1 } else { file_links += 1 }
+                    }
+                    FileTarget::Notebook { path, exists: false } => broken.push(format!("{name}: {what} {target:?} would be {path}")),
+                    FileTarget::Outside => outside += 1,
+                }
+            }
+        }
+        println!(
+            "{root}: {} pages, {} files; {images} images and {file_links} file links lead to {} of them; {outside} lead outside the notebook",
+            pages.len(),
+            files.len(),
+            referenced.len()
+        );
+        for line in &broken {
+            println!("  BROKEN {line}");
+        }
+        assert!(broken.is_empty(), "{} references in {root} lead to no file:\n{}", broken.len(), broken.join("\n"));
+        // every attachment belongs to a folder named like a page that exists or a section above one
+        for file in nb.files() {
+            let folder = file.rsplit_once('/').map_or("", |(folder, _)| folder);
+            if folder.is_empty() {
+                continue;
+            }
+            let owner = PageName::from_folder_path(folder).unwrap_or_else(|e| panic!("{root}: {file}: {e}"));
+            assert!(
+                zim_notebook::PageSet::find(&nb, &owner).is_some(),
+                "{root}: {file} is in a folder no page is named for"
+            );
+        }
     }
 }

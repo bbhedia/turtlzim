@@ -5,14 +5,18 @@
 import {
   Notebook as WasmNotebook,
   anchorsIn as wasmAnchorsIn,
+  checkFilePath as wasmCheckFilePath,
   classifyLink as wasmClassifyLink,
   headingId as wasmHeadingId,
+  imagesIn as wasmImagesIn,
   linksIn as wasmLinksIn,
   newPageText as wasmNewPageText,
   pageKey as wasmPageKey,
   pageToPath as wasmPageToPath,
   parsePageName as wasmParsePageName,
   pathToPage as wasmPathToPage,
+  relativeFileText as wasmRelativeFileText,
+  safeFileName as wasmSafeFileName,
 } from "./zim-wasm/zim_wasm.js";
 import { assertZimReady } from "./zim";
 
@@ -56,7 +60,30 @@ export interface RenameReport {
   moved: Array<[from: string, to: string]>;
   /** The pages (by their new names) that had links rewritten. */
   rewritten: string[];
+  /** How many links and images were rewritten. */
   linksChanged: number;
+  /** Every file that moved with the pages (a page's folder holds its attachments), old path to new. */
+  filesMoved: Array<[from: string, to: string]>;
+}
+
+/** Where a reference to a file (an image's path, a `[[./file]]` link) leads. */
+export type ResolvedFile =
+  /** A path in the notebook (as the notebook spells it, if there is such a file) and whether there is one. */
+  | { kind: "notebook"; path: string; exists: boolean }
+  /** Not in the notebook: an absolute path, `~/...`, a drive or share, an address, or above the top. */
+  | { kind: "outside" };
+
+/** An `{{image}}` in a text. Offsets are UTF-16 units. */
+export interface TextImage {
+  start: number;
+  end: number;
+  /** Where the path text is, which is what is replaced when the image is pointed elsewhere. */
+  pathStart: number;
+  pathEnd: number;
+  path: string;
+  /** The `?key=value&flag` tokens as written. */
+  query: Array<[key: string, value: string | null]>;
+  alt: string | null;
 }
 
 /** A `[[link]]` in a text. Offsets are UTF-16 units: positions in the JavaScript string. */
@@ -67,6 +94,12 @@ export interface TextLink {
   targetEnd: number;
   target: string;
   display: string | null;
+}
+
+/** The value of a parameter of an image (`width`, `height`, `href`, ...), ignoring the case of its name. */
+export function imageParam(image: TextImage, key: string): string | undefined {
+  const wanted = key.toLowerCase();
+  return image.query.find(([k, v]) => k.toLowerCase() === wanted && v !== null)?.[1] ?? undefined;
 }
 
 /** A place a `[[#id]]` link can lead to. */
@@ -133,6 +166,36 @@ export function newPageText(page: string, created: string): string {
 export function linksIn(text: string): TextLink[] {
   assertZimReady();
   return JSON.parse(wasmLinksIn(text)) as TextLink[];
+}
+
+/** The `{{images}}` of a text. */
+export function imagesIn(text: string): TextImage[] {
+  assertZimReady();
+  return JSON.parse(wasmImagesIn(text)) as TextImage[];
+}
+
+/**
+ * What to call a file that people call `wanted`, so that it is safe to write in a link or an image
+ * (no slash, backslash, or any of ? # | [ ] { } < > : * " %, and no leading dot) and never empty.
+ */
+export function safeFileName(wanted: string): string {
+  assertZimReady();
+  return wasmSafeFileName(wanted);
+}
+
+/** Why `path` can't be the path of a file in a notebook, or undefined if it can. */
+export function checkFilePath(path: string): string | undefined {
+  assertZimReady();
+  return wasmCheckFilePath(path) ?? undefined;
+}
+
+/**
+ * The text that, written on page `from` as a file reference, leads to the file at `path` (a
+ * notebook path): `./a.png` for the page's own folder, `../a.png` for the one above, and so on.
+ */
+export function relativeFileText(from: string, path: string, dotPrefix = true): string {
+  assertZimReady();
+  return wasmRelativeFileText(from, path, dotPrefix);
 }
 
 /** The headings and `{{id: ...}}` anchors of a text. */
@@ -231,10 +294,69 @@ export class NotebookModel {
     return JSON.parse(this.inner.search(query, limit)) as SearchHit[];
   }
 
+  // ---- files (attachments): paths only; the bytes are for a store
+
+  /** Record a file at `path` (relative to the notebook, `/` between folders). Throws, with a message to show, if it can't be one. */
+  putFile(path: string): void {
+    this.inner.putFile(path);
+  }
+
+  removeFile(path: string): boolean {
+    return this.inner.removeFile(path);
+  }
+
+  hasFile(path: string): boolean {
+    return this.inner.hasFile(path);
+  }
+
+  /** The path of a file as the notebook spells it (paths ignore case), if there is one. */
+  filePath(path: string): string | undefined {
+    return this.inner.filePath(path) ?? undefined;
+  }
+
+  /** Every file, in path order. */
+  files(): string[] {
+    return this.inner.files();
+  }
+
+  get fileCount(): number {
+    return this.inner.fileCount();
+  }
+
+  /** The files in the folder named like `page`: its attachments. */
+  filesOf(page: string): string[] {
+    return this.inner.filesOf(page);
+  }
+
+  /** The files in that folder and every folder below it: what goes with the page when it is deleted. */
+  filesBelow(page: string): string[] {
+    return this.inner.filesBelow(page);
+  }
+
+  /** Forget the files `filesBelow` lists, and return them. */
+  removeFilesBelow(page: string): string[] {
+    return this.inner.removeFilesBelow(page);
+  }
+
+  /** Where a file reference (an image's path, a `[[./file]]` link) written on page `from` leads. */
+  resolveFile(from: string, target: string): ResolvedFile {
+    return JSON.parse(this.inner.resolveFile(from, target)) as ResolvedFile;
+  }
+
+  /** The path for a new attachment of `page` that people call `wanted`: in the page's folder, with a safe name that is not in use. */
+  attachmentPath(page: string, wanted: string): string {
+    return this.inner.attachmentPath(page, wanted);
+  }
+
+  /** The text that, written on `from` as a file reference, leads to the file at `path`. */
+  fileLink(from: string, path: string): string {
+    return this.inner.fileLink(from, path);
+  }
+
   /**
-   * Move a page and everything below it. With `updateLinks`, links are rewritten so that every
-   * one still leads where it did. Throws an Error with a message ready to show if the rename
-   * can't be done (and then changes nothing).
+   * Move a page and everything below it, and the files in their folders. With `updateLinks`,
+   * links and images are rewritten so that every one still leads where it did. Throws an Error with
+   * a message ready to show if the rename can't be done (and then changes nothing).
    */
   rename(from: string, to: string, updateLinks = true): RenameReport {
     return JSON.parse(this.inner.rename(from, to, updateLinks)) as RenameReport;

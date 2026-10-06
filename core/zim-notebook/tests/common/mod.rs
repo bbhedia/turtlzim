@@ -118,6 +118,38 @@ pub fn read_notebook(root: &Path) -> BTreeMap<String, String> {
     pages
 }
 
+/// The files of a notebook folder that are not pages (attachments): paths relative to the
+/// notebook with `/` between folders; hidden files and `notebook.zim` left out.
+pub fn read_files(root: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, files: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                walk(root, &path, files);
+            } else {
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if relative != "notebook.zim" && !relative.ends_with(".txt") {
+                    files.push(relative);
+                }
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(root, root, &mut files);
+    files.sort();
+    files
+}
+
 /// Rename `old` to `new` in `nb` (links updated) and check, link by link, what must hold:
 ///
 /// * every page of the tree moved and nothing else did;
@@ -142,6 +174,27 @@ pub fn rename_checked(
     let all: Vec<PageName> = nb.names().cloned().collect();
     let before = texts(nb);
 
+    // the files, and where every reference to a file led (page key, is an image, index) -> (text, target)
+    use zim_notebook::{classify, FileTarget, LinkKind};
+    let files_before: Vec<String> = nb.files().map(String::from).collect();
+    let mut file_led: BTreeMap<(String, bool, usize), (String, FileTarget)> = BTreeMap::new();
+    for p in &all {
+        for (i, link) in nb.links(p).iter().enumerate() {
+            if classify(&link.target) == LinkKind::File {
+                file_led.insert(
+                    (p.key(), false, i),
+                    (link.target.clone(), nb.resolve_file(p, &link.target)),
+                );
+            }
+        }
+        for (i, image) in nb.images(p).iter().enumerate() {
+            file_led.insert(
+                (p.key(), true, i),
+                (image.path.clone(), nb.resolve_file(p, &image.path)),
+            );
+        }
+    }
+
     // where each link led before
     let mut led: BTreeMap<(String, usize), (PageName, bool, bool)> = BTreeMap::new();
     for p in &all {
@@ -160,6 +213,11 @@ pub fn rename_checked(
                 texts(nb),
                 before,
                 "{context}: a refused rename changed something"
+            );
+            assert_eq!(
+                nb.files().map(String::from).collect::<Vec<_>>(),
+                files_before,
+                "{context}: a refused rename moved a file"
             );
             return Err(e);
         }
@@ -227,9 +285,19 @@ pub fn rename_checked(
             );
         } else {
             let strip = |t: &str| -> String {
+                let mut ranges: Vec<(usize, usize)> = links_in(t)
+                    .iter()
+                    .map(|l| (l.target_start, l.target_end))
+                    .collect();
+                ranges.extend(
+                    zim_notebook::images_in(t)
+                        .iter()
+                        .map(|im| (im.path_start, im.path_end)),
+                );
+                ranges.sort_by_key(|r| std::cmp::Reverse(r.0));
                 let mut out = t.to_string();
-                for l in links_in(t).iter().rev() {
-                    out.replace_range(l.target_start..l.target_end, "");
+                for (start, end) in ranges {
+                    out.replace_range(start..end, "");
                 }
                 out
             };
@@ -245,6 +313,63 @@ pub fn rename_checked(
             *a,
             "{context}: {after_name} no longer round-trips"
         );
+    }
+
+    // The files: those in the folder of the page that moved went with it (a folder is named like its
+    // page), and no other file moved.
+    let old_folder = format!("{}/", old.folder_path().to_lowercase());
+    let renamed = old.as_str() != new.as_str();
+    let map_file = |path: &str| -> String {
+        if renamed && path.to_lowercase().starts_with(&old_folder) {
+            let rest: Vec<&str> = path.split('/').skip(old.depth()).collect();
+            format!("{}/{}", new.folder_path(), rest.join("/"))
+        } else {
+            path.to_string()
+        }
+    };
+    let mut expected_files: Vec<String> = files_before.iter().map(|f| map_file(f)).collect();
+    expected_files.sort_by_key(|f| f.to_lowercase());
+    assert_eq!(
+        nb.files().map(String::from).collect::<Vec<_>>(),
+        expected_files,
+        "{context}: renaming {old} to {new} left the wrong files"
+    );
+    let mut expected_moves: Vec<(String, String)> = files_before
+        .iter()
+        .filter(|f| renamed && f.to_lowercase().starts_with(&old_folder))
+        .map(|f| (f.clone(), map_file(f)))
+        .collect();
+    expected_moves.sort_by_key(|m| m.0.to_lowercase());
+    assert_eq!(
+        report.files_moved, expected_moves,
+        "{context}: renaming {old} to {new}: the report of moved files"
+    );
+    // every reference that led to a file still leads to it (as moved); the others are left as written
+    for ((page_key, is_image, i), (text, target)) in &file_led {
+        let from_before = all.iter().find(|p| &p.key() == page_key).unwrap();
+        let from_after = map(from_before);
+        let text_after = if *is_image {
+            nb.images(&from_after)[*i].path.clone()
+        } else {
+            nb.links(&from_after)[*i].target.clone()
+        };
+        match target {
+            FileTarget::Notebook { path, exists: true } => {
+                let want = map_file(path);
+                match nb.resolve_file(&from_after, &text_after) {
+                    FileTarget::Notebook { path: now, exists: true } => assert_eq!(
+                        now.to_lowercase(),
+                        want.to_lowercase(),
+                        "{context}: renaming {old} to {new}: {text:?} on {from_before} led to {path} and now ({text_after:?} on {from_after}) leads to {now}, not {want}"
+                    ),
+                    other => panic!("{context}: renaming {old} to {new}: {text:?} on {from_before} led to {path}; {text_after:?} on {from_after} now leads to {other:?}"),
+                }
+            }
+            _ => assert_eq!(
+                &text_after, text,
+                "{context}: a reference that led to no file was rewritten"
+            ),
+        }
     }
     Ok(report)
 }

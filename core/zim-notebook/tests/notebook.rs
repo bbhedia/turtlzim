@@ -496,8 +496,46 @@ fn random_notebook(rng: &mut Rng, pages: usize) -> Notebook {
         nb.put(&n, "");
     }
     let all: Vec<PageName> = nb.names().cloned().collect();
+    // Files: in the folders of pages, in folders no page has, and at the top.
+    let mut file_paths: Vec<String> = Vec::new();
+    for page in &all {
+        for k in 0..rng.below(3) {
+            file_paths.push(format!("{}/f{k}.png", page.folder_path()));
+        }
+    }
+    for k in 0..rng.below(3) {
+        let folder: Vec<&str> = (0..1 + rng.below(2)).map(|_| parts[rng.below(parts.len())]).collect();
+        // (sometimes named like the files of the pages, so that a move can land on one)
+        let file = if rng.below(2) == 0 { format!("f{k}.png") } else { format!("o{k}.pdf") };
+        file_paths.push(format!("{}/{file}", folder.join("/")));
+    }
+    for k in 0..rng.below(2) {
+        file_paths.push(format!("top{k}.png"));
+    }
+    for path in &file_paths {
+        nb.put_file(path).unwrap();
+    }
     for page in &all {
         let mut text = format!("====== {} ======\n", page.last());
+        // references to files: right ones in every style, wrong ones, and ones to somewhere else
+        for _ in 0..rng.below(4) {
+            let pick = |rng: &mut Rng| file_paths[rng.below(file_paths.len())].clone();
+            let (wanted, link_ok) = match rng.below(7) {
+                0..=2 if !file_paths.is_empty() => (zim_notebook::relative_file_text(page, &pick(rng), true), true),
+                3 if !file_paths.is_empty() => (zim_notebook::relative_file_text(page, &pick(rng), false), false),
+                4 if !file_paths.is_empty() => (zim_notebook::relative_file_text(page, &pick(rng), true).to_uppercase(), true),
+                5 => ("/abs/outside.png".to_string(), true),
+                _ => ("./missing.png".to_string(), true),
+            };
+            text.push_str(&match rng.below(4) {
+                0 => format!("{{{{{wanted}}}}}\n"),
+                1 => format!("{{{{{wanted}?width=20|alt}}}}\n"),
+                // (a link is a file link only if it has a `/` in it)
+                2 if link_ok => format!("[[{wanted}]]\n"),
+                _ if link_ok => format!("[[{wanted}|file]]\n"),
+                _ => format!("{{{{{wanted}}}}}\n"),
+            });
+        }
         for _ in 0..rng.below(5) {
             let target = match rng.below(5) {
                 0 => nb.link_to(page, &all[rng.below(all.len())]),
@@ -518,6 +556,7 @@ fn random_notebook(rng: &mut Rng, pages: usize) -> Notebook {
 fn after_a_rename_every_link_still_leads_to_the_page_it_led_to() {
     let mut rng = Rng(0x2E4A_3E00_C0DE_0042);
     let (mut renamed, mut refused, mut rewritten) = (0, 0, 0);
+    let (mut files_moved, mut file_clashes) = (0, 0);
     for case in 0..6_000 {
         let pages = 2 + rng.below(12);
         let mut nb = random_notebook(&mut rng, pages);
@@ -540,9 +579,14 @@ fn after_a_rename_every_link_still_leads_to_the_page_it_led_to() {
             Ok(report) => {
                 renamed += 1;
                 rewritten += report.links_changed;
+                files_moved += report.files_moved.len();
             }
-            Err(_) => refused += 1,
+            Err(e) => {
+                refused += 1;
+                file_clashes += usize::from(matches!(e, RenameError::FileTaken(_)));
+            }
         }
     }
     assert!(renamed > 2_000 && refused > 100 && rewritten > 1_000, "the generator exercised too little: {renamed} renamed, {refused} refused, {rewritten} links rewritten");
+    assert!(files_moved > 1_000 && file_clashes > 10, "too few files in play: {files_moved} moved, {file_clashes} renames refused for landing on a file");
 }

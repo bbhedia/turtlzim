@@ -138,6 +138,69 @@ pub fn anchors_in(text: &str) -> String {
     .render()
 }
 
+/// The `{{images}}` in a text, as JSON `[{start, end, pathStart, pathEnd, path, query, alt}]` with
+/// offsets in UTF-16 units; `query` is `[[key, value or null], ...]` as written after the `?`.
+#[wasm_bindgen(js_name = imagesIn)]
+pub fn images_in(text: &str) -> String {
+    let at = utf16_offsets(text);
+    J::Arr(
+        nb::images_in(text)
+            .into_iter()
+            .map(|i| {
+                J::Obj(vec![
+                    ("start", J::Num(at[i.start])),
+                    ("end", J::Num(at[i.end])),
+                    ("pathStart", J::Num(at[i.path_start])),
+                    ("pathEnd", J::Num(at[i.path_end])),
+                    ("path", s(i.path)),
+                    (
+                        "query",
+                        J::Arr(
+                            i.query
+                                .into_iter()
+                                .map(|(k, v)| J::Arr(vec![s(k), opt(v)]))
+                                .collect(),
+                        ),
+                    ),
+                    ("alt", opt(i.alt)),
+                ])
+            })
+            .collect(),
+    )
+    .render()
+}
+
+/// What to call a file that people call `wanted`, so that it is safe to write in a link or an image
+/// (no `/ \ ? # | [ ] { } < > : * " %`, no leading dot) and never empty.
+#[wasm_bindgen(js_name = safeFileName)]
+pub fn safe_file_name(wanted: &str) -> String {
+    nb::safe_file_name(wanted)
+}
+
+/// Why `path` can't be the path of a file in a notebook, or nothing if it can.
+#[wasm_bindgen(js_name = checkFilePath)]
+pub fn check_file_path(path: &str) -> Option<String> {
+    nb::check_file_path(path).err().map(|e| e.to_string())
+}
+
+/// The text that, written on page `from` as a file reference, leads to the file at `path` (a
+/// notebook path): `./a.png`, `../a.png`, ... Throws if `from` isn't a valid page name.
+#[wasm_bindgen(js_name = relativeFileText)]
+pub fn relative_file_text(from: &str, path: &str, dot_prefix: bool) -> Result<String, JsError> {
+    Ok(nb::relative_file_text(&name(from)?, path, dot_prefix))
+}
+
+fn file_target_json(target: &nb::FileTarget) -> J {
+    match target {
+        nb::FileTarget::Notebook { path, exists } => J::Obj(vec![
+            ("kind", s("notebook")),
+            ("path", s(path.as_str())),
+            ("exists", J::Bool(*exists)),
+        ]),
+        nb::FileTarget::Outside => J::Obj(vec![("kind", s("outside"))]),
+    }
+}
+
 /// A notebook: pages by name, and what follows from them. Call `free()` when done with it.
 #[wasm_bindgen]
 pub struct Notebook {
@@ -292,8 +355,88 @@ impl Notebook {
         .render()
     }
 
+    // ---- files (attachments): their paths only; the bytes are for the store
+
+    /// Record a file at `path` (relative to the notebook, `/` between folders). Throws, with a
+    /// message ready to show, if it can't be a file in a notebook.
+    #[wasm_bindgen(js_name = putFile)]
+    pub fn put_file(&mut self, path: &str) -> Result<(), JsError> {
+        self.inner
+            .put_file(path)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Forget the file at `path`. Whether there was one.
+    #[wasm_bindgen(js_name = removeFile)]
+    pub fn remove_file(&mut self, path: &str) -> bool {
+        self.inner.remove_file(path)
+    }
+
+    #[wasm_bindgen(js_name = hasFile)]
+    pub fn has_file(&self, path: &str) -> bool {
+        self.inner.has_file(path)
+    }
+
+    /// The path of a file as the notebook spells it (paths ignore case), if there is one.
+    #[wasm_bindgen(js_name = filePath)]
+    pub fn file_path(&self, path: &str) -> Option<String> {
+        self.inner.file_path(path).map(str::to_string)
+    }
+
+    /// Every file, in path order.
+    pub fn files(&self) -> Vec<String> {
+        self.inner.files().map(str::to_string).collect()
+    }
+
+    #[wasm_bindgen(js_name = fileCount)]
+    pub fn file_count(&self) -> usize {
+        self.inner.file_count()
+    }
+
+    /// The files in the folder named like `page`: its attachments.
+    #[wasm_bindgen(js_name = filesOf)]
+    pub fn files_of(&self, page: &str) -> Vec<String> {
+        nb::PageName::parse(page).map_or_else(|_| Vec::new(), |n| self.inner.files_of(&n))
+    }
+
+    /// The files in the folder named like `page` and in all folders below it.
+    #[wasm_bindgen(js_name = filesBelow)]
+    pub fn files_below(&self, page: &str) -> Vec<String> {
+        nb::PageName::parse(page).map_or_else(|_| Vec::new(), |n| self.inner.files_below(&n))
+    }
+
+    /// Forget the files `filesBelow` lists, and return them (what goes when a page is deleted).
+    #[wasm_bindgen(js_name = removeFilesBelow)]
+    pub fn remove_files_below(&mut self, page: &str) -> Vec<String> {
+        match nb::PageName::parse(page) {
+            Ok(n) => self.inner.remove_files_below(&n),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Where a file reference (the path of an image, or of a `[[./file]]` link) written on page
+    /// `from` leads, as JSON: `{kind: "notebook", path, exists}` or `{kind: "outside"}`.
+    #[wasm_bindgen(js_name = resolveFile)]
+    pub fn resolve_file(&self, from: &str, target: &str) -> Result<String, JsError> {
+        Ok(file_target_json(&self.inner.resolve_file(&name(from)?, target)).render())
+    }
+
+    /// The path for a new attachment of `page` that people call `wanted`: in the page's folder,
+    /// with a safe name that is not in use. Throws if `page` isn't a valid page name.
+    #[wasm_bindgen(js_name = attachmentPath)]
+    pub fn attachment_path(&self, page: &str, wanted: &str) -> Result<String, JsError> {
+        Ok(self.inner.attachment_path(&name(page)?, wanted))
+    }
+
+    /// The text that, written on `from` as a file reference, leads to the file at `path`.
+    #[wasm_bindgen(js_name = fileLink)]
+    pub fn file_link(&self, from: &str, path: &str) -> Result<String, JsError> {
+        Ok(self.inner.file_link(&name(from)?, path))
+    }
+
     /// Move a page and everything below it; with `updateLinks`, rewrite links so that every one
-    /// still leads where it did. JSON `{moved: [[from, to]], rewritten: [page], linksChanged}`.
+    /// still leads where it did. JSON `{moved: [[from, to]], rewritten: [page], linksChanged,
+    /// filesMoved: [[from, to]]}` (the files of the pages moved go with them).
     /// Throws, with a message ready to show, if the rename can't be done (and changes nothing).
     pub fn rename(&mut self, old: &str, new: &str, update_links: bool) -> Result<String, JsError> {
         let report = self
@@ -316,6 +459,16 @@ impl Notebook {
                 J::Arr(report.rewritten.iter().map(|n| s(n.as_str())).collect()),
             ),
             ("linksChanged", J::Num(report.links_changed)),
+            (
+                "filesMoved",
+                J::Arr(
+                    report
+                        .files_moved
+                        .iter()
+                        .map(|(from, to)| J::Arr(vec![s(from.as_str()), s(to.as_str())]))
+                        .collect(),
+                ),
+            ),
         ])
         .render())
     }
@@ -408,12 +561,71 @@ mod tests {
             .expect("ok");
         assert_eq!(
             report,
-            r#"{"moved":[["Help:Links","Help:Linking"]],"rewritten":["Help","Start"],"linksChanged":2}"#
+            r#"{"moved":[["Help:Links","Help:Linking"]],"rewritten":["Help","Start"],"linksChanged":2,"filesMoved":[]}"#
         );
         assert!(nb.has("Help:Linking") && !nb.has("Help:Links"));
         assert!(nb.get("Start").unwrap().contains("[[Help:Linking]]"));
         assert_eq!(nb.remove_tree("Help"), ["Help", "Help:Linking"]);
         assert_eq!(nb.names(), ["Start"]);
+    }
+
+    #[test]
+    #[allow(clippy::ok_expect)]
+    fn files_cross_as_paths_and_a_rename_moves_them() {
+        let mut nb = sample();
+        for path in ["Help/Links/a.png", "Help/b.pdf", "top.png"] {
+            nb.put_file(path).ok().expect("a valid path");
+        }
+        // (the error for a path that can't be a file is a JsError, which exists only in the browser:
+        // the web package's tests cover it)
+        assert_eq!(nb.file_count(), 3);
+        assert_eq!(nb.files_of("Help"), ["Help/b.pdf"]);
+        assert_eq!(nb.files_below("help"), ["Help/b.pdf", "Help/Links/a.png"]);
+        assert_eq!(nb.file_path("HELP/B.PDF").as_deref(), Some("Help/b.pdf"));
+        assert_eq!(
+            nb.resolve_file("Help:Links", "./a.png").ok().expect("ok"),
+            r#"{"kind":"notebook","path":"Help/Links/a.png","exists":true}"#
+        );
+        assert_eq!(
+            nb.resolve_file("Help:Links", "../b.pdf").ok().expect("ok"),
+            r#"{"kind":"notebook","path":"Help/b.pdf","exists":true}"#
+        );
+        assert_eq!(
+            nb.resolve_file("Help:Links", "./nope.png").ok().expect("ok"),
+            r#"{"kind":"notebook","path":"Help/Links/nope.png","exists":false}"#
+        );
+        assert_eq!(
+            nb.resolve_file("Help:Links", "/etc/hosts").ok().expect("ok"),
+            r#"{"kind":"outside"}"#
+        );
+        assert_eq!(
+            nb.attachment_path("Help:Links", "a.png").ok().expect("ok"),
+            "Help/Links/a 2.png"
+        );
+        assert_eq!(
+            nb.file_link("Help:Links", "Help/b.pdf").ok().expect("ok"),
+            "../b.pdf"
+        );
+        let report = nb.rename("Help", "Docs", true).ok().expect("ok");
+        assert!(report.ends_with(
+            r#""filesMoved":[["Help/b.pdf","Docs/b.pdf"],["Help/Links/a.png","Docs/Links/a.png"]]}"#
+        ));
+        assert_eq!(nb.files(), ["Docs/b.pdf", "Docs/Links/a.png", "top.png"]);
+        assert_eq!(nb.remove_files_below("Docs"), ["Docs/b.pdf", "Docs/Links/a.png"]);
+        assert_eq!(nb.files(), ["top.png"]);
+        assert!(nb.remove_file("TOP.png"));
+        assert_eq!(check_file_path("a/../b").as_deref().map(|m| m.contains("..")), Some(true));
+        assert_eq!(check_file_path("a/b.png"), None);
+        assert_eq!(safe_file_name("a/b?.png"), "b_.png");
+    }
+
+    #[test]
+    fn images_are_reported_in_utf16_units() {
+        let text = "😀 {{./a b.png?width=20&x|Alt}} and {{id: here}} {{../c.png}}\n";
+        assert_eq!(
+            images_in(text),
+            r#"[{"start":3,"end":31,"pathStart":5,"pathEnd":14,"path":"./a b.png","query":[["width","20"],["x",null]],"alt":"Alt"},{"start":49,"end":61,"pathStart":51,"pathEnd":59,"path":"../c.png","query":[],"alt":null}]"#
+        );
     }
 
     #[test]

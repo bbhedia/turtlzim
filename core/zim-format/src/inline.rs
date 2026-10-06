@@ -251,17 +251,8 @@ fn try_match_markup(s: &str, i: usize, allow_tags: bool) -> Option<(usize, Inlin
             return None;
         }
         if let Some(end) = after.find("}}") {
-            let content = &after[..end];
-            let (before_alt, alt) = match content.rfind('|') {
-                Some(p) => (&content[..p], Some(content[p + 1..].to_string())),
-                None => (content, None),
-            };
-            let (path, query) = match before_alt.find('?') {
-                Some(p) => (before_alt[..p].to_string(), parse_query(&before_alt[p + 1..])),
-                None => (before_alt.to_string(), Vec::new()),
-            };
             let consumed = 2 + end + 2;
-            return Some((consumed, Inline::Image(Image { path, query, alt })));
+            return Some((consumed, Inline::Image(parse_image(&after[..end]))));
         }
         return None;
     }
@@ -421,6 +412,20 @@ fn find_close(haystack: &str, close: &str) -> Option<usize> {
         i += ch.len_utf8();
     }
     None
+}
+
+/// The parts of an image: what lies between its `{{` and `}}`. The alt text starts at the *last*
+/// `|`, and the query at the first `?` before it (`{{../a.png?width=600|Alt text}}`).
+pub fn parse_image(content: &str) -> Image {
+    let (before_alt, alt) = match content.rfind('|') {
+        Some(p) => (&content[..p], Some(content[p + 1..].to_string())),
+        None => (content, None),
+    };
+    let (path, query) = match before_alt.find('?') {
+        Some(p) => (before_alt[..p].to_string(), parse_query(&before_alt[p + 1..])),
+        None => (before_alt.to_string(), Vec::new()),
+    };
+    Image { path, query, alt }
 }
 
 /// Split the text after an image's `?` into its tokens. Only called when a `?`
