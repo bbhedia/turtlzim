@@ -15,9 +15,16 @@ export function isCheckbox(markerDetail: number): boolean {
   return markerDetail in CHECKBOXES;
 }
 
+/** Events the editor ignores inside a widget, except those about files being dragged over it (a drop on a bullet is a drop on the page). */
+const ignoresExceptDrag = (event: Event): boolean => !/^(drag|drop)/.test(event.type);
+
 export class BulletWidget extends WidgetType {
   eq(other: WidgetType): boolean {
     return other instanceof BulletWidget;
+  }
+
+  ignoreEvent(event: Event): boolean {
+    return ignoresExceptDrag(event);
   }
 
   toDOM(): HTMLElement {
@@ -51,13 +58,17 @@ export class CheckboxWidget extends WidgetType {
 
   // Let the editor see mouse presses on the box: the click handler in index.ts toggles it.
   ignoreEvent(event: Event): boolean {
-    return event.type !== "mousedown";
+    return event.type !== "mousedown" && ignoresExceptDrag(event);
   }
 }
 
 export class RuleWidget extends WidgetType {
   eq(other: WidgetType): boolean {
     return other instanceof RuleWidget;
+  }
+
+  ignoreEvent(event: Event): boolean {
+    return ignoresExceptDrag(event);
   }
 
   toDOM(): HTMLElement {
@@ -94,6 +105,10 @@ export class ChipWidget extends WidgetType {
     if (this.kind === "anchor") el.title = this.text;
     else if (this.title) el.title = this.title;
     return el;
+  }
+
+  ignoreEvent(event: Event): boolean {
+    return ignoresExceptDrag(event);
   }
 }
 

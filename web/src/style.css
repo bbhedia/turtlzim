@@ -184,7 +184,7 @@ mark { background: rgba(255, 213, 0, 0.35); color: inherit; border-radius: 2px; 
 /* ---- the page ---------------------------------------------------------------------------- */
 
 .page { grid-area: page; overflow: auto; min-width: 0; display: flex; flex-direction: column; }
-.pagebar, .notice, .editor-host, .backlinks { width: 100%; max-width: 54rem; margin-inline: auto; }
+.pagebar, .notice, .editor-host, .attachments, .backlinks { width: 100%; max-width: 54rem; margin-inline: auto; }
 .pagebar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.7rem 1rem 0.3rem; }
 .breadcrumb { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem; min-width: 0; }
 .crumb { border: 0; background: none; padding: 0.1rem 0.2rem; color: var(--zim-link); }
@@ -200,8 +200,20 @@ mark { background: rgba(255, 213, 0, 0.35); color: inherit; border-radius: 2px; 
 .editor-host { flex: 1 0 auto; }
 .editor-host .cm-editor { min-height: 55vh; }
 
-.backlinks { padding: 0.6rem 1rem 1.5rem; border-top: 1px solid var(--zim-border); margin-top: 1rem; }
-.backlinks summary { cursor: pointer; font-weight: 600; }
+.backlinks, .attachments { padding: 0.6rem 1rem 0.9rem; border-top: 1px solid var(--zim-border); margin-top: 1rem; }
+.backlinks { padding-bottom: 1.5rem; }
+.attachments + .backlinks { margin-top: 0; }
+/* files being dragged over the page */
+.page.dropping { outline: 2px dashed var(--zim-link); outline-offset: -6px; }
+.backlinks summary, .attachments summary { cursor: pointer; font-weight: 600; }
+.attachment-list { list-style: none; margin: 0.5rem 0 0; padding: 0; display: grid; gap: 0.5rem; }
+.attachment-list li { display: grid; grid-template-columns: 3rem minmax(0, 1fr) auto; align-items: center; gap: 0.2rem 0.7rem; }
+.attachment-list .thumb { width: 3rem; height: 2.4rem; display: grid; place-items: center; border-radius: 6px; background: var(--zim-code-bg); border: 1px solid var(--zim-border); overflow: hidden; color: var(--zim-muted); font-size: 0.7rem; text-transform: uppercase; }
+.attachment-list .thumb img { width: 100%; height: 100%; object-fit: cover; }
+.attachment-list .meta { color: var(--zim-muted); font-size: 0.82rem; }
+.attachment-list .actions { display: flex; gap: 0.35rem; }
+.attachment-list .actions button { font-size: 0.8rem; padding: 0.1rem 0.45rem; }
+.attachment-list .name { overflow-wrap: anywhere; }
 .backlink-list { list-style: none; margin: 0.5rem 0 0; padding: 0; display: grid; gap: 0.6rem; }
 .backlink-list .none { color: var(--zim-muted); }
 .link-button { border: 0; background: none; padding: 0; color: var(--zim-link); text-align: left; }

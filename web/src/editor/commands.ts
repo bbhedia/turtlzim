@@ -455,3 +455,29 @@ export function toggleCheckboxHere(cross = false): StateCommand {
     return toggleList("checkbox")({ state, dispatch });
   };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Inserting references (to attachments)
+
+/**
+ * Put `text` (a reference to an attachment, say) in the page, as a change: at `at` if that is given
+ * (where something was dropped), else in place of the selection, with the caret after it. At the end
+ * of the page, on a line of its own, if `at` is `"end"`, or if the place is a caret in the header
+ * block or at the very top of the page (the page was only just opened, and anything put there would
+ * break the header).
+ */
+export function insertReference(state: EditorState, text: string, at?: number | "end"): TransactionSpec {
+  const spans = spansOf(state);
+  // the header block and the blank line that ends it: the body starts below that
+  let bodyStart = spans.length > 0 && spans.kind(0) === Kind.Header ? spans.end(0) : 0;
+  while (bodyStart > 0 && bodyStart < state.doc.length && /[\r\n]/.test(state.sliceDoc(bodyStart, bodyStart + 1))) bodyStart++;
+  const main = state.selection.main;
+  const from = at === "end" ? 0 : (at ?? main.from);
+  const to = at === undefined ? main.to : from;
+  if (at === "end" || from < bodyStart || from === 0) {
+    const end = state.doc.length;
+    const insert = `${end > 0 && state.sliceDoc(end - 1, end) !== "\n" ? "\n" : ""}${text}\n`;
+    return { changes: { from: end, insert }, selection: EditorSelection.cursor(end + insert.length), scrollIntoView: true, userEvent: "input" };
+  }
+  return { changes: { from, to, insert: text }, selection: EditorSelection.cursor(from + text.length), scrollIntoView: true, userEvent: "input" };
+}

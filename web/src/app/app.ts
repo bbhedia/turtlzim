@@ -8,12 +8,12 @@ import { anchorsIn, checkPageName, classifyLink, newPageText, pageKey, zimTimest
 import type { Backlink, SearchHit } from "../notebook-core";
 import { FileUrls } from "../notebook/file-urls";
 import { IndexedDbStore } from "../notebook/idb";
-import { isImageType } from "../notebook/media";
+import { attachmentName, formatSize, isImageType } from "../notebook/media";
 import { createSampleNotebook } from "../notebook/sample";
 import { NotebookSession, createEmptyNotebook } from "../notebook/session";
 import type { SessionEvent } from "../notebook/session";
 import { MemoryStore } from "../notebook/store";
-import type { NotebookInfo, NotebookStore } from "../notebook/store";
+import type { FileInfo, NotebookInfo, NotebookStore } from "../notebook/store";
 import { isReadToImport, pagesFromFiles } from "../notebook/zim-files";
 import type { Imported, ImportedFile } from "../notebook/zim-files";
 import { createZip, readZip } from "../zip";
@@ -140,6 +140,11 @@ export class App {
     subpage: HTMLButtonElement;
     download: HTMLButtonElement;
     remove: HTMLButtonElement;
+    attach: HTMLButtonElement;
+    attachInput: HTMLInputElement;
+    attachments: HTMLDetailsElement;
+    attachmentCount: HTMLElement;
+    attachmentList: HTMLElement;
     folderInput: HTMLInputElement;
     zipInput: HTMLInputElement;
   };
@@ -186,10 +191,15 @@ export class App {
     const breadcrumb = h("nav", { class: "breadcrumb", "aria-label": "Page path" });
     const rename = h("button", { type: "button", text: "Rename", on: { click: () => void this.renamePage() } });
     const subpage = h("button", { type: "button", text: "New sub-page", on: { click: () => void this.newPage(this.current ? `${this.current.name}:` : "") } });
+    const attachInput = h("input", { type: "file", hidden: true, multiple: true, "aria-label": "Choose files to attach to this page", on: { change: () => { const files = [...(attachInput.files ?? [])]; attachInput.value = ""; if (files.length) void this.attachFiles(files); } } });
+    const attach = h("button", { type: "button", text: "Attach…", title: "Attach files or pictures to this page (you can also drop them on the page, or paste a picture)", on: { click: () => attachInput.click() } });
     const download = h("button", { type: "button", text: "Download", title: "Download this page as a .txt file", on: { click: () => this.downloadPage() } });
     const remove = h("button", { type: "button", class: "danger-text", text: "Delete", on: { click: () => void this.deletePage() } });
     const notice = h("div", { class: "notice", role: "status", hidden: true });
     const editorHost = h("div", { id: "editor", class: "editor-host" });
+    const attachmentCount = h("span", { class: "count" });
+    const attachmentList = h("ul", { class: "attachment-list" });
+    const attachments = h("details", { class: "attachments", open: true, hidden: true }, h("summary", {}, "Attachments ", attachmentCount), attachmentList);
     const backlinkCount = h("span", { class: "count" });
     const backlinkList = h("ul", { class: "backlink-list" });
     const backlinks = h("details", { class: "backlinks", open: true }, h("summary", {}, "Linked from ", backlinkCount), backlinkList);
@@ -202,7 +212,7 @@ export class App {
       h("div", { class: "sidebar-tools" }, button("Fold all", { on: { click: () => this.tree.foldAll(true) } }), button("Unfold all", { on: { click: () => this.tree.foldAll(false) } })),
       this.tree.element,
     );
-    const page = h("main", { class: "page" }, h("div", { class: "pagebar" }, breadcrumb, h("div", { class: "page-actions" }, rename, subpage, download, remove)), notice, editorHost, backlinks);
+    const page = h("main", { class: "page" }, h("div", { class: "pagebar" }, breadcrumb, h("div", { class: "page-actions" }, rename, subpage, attach, download, remove)), notice, editorHost, attachments, backlinks);
 
     root.append(
       h(
@@ -214,6 +224,7 @@ export class App {
         h("footer", { class: "statusbar" }, status, saveState),
         folderInput,
         zipInput,
+        attachInput,
       ),
     );
 
@@ -222,6 +233,7 @@ export class App {
       showMarkup: markup.checked,
       linkStatus: (target) => this.linkStatus(target),
       imageSource: (path) => this.imageSource(path),
+      onFiles: (files, at) => void this.attachFiles(files, at),
       onChange: () => this.onEditorChange(),
       onNavigate: (link) => void this.followLink(link),
     });
@@ -265,10 +277,41 @@ export class App {
       if (name && (!this.current || name !== this.current.name)) void this.openPage(name, { push: false });
     });
 
+    // Files dropped on the page are attached to it (the editor takes those dropped on the text, and says
+    // where); and a file dropped anywhere must never make the browser leave the app to show it.
+    const filesDragged = (e: DragEvent) => !!e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+    let dragDepth = 0;
+    const stopDropping = () => {
+      dragDepth = 0;
+      page.classList.remove("dropping");
+    };
+    page.addEventListener("dragenter", (e) => {
+      if (!filesDragged(e)) return;
+      dragDepth++;
+      page.classList.add("dropping");
+    });
+    page.addEventListener("dragleave", (e) => {
+      if (filesDragged(e) && --dragDepth <= 0) stopDropping();
+    });
+    page.addEventListener("dragover", (e) => {
+      if (!filesDragged(e)) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    });
+    page.addEventListener("drop", (e) => {
+      stopDropping();
+      if (!e.defaultPrevented && filesDragged(e)) {
+        e.preventDefault();
+        void this.attachFiles([...(e.dataTransfer?.files ?? [])], "end");
+      }
+    });
+    window.addEventListener("dragover", (e) => filesDragged(e) && e.preventDefault());
+    window.addEventListener("drop", (e) => filesDragged(e) && e.preventDefault());
+
     folderInput.addEventListener("change", () => void this.readPickedFiles(folderInput, "folder"));
     zipInput.addEventListener("change", () => void this.readPickedFiles(zipInput, "zip"));
 
-    return { root, page, sidebarToggle, notebookButton, notebookMenu, search, searchResults, markup, breadcrumb, notice, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, folderInput, zipInput };
+    return { root, page, sidebarToggle, notebookButton, notebookMenu, search, searchResults, markup, breadcrumb, notice, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, attach, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput };
   }
 
   private toggleSidebar(): void {
@@ -316,7 +359,10 @@ export class App {
     this.session?.close();
     this.urls?.close();
     this.session = session;
-    this.urls = new FileUrls(session, () => this.editor?.refreshLinks());
+    this.urls = new FileUrls(session, () => {
+      this.editor?.refreshLinks();
+      this.renderAttachments();
+    });
     this.current = null;
     session.onChange((event) => this.onSessionEvent(event));
     prefs.set("notebook", id);
@@ -344,6 +390,7 @@ export class App {
       this.urls?.sync();
       this.linkCache.clear();
       this.editor?.refreshLinks();
+      this.renderAttachments();
       return;
     }
     if (event.kind !== "structure") return;
@@ -353,6 +400,7 @@ export class App {
     if (this.current) {
       this.renderBreadcrumb();
       this.renderBacklinks();
+      this.renderAttachments();
       this.renderActions();
     }
   }
@@ -571,6 +619,7 @@ export class App {
     this.tree.setCurrent(spelled);
     this.renderBreadcrumb();
     this.renderBacklinks();
+    this.renderAttachments();
     this.renderActions();
     this.renderNotice();
     this.setSaveState("");
@@ -598,6 +647,7 @@ export class App {
     this.els.remove.disabled = !exists;
     this.els.download.disabled = !this.current?.exists;
     this.els.subpage.disabled = !this.current;
+    this.els.attach.disabled = !this.current;
   }
 
   private renderNotice(): void {
@@ -664,12 +714,91 @@ export class App {
     const resolved = this.session.resolveFile(this.current.name, target);
     if (resolved.kind === "outside") return this.say(`${target} is a path outside this notebook, which a browser can't open.`);
     if (!resolved.exists) return this.say(`There is no file ${resolved.path} in this notebook.`);
-    const info = this.session.fileInfo(resolved.path);
-    const blob = await this.session.fileBlob(resolved.path);
-    if (!info || !blob) return this.say(`${resolved.path} couldn't be read from this browser's storage.`);
+    await this.openAttachment(resolved.path);
+  }
+
+  /** Show an attachment: a picture large, anything else as a download. */
+  private async openAttachment(path: string): Promise<void> {
+    const info = this.session.fileInfo(path);
+    const blob = await this.session.fileBlob(path);
+    if (!info || !blob) return this.say(`${path} couldn't be read from this browser's storage.`);
     const name = info.path.slice(info.path.lastIndexOf("/") + 1);
     if (isImageType(blob.type)) await this.showPicture(name, blob);
     else this.downloadBlob(name, blob);
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // attachments
+
+  /** The text that refers to an attachment of the open page: a picture, or a link with the file's name. */
+  private referenceTo(path: string): string {
+    const link = this.session.fileLink(this.current?.name ?? "", path);
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    return isImageType(this.session.fileInfo(path)?.type ?? "") ? `{{${link}}}` : `[[${link}|${name}]]`;
+  }
+
+  /** Attach files to the open page and put what refers to them in the text: where they were dropped, or at the caret. */
+  private async attachFiles(files: File[], at?: number | "end"): Promise<void> {
+    if (!this.current) return;
+    const page = this.current.name;
+    const attached: string[] = [];
+    const problems: string[] = [];
+    for (const file of files) {
+      try {
+        attached.push(await this.session.addFile(page, file, attachmentName(file)));
+      } catch (error) {
+        problems.push(`${file.name || "a file"}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (attached.length > 0) {
+      // (the page may have been left while the files were stored: then they are attached, but nothing is inserted)
+      if (this.current?.name === page) this.editor.insert(attached.map((path) => this.referenceTo(path)).join("\n"), at);
+      const first = attached[0] as string;
+      this.say(`Attached ${attached.length === 1 ? first.slice(first.lastIndexOf("/") + 1) : count(attached.length, "file")} to ${page}.${problems.length ? ` ${problems.length} could not be attached.` : ""}`);
+    }
+    if (problems.length > 0) await showMessage("Some files could not be attached", ...problems.map((p) => h("p", { text: p })));
+  }
+
+  private renderAttachments(): void {
+    clear(this.els.attachmentList);
+    const files: FileInfo[] = this.current ? this.session.attachments(this.current.name) : [];
+    this.els.attachments.hidden = files.length === 0;
+    this.els.attachmentCount.textContent = `(${files.length})`;
+    for (const file of files) {
+      const name = file.path.slice(file.path.lastIndexOf("/") + 1);
+      const picture = isImageType(file.type) ? this.urls?.get(file.path) : undefined;
+      const dot = name.lastIndexOf(".");
+      const thumb = h("span", { class: "thumb", "aria-hidden": "true" }, picture?.status === "ready" ? h("img", { src: picture.url, alt: "" }) : dot > 0 ? name.slice(dot + 1, dot + 5).toLowerCase() : "file");
+      this.els.attachmentList.append(
+        h(
+          "li",
+          {},
+          thumb,
+          h("div", {}, h("button", { type: "button", class: "link-button name", text: name, title: "Open", on: { click: () => void this.openAttachment(file.path) } }), h("div", { class: "meta", text: `${formatSize(file.size)} · ${file.type || "unknown type"}` })),
+          h(
+            "div",
+            { class: "actions" },
+            h("button", { type: "button", text: "Insert", title: "Put a reference to it in the page at the caret", on: { click: () => this.editor.insert(this.referenceTo(file.path)) } }),
+            h("button", { type: "button", text: "Download", on: { click: () => void this.session.fileBlob(file.path).then((blob) => blob && this.downloadBlob(name, blob)) } }),
+            h("button", { type: "button", class: "danger-text", text: "Delete", on: { click: () => void this.removeAttachment(file.path) } }),
+          ),
+        ),
+      );
+    }
+  }
+
+  private async removeAttachment(path: string): Promise<void> {
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    await showDialog({
+      title: "Delete attachment",
+      body: [h("p", {}, "Delete ", h("strong", { text: name }), " from this notebook? This can't be undone."), "Pages that show it will show a missing picture."],
+      confirm: "Delete attachment",
+      danger: true,
+      submit: async () => {
+        await this.session.removeFile(path);
+        this.say(`Deleted ${name}.`);
+      },
+    });
   }
 
   /** A picture, large, in a dialog. It is an <img> and nothing else, so that nothing in it can run, whatever the file. */

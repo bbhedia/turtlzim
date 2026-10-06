@@ -40,6 +40,36 @@ another page found nearer. A heading's id is its text in lower case, spaces as `
 but letters, digits, `_` and `-` dropped (`Link to a heading or object` is `link-to-a-heading-or-object`,
 the manual's own example).
 
+## Files (`files.rs`)
+
+Zim keeps a page's attachments in the folder named like the page: `Usage/GTD_flowchart.png` is an
+attachment of `Usage`, and the same folder holds the page's sub-pages. A reference to a file in a
+page (`{{./a.png}}`, `[[../report.pdf]]`) is a path relative to *that folder*, so `./` is the page's
+own attachments and `../` is the folder above, where its text file is. (Zim's manual does exactly
+this: `Usage:Getting Things Done` has `{{../GTD_flowchart.png}}`; of the manual's 25 image
+references, all lead to a file that is there.) The crate knows paths only, never bytes.
+
+| Reference | Leads to |
+|---|---|
+| `./a.png`, `a.png`, `sub/a.png`, `../a.png`, `.\a.png` | the file in the page's folder (or below, or above it), compared without regard to case; `%20`-style escapes are decoded if the path as written isn't there |
+| `/abs`, `~/x`, `C:\x`, `\\host\share`, `https://…`, `file://…` | outside the notebook |
+| `../..` past the top of the notebook | outside the notebook |
+
+A reference to a file that isn't there still says where it would be. `relative_file_text` writes
+the text that leads to a file from a page (`./a.png`, `../a.png`), checked by resolving it.
+`safe_file_name` and `Notebook::attachment_path` name a new attachment so that it can't break a
+link or an image (no `/ \ ? # | [ ] { } < > : * " %`, no leading dot) and doesn't clash with another
+file (`a.png`, `a 2.png`, …). `images_in` reads `{{path?query|alt}}` (the parser's own reading,
+`zim_format::inline::parse_image`).
+
+**Rename moves the folder too**: a page and everything below it take the files in their folders
+along (`Foo/a.png` to `Bar/a.png`), also those of a section with no text of its own, and a move that
+would put a file on another one is refused, changing nothing. With `update_links`, **every
+reference that led to a file still does**: `./` references move with their page and need nothing,
+`../` references (and references on other pages to files that moved) are rewritten as the shortest
+`./` or `../` path that leads there from the page's new place, keeping the style it had (`a.png`
+stays without `./`). References to nothing, or outside the notebook, are left as written.
+
 ## Notebook (`notebook.rs`)
 
 `Notebook` holds `name -> text` and derives the rest: `tree()` (sections and pages in display order,
@@ -65,8 +95,14 @@ A rename that can't be done (nothing there, onto a page that exists, below itsel
 
 ## What verifies it
 
-* 49 tests: hand-written cases, including the manual's own worked example of relative links, and
-  search and snippets over text with markup in it.
+* Tests: hand-written cases, including the manual's own worked example of relative links, search
+  and snippets over text with markup in it, and `tests/files.rs` (resolution, relative text,
+  attachment names, images, and every rename behaviour for files).
+* The random rename test (6,000 notebooks) now also has files in the page folders, in folders no page
+  has, and at the top, and pages that refer to them in every style (right, wrong, outside, shouting
+  in capitals), and checks after each rename that every reference that led to a file still does, that
+  the files moved are exactly those in the renamed folder, and that a refused rename moved nothing.
+  Breaking the rewrite, losing a moved file, or not refusing a file clash each fail it.
 * **Zim's own manual notebook** (81 pages): all 301 page links resolve to existing pages. Weakening
   the lookup to "beside the page only" breaks 79 of them, and dropping underscore-as-space breaks
   161, so the test does discriminate.
@@ -76,12 +112,15 @@ A rename that can't be done (nothing there, onto a page that exists, below itsel
   (6,000 cases); backlinks equal a brute-force count (300 notebooks).
 * The same rename invariant on the real manual for eight renames (a section moving down a level, a
   nested page to the top, ...): `Help` to `Docs:Handbook` moves 27 pages and rewrites 77 links, and
-  every link still leads where it did. Run with `scripts/zim-golden.sh`.
+  every link still leads where it did; `Plugins` to `Addons` moves 40 pages and 32 files and
+  rewrites 43 links. Every one of the manual's 25 image references leads to a file that is there.
+  Run with `scripts/zim-golden.sh`.
 
 ## Not covered yet
 
 Unicode normalization (macOS file systems return decomposed names), Windows reserved names (`CON`),
-attachments and images (`./pic.png` is classified as a file link, nothing resolves it), the
+a folder that holds only attachments as a section of the tree (the files are kept and moved with
+their section; the folder is not a page), the `href` of an image when its page is renamed, the
 journal sections, tags, and full-text search beyond word matching (the core's SQLite FTS covers
 encrypted notebooks). The notebook's `home` page is the web app's business (`zim-web-app.md`): it
 comes from `notebook.zim` and follows the page when it is renamed.

@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createStaticServer } from "../scripts/serve.mjs";
 import { launchBrowser } from "./browser-launch.mjs";
+import { png } from "./pictures.mjs";
 
 const out = process.argv[2] ?? process.env.SCREENSHOTS;
 if (!out) {
@@ -69,6 +70,25 @@ page = await open({ width: 390, height: 800 });
 await shot(page, "7-phone-home");
 await page.locator(".icon-button").click();
 await shot(page, "8-phone-tree");
+await page.close();
+
+console.log("pictures and attachments");
+page = await open({ width: 1280, height: 820 });
+await goTo(page, "Projects:Garden");
+await page.locator('input[aria-label^="Choose files to attach"]').setInputFiles([
+  { name: "Bed 1.png", mimeType: "image/png", buffer: png(360, 160, [90, 160, 100]) },
+  { name: "Seed list.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4 a list of seeds") },
+]);
+await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 2);
+await page.evaluate(() => { const scroller = document.querySelector(".page"); scroller.scrollTop = scroller.scrollHeight; });
+await shot(page, "10-pictures-and-attachments");
+await page.locator("img.cm-zim-image").first().click({ modifiers: ["Control"] });
+await page.locator(".viewer-image").waitFor();
+await shot(page, "11-picture-viewer");
+await page.getByRole("button", { name: "Close", exact: true }).click();
+await goTo(page, "Ideas");
+await page.evaluate(() => window.__zim.editor.setText("====== Pictures that can't be shown ======\n\nNot in the notebook: {{./nothing-here.png}}\n\nOutside it: {{https://example.org/x.png|a picture from the web}}\n\nA file that isn't there: [[./gone.pdf]]\n"));
+await shot(page, "12-picture-states");
 await page.close();
 
 console.log("desktop, dark");

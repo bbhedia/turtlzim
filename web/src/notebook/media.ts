@@ -57,3 +57,43 @@ export function isImageType(type: string): boolean {
 export function typed(blob: Blob, path: string): Blob {
   return blob.type ? blob : new Blob([blob], { type: mediaTypeFor(path) });
 }
+
+const EXTENSIONS: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/avif": "avif",
+  "image/svg+xml": "svg",
+  "image/bmp": "bmp",
+};
+
+/** Whether a name is what a browser calls a picture that came from the clipboard (it has no real name). */
+function isNameless(name: string): boolean {
+  return name.trim() === "" || /^image\.(png|jpe?g|gif|webp|bmp)$/i.test(name.trim());
+}
+
+/**
+ * What to call a file that came with `name` (which may be empty or generic, as a pasted screenshot's
+ * is): its own name, or else when it was made, `Pasted image 2026-10-06 10.15.30.png`.
+ */
+export function attachmentName(file: { name: string; type: string }, now: Date = new Date()): string {
+  if (!isNameless(file.name)) return file.name;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}.${pad(now.getMinutes())}.${pad(now.getSeconds())}`;
+  const extension = EXTENSIONS[file.type.toLowerCase()] ?? (file.type.startsWith("image/") ? "png" : "bin");
+  return `Pasted ${file.type.startsWith("image/") ? "image" : "file"} ${stamp}.${extension}`;
+}
+
+/** A size for people: `812 B`, `3.4 KB`, `1.2 MB`. */
+export function formatSize(bytes: number): string {
+  if (bytes < 1000) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1000;
+  let unit = 0;
+  while (value >= 999.95 && unit < units.length - 1) {
+    value /= 1000;
+    unit++;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}

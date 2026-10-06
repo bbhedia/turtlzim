@@ -6,7 +6,7 @@ import { EditorState, Prec } from "@codemirror/state";
 import type { Extension } from "@codemirror/state";
 import { EditorView, drawSelection, highlightSpecialChars, keymap } from "@codemirror/view";
 import type { ViewUpdate } from "@codemirror/view";
-import { toggleCheckboxAt } from "./commands";
+import { insertReference, toggleCheckboxAt } from "./commands";
 import { zimKeymap } from "./keymap";
 import { decorationsField } from "./decorations";
 import { imageAt, linkAt } from "./links";
@@ -39,6 +39,12 @@ export interface ZimEditorOptions {
    * (a file arrived, or was added, removed or moved).
    */
   imageSource?: (path: string) => ImageSource;
+  /**
+   * Files were dropped on the editor, or an image was pasted (a clipboard that holds text too is
+   * pasted as text): the host decides what to do with them. `at` is where they were dropped, or the
+   * caret. Without this, files are left to the browser.
+   */
+  onFiles?: (files: File[], at: number) => void;
   /** Keep every syntax character visible (the default is live preview). */
   showMarkup?: boolean;
   /**
@@ -110,6 +116,7 @@ export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
       },
 
     }),
+    ...(options.onFiles ? [fileHandlers(options.onFiles)] : []),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) options.onChange?.(update);
     }),
@@ -119,6 +126,35 @@ export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
     keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
     ...(options.extensions ?? []),
   ];
+}
+
+/** Files pasted (an image, with no text beside it) or dropped become `onFiles`; the rest is the editor's. */
+function fileHandlers(onFiles: (files: File[], at: number) => void): Extension {
+  const filesOf = (data: DataTransfer | null): File[] => (data ? [...data.files] : []);
+  const dragsFiles = (data: DataTransfer | null): boolean => !!data && [...data.types].includes("Files");
+  return EditorView.domEventHandlers({
+    paste(event, view) {
+      const files = filesOf(event.clipboardData);
+      // A clipboard with text and a picture (a spreadsheet's cells, say) is meant as text.
+      if (files.length === 0 || view.state.readOnly || [...(event.clipboardData?.types ?? [])].includes("text/plain")) return false;
+      event.preventDefault();
+      onFiles(files, view.state.selection.main.head);
+      return true;
+    },
+    dragover(event, view) {
+      if (view.state.readOnly || !dragsFiles(event.dataTransfer)) return false;
+      event.preventDefault(); // without this the browser would not let the files be dropped here
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      return true;
+    },
+    drop(event, view) {
+      const files = filesOf(event.dataTransfer);
+      if (files.length === 0 || view.state.readOnly) return false;
+      event.preventDefault(); // (the editor's own way with a dropped file is to read it as text)
+      onFiles(files, view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.head);
+      return true;
+    },
+  });
 }
 
 export interface ZimEditor {
@@ -136,6 +172,11 @@ export interface ZimEditor {
    */
   goTo(position: number, options?: { focus?: boolean; scroll?: boolean }): void;
   focus(): void;
+  /**
+   * Put `text` at position `at`, or in place of the selection, with the caret after it, and focus the
+   * editor. A caret in the header, or at the top of the page, is no place: the text goes at the end.
+   */
+  insert(text: string, at?: number | "end"): void;
   destroy(): void;
 }
 
@@ -165,6 +206,10 @@ export function createZimEditor(parent: HTMLElement, doc = "", options: ZimEdito
       if (goOptions.focus) view.focus();
     },
     focus: () => view.focus(),
+    insert(text, at) {
+      view.dispatch(insertReference(view.state, text, typeof at === "number" ? Math.min(at, view.state.doc.length) : at));
+      view.focus();
+    },
     destroy: () => view.destroy(),
   };
 }

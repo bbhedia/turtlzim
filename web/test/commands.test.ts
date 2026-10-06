@@ -8,6 +8,7 @@ import {
   indentLess,
   indentMore,
   insertLink,
+  insertReference,
   listBackspace,
   listEnter,
   nextMarker,
@@ -282,5 +283,68 @@ describe("the keymap", () => {
 
   it("binds each key once", () => {
     expect(new Set(keys).size).toBe(keys.length);
+  });
+});
+
+describe("inserting a reference to an attachment", () => {
+  const run = (doc: string, caret: number | [number, number], text: string, at?: number) => {
+    const state = EditorState.create({
+      doc,
+      selection: typeof caret === "number" ? EditorSelection.cursor(caret) : EditorSelection.single(caret[0], caret[1]),
+      extensions: zimExtensions({}),
+    });
+    return state.update(insertReference(state, text, at)).state;
+  };
+  const page = "Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== Title ======\nSome text here.\n";
+
+  it("goes where the caret is, which ends up after it", () => {
+    const at = page.indexOf("text here");
+    const after = run(page, at, "{{./a.png}}");
+    expect(after.doc.toString()).toBe(page.slice(0, at) + "{{./a.png}}" + page.slice(at));
+    expect(after.selection.main.head).toBe(at + "{{./a.png}}".length);
+  });
+
+  it("replaces a selection", () => {
+    const from = page.indexOf("Some");
+    const after = run(page, [from, from + 4], "[[./x.pdf|x.pdf]]");
+    expect(after.doc.toString()).toContain("====== Title ======\n[[./x.pdf|x.pdf]] text here.\n");
+  });
+
+  it("goes where something was dropped, not where the caret is", () => {
+    const at = page.indexOf("here");
+    const after = run(page, page.indexOf("Some"), "{{./d.png}}", at);
+    expect(after.doc.toString()).toContain("Some text {{./d.png}}here.");
+  });
+
+  it("goes at the end of the page, on a line of its own, when the caret is in the header or at the top", () => {
+    for (const caret of [0, 5, page.indexOf("Wiki-Format"), page.indexOf("\n\n====") + 1]) {
+      const after = run(page, caret, "{{./a.png}}");
+      expect(after.doc.toString(), `caret ${caret}`).toBe(`${page}{{./a.png}}\n`);
+      expect(after.selection.main.head).toBe(after.doc.length);
+    }
+    // and a drop in the header is the same
+    expect(run(page, page.indexOf("Some"), "{{./a.png}}", 3).doc.toString()).toBe(`${page}{{./a.png}}\n`);
+    // a page that doesn't end with a line break gets one first
+    expect(run("====== T ======\ntext", 0, "{{./a.png}}").doc.toString()).toBe("====== T ======\ntext\n{{./a.png}}\n");
+    // a page with nothing in it
+    expect(run("", 0, "{{./a.png}}").doc.toString()).toBe("{{./a.png}}\n");
+  });
+
+  it("does not take a caret just below the header for the header", () => {
+    const body = page.indexOf("====== Title");
+    const after = run(page, body, "{{./a.png}}");
+    expect(after.doc.toString()).toBe(page.slice(0, body) + "{{./a.png}}" + page.slice(body));
+  });
+});
+
+describe("appending a reference to the end of the page", () => {
+  it("puts it on a line of its own at the end, wherever the caret is", () => {
+    const page = "Content-Type: text/x-zim-wiki\n\n====== Title ======\nSome text here.\n";
+    const state = EditorState.create({ doc: page, selection: EditorSelection.cursor(page.indexOf("text")), extensions: zimExtensions({}) });
+    const after = state.update(insertReference(state, "{{./a.png}}", "end")).state;
+    expect(after.doc.toString()).toBe(`${page}{{./a.png}}\n`);
+    expect(after.selection.main.head).toBe(after.doc.length);
+    const noBreak = EditorState.create({ doc: "text", extensions: zimExtensions({}) });
+    expect(noBreak.update(insertReference(noBreak, "{{./a.png}}", "end")).state.doc.toString()).toBe("text\n{{./a.png}}\n");
   });
 });

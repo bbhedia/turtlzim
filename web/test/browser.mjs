@@ -21,6 +21,7 @@ import { delimiter, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createStaticServer } from "../scripts/serve.mjs";
 import { launchBrowser } from "./browser-launch.mjs";
+import { png } from "./pictures.mjs";
 
 const dist = fileURLToPath(new URL("../dist/", import.meta.url));
 if (!existsSync(join(dist, "index.html"))) {
@@ -193,6 +194,18 @@ function driver(page, context) {
     focusedRow: () => page.evaluate(() => document.activeElement?.dataset?.name ?? null),
     backlinks: () => page.locator(".backlink-list .link-button").allInnerTexts(),
     notebookTitle: () => page.locator(".notebook-title").innerText(),
+    attachInput: () => page.locator('input[aria-label^="Choose files to attach"]'),
+    /** Wait until the picture drawn for `{{...}}` number `index` (0 is the first) has loaded, and say how big it is drawn and in itself. */
+    picture: async (index = 0) => {
+      const image = page.locator("img.cm-zim-image").nth(index);
+      await image.waitFor();
+      await page.waitForFunction((i) => {
+        const img = document.querySelectorAll("img.cm-zim-image")[i];
+        return img && img.complete && img.naturalWidth > 0;
+      }, index);
+      return image.evaluate((img) => ({ drawn: [Math.round(img.getBoundingClientRect().width), Math.round(img.getBoundingClientRect().height)], natural: [img.naturalWidth, img.naturalHeight], alt: img.alt, src: img.src }));
+    },
+    attachmentNames: () => page.locator(".attachment-list .name").allInnerTexts(),
     reload: async () => {
       await page.reload();
       await ready(page);
@@ -281,6 +294,7 @@ const pathOfName = (name) => `${name.split(":").map((part) => part.replaceAll(" 
 const nameOfPath = (path) => path.slice(0, -".txt".length).split("/").map((part) => part.replaceAll("_", " ")).join(":");
 
 const utf8 = (text) => Buffer.from(text, "utf8");
+
 
 try {
   browser = await launchBrowser();
@@ -1169,6 +1183,315 @@ try {
     console.log("  (ZIM_GOLDEN_DIR has no notebook: the Zim manual is not imported)");
   }
 
+  // ==========================================================================================
+  // Attachments and pictures
+  // ==========================================================================================
+
+  const green = png(320, 180, [80, 160, 90]);
+  const gardenText = () => samplePages["Projects:Garden"];
+
+  await app("Attach… stores files in the page's folder, refers to them from the page, and shows the picture", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    await ui.attachInput().setInputFiles([
+      { name: "Bed 1.png", mimeType: "image/png", buffer: green },
+      { name: "Seed list.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4 not really a pdf") },
+    ]);
+    await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Attached 2 files"));
+    assertEqual(await ui.status(), "Attached 2 files to Projects:Garden.", "the status says so");
+    const text = await ui.text();
+    assert(text.startsWith(gardenText()), "the page is as it was, and what was added comes after it (not above its header)");
+    assertEqual(text.slice(gardenText().length), "{{./Bed 1.png}}\n[[./Seed list.pdf|Seed list.pdf]]\n", "a picture is referred to as a picture and another file as a link");
+    const paths = await page.evaluate(() => window.__zim.app.session.attachments("Projects:Garden").map((f) => f.path).sort());
+    assertDeepEqual(paths, ["Projects/Garden/Bed 1.png", "Projects/Garden/Seed list.pdf"], "the files are in the folder named like the page");
+    const shown = await ui.picture();
+    assertDeepEqual(shown.natural, [320, 180], "the picture is the one that was attached");
+    assertDeepEqual(shown.drawn, [320, 180], "drawn at its own size");
+    assert(shown.src.startsWith("blob:"), "from an object URL, not the network");
+    assertDeepEqual(await ui.attachmentNames(), ["Bed 1.png", "Seed list.pdf"], "the panel lists them");
+    assertEqual(await page.locator(".attachments summary .count").innerText(), "(2)", "with a count");
+    assertEqual(await page.locator(".attachment-list li").first().locator(".meta").innerText(), `${green.length} B · image/png`, "and their sizes and types");
+    assertEqual(await page.locator(".attachment-list li").first().locator(".thumb img").count(), 1, "a picture has a thumbnail");
+    // the same name again gets a free one
+    await ui.attachInput().setInputFiles([{ name: "Bed 1.png", mimeType: "image/png", buffer: green }]);
+    await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 3);
+    assertDeepEqual(await ui.attachmentNames(), ["Bed 1 2.png", "Bed 1.png", "Seed list.pdf"], "a second file of the same name is kept beside the first");
+    // it all survives a reload
+    await ui.flush();
+    await ui.reload();
+    const again = await ui.picture();
+    assertDeepEqual(again.natural, [320, 180], "the picture is still there after a reload");
+    assertEqual((await ui.attachmentNames()).length, 3, "and so are the attachments");
+  });
+
+  await app("a picture pasted from the clipboard is attached, unless the clipboard holds text", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Ideas");
+    const text = await ui.text();
+    const at = text.indexOf("* A rain barrel");
+    await ui.caretTo(at);
+    const paste = (withText) =>
+      page.evaluate(
+        ({ b64, withText }) => {
+          const data = new DataTransfer();
+          data.items.add(new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], "image.png", { type: "image/png" }));
+          if (withText) data.setData("text/plain", "just text");
+          const target = document.querySelector(".cm-content");
+          target.focus();
+          target.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+        },
+        { b64: png(60, 40, [200, 80, 80]).toString("base64"), withText },
+      );
+    await paste(false);
+    await page.waitForFunction(() => document.getElementById("status").textContent.startsWith("Attached Pasted image"));
+    const attached = await ui.text();
+    const name = (await ui.status()).match(/Attached (Pasted image [\d-]+ [\d.]+\.png) to Ideas\./)?.[1];
+    assert(name, `the picture was given a name from the time (${await ui.status()})`);
+    assertEqual(attached, text.slice(0, at) + `{{./${name}}}` + text.slice(at), "it is where the caret was");
+    await paste(true);
+    await ui.settle();
+    assert((await ui.text()).includes("just text"), "text on the clipboard is pasted as text");
+    assertEqual((await ui.attachmentNames()).length, 1, "and the picture beside it is not attached");
+  });
+
+  await app("files dropped on the page are attached where they were dropped, or at the end if dropped on the page beside the text", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Ideas");
+    const original = await ui.text();
+    const pointAt = (pos) =>
+      page.evaluate((pos) => {
+        const rect = window.__zim.editor.view.coordsAtPos(pos);
+        return { x: Math.round(rect.left) + 1, y: Math.round((rect.top + rect.bottom) / 2) };
+      }, pos);
+    /** Send one drag event for a file to whatever is at `point`; say whether the page shows that it takes files, and whether the event was left to the browser. */
+    const drag = (type, point, name = "dropped.png") =>
+      page.evaluate(
+        ({ type, x, y, b64, name }) => {
+          const data = new DataTransfer();
+          data.items.add(new File([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))], name, { type: "image/png" }));
+          const target = document.elementFromPoint(x, y);
+          const event = new DragEvent(type, { dataTransfer: data, bubbles: true, cancelable: true, clientX: x, clientY: y });
+          target.dispatchEvent(event);
+          return { showing: document.querySelector(".page").classList.contains("dropping"), prevented: event.defaultPrevented };
+        },
+        { type, ...point, b64: png(50, 50, [20, 20, 200]).toString("base64"), name },
+      );
+    const attachedFrom = async (name) => {
+      await page.waitForFunction((n) => document.getElementById("status").textContent.startsWith(`Attached ${n}`), name);
+    };
+
+    // in the middle of a line
+    const middle = original.indexOf("barrel");
+    const there = await pointAt(middle);
+    assertEqual((await drag("dragenter", there)).showing, true, "the page shows that it takes files while they are over it");
+    const over = await drag("dragover", there);
+    assertEqual(over.prevented, true, "and says that they may be dropped");
+    assertEqual((await drag("drop", there)).showing, false, "it stops showing it once they are dropped");
+    await attachedFrom("dropped.png");
+    assertEqual(await ui.text(), original.slice(0, middle) + "{{./dropped.png}}" + original.slice(middle), "the reference is where they were dropped");
+    assertEqual((await ui.picture()).natural.join("x"), "50x50", "and the picture is shown there");
+
+    // on a bullet (a widget stands where its characters are): the same
+    const text = await ui.text();
+    const bullet = text.indexOf("* A compost");
+    await ui.caretTo(text.length);
+    const onBullet = await pointAt(bullet);
+    await drag("drop", onBullet, "second.png");
+    await attachedFrom("second.png");
+    assertEqual((await ui.text()).slice(bullet, bullet + 18), "{{./second.png}}* ", "a drop on a bullet goes where the bullet is");
+
+    // on the page beside the text (below the editor): at the end of the page
+    const before = await ui.text();
+    const below = await page.evaluate(() => {
+      const rect = document.querySelector(".backlinks").getBoundingClientRect();
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + 4) };
+    });
+    await drag("drop", below, "third.png");
+    await attachedFrom("third.png");
+    assertEqual(await ui.text(), `${before}{{./third.png}}\n`, "a drop on the page, away from the text, puts the reference at the end");
+
+    // and a file dropped outside the page (on the tree) is not shown by the browser: the app stays
+    const url = page.url();
+    const onTree = await page.evaluate(() => {
+      const rect = document.querySelector("#sidebar").getBoundingClientRect();
+      return { x: Math.round(rect.left + 20), y: Math.round(rect.bottom - 20) };
+    });
+    const dropped = await drag("drop", onTree, "stray.png");
+    assertEqual(dropped.prevented, true, "the browser is told not to open it");
+    await ui.settle();
+    assertEqual(page.url(), url, "the app is still where it was");
+    assertEqual(await page.evaluate(() => window.__zim.app.session.fileCount), 3, "and nothing else was attached");
+  });
+
+  await app("the attachments panel inserts references, downloads files and deletes them", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Ideas");
+    const pdf = Buffer.from("%PDF-1.4 " + "x".repeat(2000));
+    await ui.attachInput().setInputFiles([{ name: "plan.pdf", mimeType: "application/pdf", buffer: pdf }, { name: "pic.png", mimeType: "image/png", buffer: png(30, 30, [0, 0, 0]) }]);
+    await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 2);
+    assertEqual(await page.locator(".attachment-list li").nth(1).locator(".meta").innerText(), "2.0 KB · application/pdf", "sizes are written for people");
+    // Insert puts a reference at the caret
+    const before = await ui.text();
+    const at = before.indexOf("* A compost bin");
+    await ui.caretTo(at);
+    await page.locator(".attachment-list li", { hasText: "plan.pdf" }).getByRole("button", { name: "Insert" }).click();
+    assertEqual(await ui.text(), before.slice(0, at) + "[[./plan.pdf|plan.pdf]]" + before.slice(at), "Insert puts a reference where the caret is");
+    // the name opens it: a file is downloaded
+    const opened = await ui.download(() => page.locator(".attachment-list li", { hasText: "plan.pdf" }).locator(".name").click());
+    assertEqual(opened.name, "plan.pdf", "a click on a file's name downloads it, under its name");
+    assert(opened.bytes.equals(pdf), "byte for byte");
+    const downloaded = await ui.download(() => page.locator(".attachment-list li", { hasText: "plan.pdf" }).getByRole("button", { name: "Download" }).click());
+    assert(downloaded.bytes.equals(pdf), "as does Download");
+    // Ctrl-click on the link in the page does the same
+    const viaLink = await ui.download(() => page.locator(".cm-zim-link", { hasText: "plan.pdf" }).first().click({ modifiers: ["Control"] }));
+    assert(viaLink.bytes.equals(pdf), "and so does following the link");
+    // Delete asks first
+    await page.locator(".attachment-list li", { hasText: "plan.pdf" }).getByRole("button", { name: "Delete" }).click();
+    const dialog = ui.dialog();
+    await dialog.waitFor();
+    assert((await dialog.innerText()).includes("Delete plan.pdf from this notebook?"), "the dialog says what goes");
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    assertEqual((await ui.attachmentNames()).length, 2, "cancelling deletes nothing");
+    await page.locator(".attachment-list li", { hasText: "plan.pdf" }).getByRole("button", { name: "Delete" }).click();
+    await ui.confirmDialog("Delete attachment");
+    assertDeepEqual(await ui.attachmentNames(), ["pic.png"], "it is gone from the panel");
+    assertEqual(await page.evaluate(() => window.__zim.app.session.fileCount), 1, "and from the notebook");
+    assertEqual(await page.locator(".cm-zim-link-missing", { hasText: "plan.pdf" }).count(), 2, "the links to it (the one attached, the one inserted) now lead nowhere, and are drawn that way");
+    assert((await ui.status()).includes("Deleted plan.pdf"), "the status says so");
+  });
+
+  await app("pictures are drawn at their own size or the one asked for, viewed large with Ctrl-click, and give their source on double-click", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Ideas");
+    await ui.attachInput().setInputFiles([{ name: "pic.png", mimeType: "image/png", buffer: png(200, 100, [10, 120, 200]) }]);
+    await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 1);
+    await ui.setText("{{./pic.png}}\n\n{{./pic.png?width=50}}\n\n{{./pic.png?height=40}}\n\n{{./pic.png?width=60&height=30}}\n\n{{./pic.png|Alt text}}\n\n{{./pic.png?href=Help:Links|goes to the links page}}\n");
+    await ui.caretTo(0);
+    await ui.settle();
+    const sizes = [];
+    for (let i = 0; i < 6; i++) sizes.push((await ui.picture(i)).drawn.join("x"));
+    assertDeepEqual(sizes, ["200x100", "50x25", "80x40", "60x30", "200x100", "200x100"], "its own size, or the width or height asked for (the other keeping the shape), or both");
+    assertEqual((await ui.picture(4)).alt, "Alt text", "the alt text is the picture's");
+    // Ctrl-click shows it large, in a dialog that holds a picture and nothing else
+    await page.locator("img.cm-zim-image").first().click({ modifiers: ["Control"] });
+    const viewer = ui.dialog();
+    await viewer.waitFor();
+    assertEqual(await viewer.locator("h2").innerText(), "pic.png", "the dialog is named for the file");
+    await page.waitForFunction(() => document.querySelector(".viewer-image")?.naturalWidth === 200);
+    assertEqual(await viewer.locator(".viewer-image").count(), 1, "it shows the picture");
+    const saved = await ui.download(() => viewer.getByRole("button", { name: "Download" }).click());
+    assertEqual(saved.name, "pic.png", "and offers it for download");
+    await viewer.getByRole("button", { name: "Close", exact: true }).click();
+    await viewer.waitFor({ state: "detached" });
+    // a plain click only puts the caret beside it
+    await page.locator("img.cm-zim-image").nth(1).click();
+    assertEqual(await page.locator(".viewer-image").count(), 0, "a plain click does not open it");
+    assertEqual(await page.locator("img.cm-zim-image").count(), 6, "and the pictures stay pictures while the caret is beside one");
+    // double-click selects the source, which shows
+    await page.locator("img.cm-zim-image").nth(1).dblclick();
+    const selected = await page.evaluate(() => {
+      const { state } = window.__zim.editor.view;
+      const range = state.selection.main;
+      return state.sliceDoc(range.from, range.to);
+    });
+    assertEqual(selected, "{{./pic.png?width=50}}", "double-click selects a picture's source");
+    assertEqual(await page.locator("img.cm-zim-image").count(), 5, "which is shown instead of the picture");
+    assertEqual(await page.locator(".cm-zim-image-source").innerText(), "{{./pic.png?width=50}}");
+    await ui.caretTo(0);
+    assertEqual(await page.locator("img.cm-zim-image").count(), 6, "and it is a picture again when the caret goes elsewhere");
+    // a picture with an href goes there
+    await page.locator("img.cm-zim-image").nth(5).click({ modifiers: ["Control"] });
+    await ui.waitCurrent("Help:Links");
+  });
+
+  await app("a picture that can't be shown says why, and nothing outside the notebook is fetched", {}, async (ui) => {
+    const { page } = ui;
+    const requests = [];
+    page.on("request", (request) => requests.push(request.url()));
+    await ui.goto("Ideas");
+    await ui.attachInput().setInputFiles([{ name: "doc.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4") }]);
+    await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 1);
+    await ui.setText("{{./nope.png|gone}}\n\n{{https://example.org/x.png|from the web}}\n\n{{./doc.pdf|not a picture}}\n\n{{/etc/hosts}}\n");
+    await ui.caretTo(0);
+    await ui.settle();
+    const chips = await page.locator(".cm-zim-chip-image").evaluateAll((els) => els.map((e) => [e.textContent, [...e.classList].find((c) => /^cm-zim-chip-(missing|outside|unsupported|loading|failed)$/.test(c)), e.title]));
+    assertDeepEqual(chips.map(([text, state]) => [text, state]), [["gone", "cm-zim-chip-missing"], ["from the web", "cm-zim-chip-outside"], ["not a picture", "cm-zim-chip-unsupported"], ["hosts", "cm-zim-chip-outside"]], "each says what it is");
+    assert(chips[0][2].includes("no such file") && chips[1][2].includes("not loaded") && chips[2][2].includes("not a picture"), "and why, on hover");
+    assertEqual(await page.locator("img.cm-zim-image").count(), 0, "none is drawn as a picture");
+    assert(!requests.some((url) => url.includes("example.org")), "an address outside the notebook is never fetched");
+  });
+
+  await app("files stay with their page when it is renamed, and go when it is deleted", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    await ui.attachInput().setInputFiles([{ name: "Bed 1.png", mimeType: "image/png", buffer: green }, { name: "notes.txt", mimeType: "text/plain", buffer: utf8("remember the beans") }]);
+    await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 2);
+    await ui.flush();
+    await page.getByRole("button", { name: "Rename", exact: true }).click();
+    const dialog = ui.dialog();
+    await dialog.waitFor();
+    assert((await dialog.innerText()).includes("The 1 page below it and its 2 attachments move with it."), `the dialog says what moves (${await dialog.innerText()})`);
+    await page.keyboard.type("Allotment");
+    await dialog.getByRole("button", { name: "Rename", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    await ui.waitCurrent("Projects:Allotment");
+    assertDeepEqual(await ui.attachmentNames(), ["Bed 1.png", "notes.txt"], "the page still has its attachments");
+    assertDeepEqual((await ui.picture()).natural, [320, 180], "and still shows the picture");
+    assertDeepEqual(await page.evaluate(() => window.__zim.app.session.attachments("Projects:Allotment").map((f) => f.path)), ["Projects/Allotment/Bed 1.png", "Projects/Allotment/notes.txt"], "they are in the folder of the new name");
+    assertEqual(await page.evaluate(() => window.__zim.app.session.attachments("Projects:Garden").length), 0, "and not in the old one");
+    // after a reload, still
+    await ui.reload();
+    assertDeepEqual((await ui.picture()).natural, [320, 180], "after a reload too");
+    // in the zip, at the new paths
+    const zip = await ui.download(async () => {
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "Export notebook (zip)" }).click();
+    });
+    const dir = join(work, "export-attached");
+    const names = unzip(zip.bytes, dir);
+    assert(names.includes("Projects/Allotment/Bed 1.png") && names.includes("Projects/Allotment/notes.txt"), `the export has them at those paths (${names.filter((n) => !n.endsWith(".txt") || n.includes("notes")).join(", ")})`);
+    assert(readFileSync(join(dir, "Projects/Allotment/Bed 1.png")).equals(green), "byte for byte");
+    // deleting the page deletes them, and the dialog says so
+    await page.locator(".page-actions").getByRole("button", { name: "Delete", exact: true }).click();
+    await dialog.waitFor();
+    assert((await dialog.innerText()).includes("Delete Projects:Allotment and the 1 page below it, and their 2 attachments?"), `the dialog says what goes (${await dialog.innerText()})`);
+    await dialog.getByRole("button", { name: "Delete 2 pages", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    assertEqual(await page.evaluate(() => window.__zim.app.session.fileCount), 0, "no attachment is left");
+    assertDeepEqual(await page.evaluate(async () => (await window.__zim.app.session.store.listFiles(window.__zim.app.session.info.id)).map((f) => f.path)), [], "in the store either");
+  });
+
+  await app("an attached picture or file cannot run anything: it is drawn as an image, or downloaded, never opened as a page", {}, async (ui) => {
+    const { page, context } = ui;
+    await page.evaluate(() => {
+      window.__pwned = 0;
+    });
+    await ui.goto("Ideas");
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" onload="window.__pwned=1"><script>window.__pwned=2</script><rect width="40" height="20" fill="red"/></svg>';
+    const html = "<!doctype html><script>window.__pwned = 3</script><h1>hello</h1>";
+    await ui.attachInput().setInputFiles([
+      { name: "evil.svg", mimeType: "image/svg+xml", buffer: utf8(svg) },
+      { name: "evil.html", mimeType: "text/html", buffer: utf8(html) },
+    ]);
+    await page.waitForFunction(() => document.querySelectorAll(".attachment-list li").length === 2);
+    const pagesBefore = context.pages().length;
+    const shown = await ui.picture();
+    assertDeepEqual(shown.natural, [40, 20], "the SVG is drawn, as a picture");
+    await page.locator("img.cm-zim-image").first().click({ modifiers: ["Control"] });
+    const viewer = ui.dialog();
+    await viewer.waitFor();
+    await page.waitForFunction(() => document.querySelector(".viewer-image")?.naturalWidth === 40);
+    await viewer.getByRole("button", { name: "Close", exact: true }).click();
+    await viewer.waitFor({ state: "detached" });
+    const downloaded = await ui.download(() => page.locator(".cm-zim-link", { hasText: "evil.html" }).click({ modifiers: ["Control"] }));
+    assertEqual(downloaded.name, "evil.html", "an HTML file is downloaded");
+    assert(downloaded.bytes.equals(utf8(html)), "as it is");
+    await ui.settle();
+    assertEqual(await page.evaluate(() => window.__pwned), 0, "nothing in either of them ran");
+    assertEqual(context.pages().length, pagesBefore, "and no window was opened for them");
+  });
+
   await app("a link that could run code is not followed; a web address opens in a window that can't reach this one", {}, async (ui) => {
     const { page, context } = ui;
     await ui.goto("Links test");
@@ -1213,7 +1536,7 @@ try {
     assert(await page.locator("#sidebar").isHidden(), "choosing a page closes the drawer");
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     assert(overflow <= 0, `the page does not scroll sideways (${overflow}px too wide)`);
-    for (const name of ["New page", "Rename", "Delete"]) {
+    for (const name of ["New page", "Rename", "Attach…", "Delete"]) {
       const box = await page.getByRole("button", { name, exact: true }).boundingBox();
       assert(box && box.x >= 0 && box.x + box.width <= 390, `the ${name} button is on the screen`);
     }

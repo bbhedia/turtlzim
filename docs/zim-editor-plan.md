@@ -205,9 +205,13 @@ selection shows it directly.
 
 ## Not done yet
 
-- **Images** are chips with a drawn icon; nothing is loaded. The notebook layer exists now, but it
-  does not store attachments yet, so there is nothing to resolve `./pictures/a.png` against
-  (`zim-web-app.md`, Not done yet).
+- **Images** are drawn as pictures when the host can say where each one comes from
+  (`imageSource`, see `zim-web-app.md`): the notebook app does, and keeps them as attachments.
+  Without a host, or when there is no picture to draw (no such file, outside the notebook, not a
+  picture the browser draws safely, still loading), an image is a chip that says which. A picture
+  stays drawn while the caret is beside it; selecting it, or placing the caret inside its source,
+  shows the source, and double-clicking selects it. Pictures, drops and pastes of files are the
+  host's: `onFiles`, `insert`.
 - **Completing page names** (typing `[[` to get a list of pages) is not there; following and
   drawing links is (the editor raises `onNavigate`, the app resolves it with the notebook rules).
 - **Tables and object blocks** (`{{{code ...}}}`) are shown raw, as the format crate keeps them opaque.

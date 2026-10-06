@@ -25,17 +25,28 @@ that choice will live.
   reads it*: `**bold**` is searched as `bold`, `[[Projects:Garden|the garden]]` as `the garden`, a
   heading without its `======`, a code block exactly as written. A snippet shows the words found in
   context, with the same markup left out.
+* **Attachments and pictures.** A page's attachments live in the folder named like it, as in Zim
+  (`Usage/GTD_flowchart.png` belongs to the page `Usage`). Attach files with the **Attach…** button,
+  by dropping them on the page (where they land, the reference goes there; elsewhere on the page, at
+  the end) or by pasting a picture (a clipboard that also holds text is pasted as text). A picture
+  is referred to as `{{./name.png}}` and drawn in the page, at its own size or the `width` and
+  `height` given; any other file as `[[./name.pdf|name.pdf]]`. Ctrl-click a picture to see it large
+  (or follow its `href`), double-click it to bring its source back; Ctrl-click a link to a file to
+  download it. A panel under the page lists its attachments, with thumbnails, and inserts,
+  downloads and deletes them. Attachments go with their page when it is renamed or deleted, and in
+  and out with import and export.
 * **A phone-sized screen** gets the tree as a drawer, and the top bar wraps.
 
 ## Layers
 
 | Layer | Where | Does |
 |---|---|---|
-| Rules | `core/zim-notebook` (Rust) | names, link resolution, tree, backlinks, search, rename that keeps links intact |
+| Rules | `core/zim-notebook` (Rust) | names, link resolution, file references (`files.rs`), tree, backlinks, search, rename that keeps links and file references intact |
 | Bindings | `core/zim-wasm`, `web/src/notebook-core.ts` | `NotebookModel` (wasm `Notebook`), page names, `plain` text, `newPageText`, paths |
 | Store | `web/src/notebook/store.ts`, `idb.ts` | where pages are kept: `MemoryStore`, `IndexedDbStore` |
 | Session | `web/src/notebook/session.ts` | an open notebook: the model over a store; every change is written to the store before it is announced |
-| Files | `web/src/notebook/zim-files.ts`, `web/src/zip.ts` | `notebook.zim`; folders and zips ⇄ pages |
+| Files | `web/src/notebook/zim-files.ts`, `media.ts`, `web/src/zip.ts` | `notebook.zim`; folders and zips ⇄ pages and attachments; media types |
+| Pictures | `web/src/notebook/file-urls.ts`, `web/src/editor/` | object URLs for stored pictures; the editor draws `{{images}}` from them |
 | App | `web/src/app/` | the interface: tree, dialogs, search, import and export, saving |
 
 The app holds no notebook rules of its own: what a link means, what a rename must rewrite and what
@@ -54,6 +65,12 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
    the page (`PageFile` in `zim-format`); a page is stored with both, and export and download write
    them back, so a notebook that came from Windows goes out as it came in with only the edits
    changed. Mixed line endings are kept raw. Files that aren't UTF-8 are refused, not converted.
+   **Attachments are Blobs beside the pages.** The store keeps each file as a `Blob` under its
+   notebook path (IndexedDB version 2 adds a `files` store; an older database is upgraded in place),
+   `listFiles` says what there is without reading bytes, and one atomic change covers pages and files:
+   *moves* first (a rename moves a folder with its pages; the bytes stay with each file), then
+   removals, then writes. The rules know only paths; where a reference leads, what a new attachment
+   is called, and what a rename must rewrite are in Rust (`zim-notebook`, `files.rs`).
 3. **Looking at a page does not make it.** A page that doesn't exist (a link's target, a section)
    is shown from a template and exists once it is written in. So following links around never
    litters the notebook.
@@ -75,10 +92,12 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
    it is searched as written.
 7. **Import never guesses.** `notebook.zim` marks the notebook's folder (otherwise the folder that
    was picked is dropped from every path); hidden files and folders are ignored; a `.txt` becomes a
-   page if its path is a valid page name and it is UTF-8; everything else that is not `notebook.zim`
-   is counted as an attachment (not imported yet) and every file that *should* have been a page but
-   was not is listed with the reason, in the import dialog, before anything is written. Pages come
-   in as a new notebook, or into the open one (the dialog says how many would be replaced).
+   page if its path is a valid page name and it is UTF-8; every other file that is not `notebook.zim`
+   becomes an attachment at its path (a folder named like a page holds that page's), unless its path
+   can't be a file or differs from another's only in case. Whatever is not taken in is listed with the
+   reason, in the import dialog, before anything is written. Attachments from a folder are not read
+   into memory until they are stored. Everything comes in as a new notebook, or into the open one
+   (the dialog says how many pages and files would be replaced).
 8. **Zip files, written by us and read from anyone.** The writer stores files uncompressed (short
    enough to verify; pages are small); the reader also inflates (`DecompressionStream`), because
    other programs compress. No Zip64: fewer than 65,535 files and under 4 GB, checked. Every entry's
@@ -92,6 +111,19 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
     `noopener,noreferrer`; `javascript://…` and `file:` links are refused with a message. The
     server's Content-Security-Policy (`script-src 'self' 'wasm-unsafe-eval'`) applies to the whole
     app, and the browser test runs under it, so a violation fails the test.
+11. **An attachment can't run.** A notebook can come from anywhere, so a file in it is treated as
+    hostile. Pictures (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, SVG) are shown only in an `<img>`,
+    where not even an SVG can run a script, and the large view is an `<img>` in a dialog; every other
+    file is *downloaded*, never opened as a page (an attached `.html` or `.svg` page would run in
+    the app's own origin). A picture outside the notebook (`https://…`, `/etc/…`) is never loaded:
+    a page could otherwise report that you read it. The browser test attaches an SVG and an HTML
+    file that try to set a flag and checks that neither does.
+12. **A file dropped anywhere is not shown by the browser.** The page takes any dropped file as an
+    attachment (the editor takes those dropped on the text, and says where), and the window refuses
+    the rest, so a slip of the mouse cannot make the browser leave the app for a file.
+13. **Nothing goes above the header.** With no caret placed (a page just opened), a reference
+    to a new attachment is added at the end of the page, on a line of its own, not at position 0: that
+    would be above the header block, which would then no longer be one.
 
 ## What verifies each layer
 
@@ -100,8 +132,9 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
 | Rules | `cargo test -p zim-notebook` (49 tests, property tests on random colliding notebooks) and, with `scripts/zim-golden.sh`, Zim's own manual: all 301 links resolve; renames keep every link leading where it did |
 | Plain text | `cargo test -p zim-format` (`tests/plain.rs`): every construct, and that what is hidden is hidden by the span model |
 | Bindings | `cargo test -p zim-wasm` (8) and `web/test/notebook-core.test.ts` (16) |
-| Stores | `web/test/store.test.ts`: the same contract on both stores, including atomicity under failure (`fake-indexeddb`) |
-| Session, files, zip | `web/test/session.test.ts` (rename/delete/failed write/export paths/import rules/zip round trips and damage) |
+| Stores | `web/test/store.test.ts`: the same contract on both stores, including files, moves (swaps, case-only), atomicity under failure, and opening a database made before files existed (`fake-indexeddb`) |
+| Session, files, zip | `web/test/session.test.ts` (rename/delete/failed write/export paths/import rules/zip round trips and damage; attachments through rename, delete and export; Zim's manual in and out, every file byte for byte) |
+| Pictures | `web/test/editor.test.ts` (images with a host: pictures, chips and why, caret and selection rules, Ctrl-click), `commands.test.ts` (where a reference goes), `file-urls.test.ts` (loading, stale addresses, failures not retried) |
 | **The app in Chromium** | `web/test/browser.mjs`: the scenarios below, on the built app, served by the same server `npm run serve` runs |
 | How it looks | `npm run screenshots <dir>`: nine screenshots (light, dark, phone, dialogs, search, menu) to look at |
 
@@ -113,13 +146,16 @@ creating a page by typing; backlinks; new page and sub-page with name checks; re
 after a reload everything is as renamed; without link updates; refused names); delete; sections;
 search; autosave and Ctrl+S across a reload; typing kept when the page closes in the middle of a
 write, and an old draft not overwriting a newer page; a failing store; a browser that keeps nothing
-(the app runs from memory, says so, and can still export); notebooks (new, switch,
+(the app runs from memory, says so, and can still export); attachments (the button, paste, drop on
+text, on a bullet, on the page and outside it; the panel; pictures at their sizes; the viewer; chips
+that say why a picture isn't shown; renaming and deleting a page with its files; SVG and HTML that
+must not run); notebooks (new, switch,
 rename, delete, delete the last); download and zip export read back by Python's `zipfile`; import of
 a folder with Windows files (BOM, CRLF, mixed endings, a Latin-1 file, case-clashing names, an
 invalid name, attachments, hidden files) edited and exported again; import into the open notebook;
-**the real Zim manual (81 pages) imported through the file chooser, searched and followed, exported
-and every page compared byte for byte, then imported again from our zip and from a deflate zip that
-Python made**; links that could run code; deep links; a phone-sized screen.
+**the real Zim manual (81 pages and 34 attachments) imported through the file chooser, searched
+and followed, exported and every file compared byte for byte, then imported again from our zip and
+from a deflate zip that Python made**; links that could run code; deep links; a phone-sized screen.
 
 ## Running it
 
@@ -142,9 +178,13 @@ typing can reproduce (found as a rare flake, bisected, and the stress loop went 
 
 ## Not done yet
 
-* **Images and attachments** are neither imported nor exported: they are counted in the import
-  dialog and left behind. `{{./pictures/a.png}}` stays a chip. Storing them (as blobs beside the
-  pages) and resolving `./` against the page's folder is the next layer.
+* **Big attachments** are held in memory while a notebook is exported (a zip is built whole), and the
+  zip has no Zip64, so a notebook over 4 GB can't be exported as one. Files are not streamed.
+* **Attachments of a page that has no text** (a folder of files with no `.txt` beside it) are kept,
+  moved with their section and exported, but don't make a section of their own in the tree.
+* **Rewriting an image's `href` when its page is renamed**: `{{pic.png?href=Page}}` is followed, but a
+  rename doesn't update the page named there (`[[links]]` are).
+* **Pictures are not resized or cached**: a 20 MB photo is a 20 MB `<img>`. No thumbnails are made.
 * **Two tabs on one notebook** do not see each other's changes until reload (no `BroadcastChannel`),
   and the last write to a page wins. The draft rule above keeps an old draft from replacing a newer
   page, but two tabs open on the same page can still overwrite each other.
