@@ -27,7 +27,7 @@ pub use block::{
 };
 pub use file::{LineEnding, PageFile};
 pub use header::HeaderField;
-pub use highlight::{highlight, to_utf16, Span, SpanKind};
+pub use highlight::{highlight, to_utf16, utf16_offsets, Span, SpanKind};
 pub use inline::{Image, Inline, Link};
 
 /// A parsed Zim wiki `.txt` page: an optional header block plus a body of

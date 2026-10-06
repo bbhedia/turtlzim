@@ -500,18 +500,22 @@ fn line_around(text: &str, at: usize) -> String {
     }
 }
 
-/// About 160 characters of `text` around byte `at`, on one line.
+/// About 160 characters of `text` around byte `at`, on one line. A window that would leave out only
+/// a few characters at an end reaches the end instead of starting or stopping with an ellipsis.
 fn snippet_around(text: &str, at: usize) -> String {
-    let before: Vec<(usize, char)> = text[..at].char_indices().rev().take(60).collect();
-    let from = before.last().map_or(at, |(i, _)| *i);
-    let to = text[at..]
-        .char_indices()
-        .nth(100)
-        .map_or(text.len(), |(i, _)| at + i);
-    let mut snippet = text[from..to]
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    const BEFORE: usize = 60;
+    const AFTER: usize = 100;
+    const CLOSE_ENOUGH: usize = 12;
+    let before: Vec<(usize, char)> = text[..at].char_indices().rev().take(BEFORE).collect();
+    let mut from = before.last().map_or(at, |(i, _)| *i);
+    let mut to = text[at..].char_indices().nth(AFTER).map_or(text.len(), |(i, _)| at + i);
+    if text[..from].chars().count() <= CLOSE_ENOUGH {
+        from = 0;
+    }
+    if text[to..].chars().count() <= CLOSE_ENOUGH {
+        to = text.len();
+    }
+    let mut snippet = text[from..to].split_whitespace().collect::<Vec<_>>().join(" ");
     if from > 0 {
         snippet.insert(0, '…');
     }

@@ -5,7 +5,7 @@
 mod common;
 use common::assert_spans_well_formed;
 use zim_format::highlight::{list_marker, opaque, VERBATIM_UNTERMINATED};
-use zim_format::{highlight, to_utf16, Span, SpanKind};
+use zim_format::{highlight, to_utf16, utf16_offsets, Span, SpanKind};
 
 /// One line per span: its kind (a marker shows its owner's), the exact text it covers, and its
 /// `detail` when that means something.
@@ -326,4 +326,13 @@ fn spans_of_a_hand_built_page_match_the_text_it_serializes_to() {
     let page = zim_format::parse(text);
     assert_eq!(page.spans(), highlight(text));
     let _: &[Span] = &page.spans();
+}
+
+#[test]
+fn the_utf16_offset_table_maps_every_byte() {
+    // a (1 byte, 1 unit), a smiley (4 bytes, 2 units), b (1 byte, 1 unit)
+    assert_eq!(utf16_offsets("a😀b"), [0, 1, 1, 1, 1, 3, 4]);
+    assert_eq!(utf16_offsets(""), [0]);
+    assert_eq!(utf16_offsets("é"), [0, 0, 1], "a byte inside a character maps to its start");
+    assert_eq!(utf16_offsets("日本"), [0, 0, 0, 1, 1, 1, 2]);
 }

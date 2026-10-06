@@ -1,17 +1,14 @@
 import type { EditorState } from "@codemirror/state";
 import { Kind } from "../kinds";
+import { classifyLink } from "../notebook-core";
+import type { LinkKind } from "../notebook-core";
 import { spansOf } from "./syntax";
 
-/**
- * What a link points at, as far as the editor can tell without a notebook to look in:
- * - `page`: another page of the notebook (`Page`, `:Absolute:Page`, `+Child`, `Namespace:Page#anchor`)
- * - `anchor`: a place on this page (`#anchor`)
- * - `url`: an address with a scheme (`https://...`)
- * - `file`: a `file:` address
- * - `email`: an address to mail
- * - `interwiki`: `key?page`, a page on another site named in the notebook's configuration
- */
-export type LinkKind = "page" | "anchor" | "url" | "file" | "email" | "interwiki";
+// What kind of target a link has (a page, a place on this page, an address, a file, an email address,
+// an interwiki link) is decided by the notebook rules in Rust, the same ones that resolve it:
+// `classifyLink` is those rules, not a second copy of them.
+export { classifyLink };
+export type { LinkKind };
 
 export interface LinkInfo {
   kind: LinkKind;
@@ -22,17 +19,6 @@ export interface LinkInfo {
   /** Where the link's source sits in the document. */
   from: number;
   to: number;
-}
-
-const EMAIL = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
-
-export function classifyLink(target: string): LinkKind {
-  if (/^file:/i.test(target)) return "file";
-  if (/^mailto:/i.test(target) || EMAIL.test(target)) return "email";
-  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(target)) return "url";
-  if (target.startsWith("#")) return "anchor";
-  if (/^[A-Za-z][\w-]*\?/.test(target)) return "interwiki";
-  return "page";
 }
 
 /** A bare email address is made a `mailto:` address; anything else is left exactly as written. */

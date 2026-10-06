@@ -175,13 +175,10 @@ impl Page {
     }
 }
 
-/// Convert byte offsets into UTF-16 offsets, the unit of JavaScript strings and CodeMirror
-/// positions. `text` must be the text the spans were made from.
-pub fn to_utf16(text: &str, spans: &[Span]) -> Vec<Span> {
-    if spans.is_empty() {
-        return Vec::new();
-    }
-    // table[b] = the UTF-16 offset of byte b (the one of its character, for continuation bytes).
+/// For every byte offset of `text` (and the end), the matching offset in UTF-16 units, the unit of
+/// JavaScript strings and CodeMirror positions. A byte inside a character maps to where that
+/// character starts.
+pub fn utf16_offsets(text: &str) -> Vec<usize> {
     let mut table = vec![0usize; text.len() + 1];
     let mut units = 0usize;
     for (b, ch) in text.char_indices() {
@@ -191,14 +188,17 @@ pub fn to_utf16(text: &str, spans: &[Span]) -> Vec<Span> {
         units += ch.len_utf16();
     }
     table[text.len()] = units;
-    spans
-        .iter()
-        .map(|s| Span {
-            start: table[s.start],
-            end: table[s.end],
-            ..*s
-        })
-        .collect()
+    table
+}
+
+/// Convert byte offsets into UTF-16 offsets, the unit of JavaScript strings and CodeMirror
+/// positions. `text` must be the text the spans were made from.
+pub fn to_utf16(text: &str, spans: &[Span]) -> Vec<Span> {
+    if spans.is_empty() {
+        return Vec::new();
+    }
+    let table = utf16_offsets(text);
+    spans.iter().map(|s| Span { start: table[s.start], end: table[s.end], ..*s }).collect()
 }
 
 /// Maps offsets in a block's inline text to offsets in the page.

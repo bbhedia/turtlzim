@@ -238,6 +238,23 @@ fn search_snippets_are_cut_on_character_boundaries() {
 }
 
 #[test]
+fn a_snippet_near_either_end_of_the_text_reaches_it() {
+    // 62 characters before the match: the window would skip only two, so it starts at the start;
+    // 12 characters would be left after it ("needle " and 105 more fill the 100 it shows)
+    let before = "x".repeat(62);
+    let after = "y".repeat(105);
+    let nb = notebook(&[("P", format!("{before} needle {after}").as_str())]);
+    let snippet = nb.search("needle", 1)[0].snippet.clone();
+    assert!(snippet.starts_with("xxxx") && snippet.ends_with("yyyy"), "{snippet}");
+    // far from the ends it is cut, with an ellipsis on each cut side
+    let before = "x".repeat(300);
+    let after = "y".repeat(300);
+    let nb = notebook(&[("P", format!("{before} needle {after}").as_str())]);
+    let snippet = nb.search("needle", 1)[0].snippet.clone();
+    assert!(snippet.starts_with('…') && snippet.ends_with('…') && snippet.contains("needle"), "{snippet}");
+}
+
+#[test]
 fn new_pages_start_the_way_zim_starts_them() {
     let text = new_page_text(&name("Projects:Garden:Plan"), "2026-10-06T09:41:03+02:00");
     assert_eq!(

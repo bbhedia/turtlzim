@@ -12,6 +12,11 @@
 //!
 //! Build it into the web package with `npm run wasm` in `web/`.
 
+mod json;
+mod notebook;
+
+pub use notebook::*;
+
 use wasm_bindgen::prelude::*;
 use zim_format::highlight::{list_marker, opaque, VERBATIM_UNTERMINATED};
 use zim_format::{LineEnding, PageFile, SpanKind};

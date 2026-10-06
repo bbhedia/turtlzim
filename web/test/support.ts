@@ -1,5 +1,5 @@
 // Test helpers shared by the unit tests and the browser test.
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, delimiter } from "node:path";
 import { Kind } from "../src/kinds";
 import type { Spans } from "../src/spans";
@@ -94,4 +94,21 @@ export function dump(text: string, spans: Spans): string[] {
     else lines.push(`${names[kind]} ${slice}${spans.detail(i) ? ` #${spans.detail(i)}` : ""}`);
   }
   return lines;
+}
+
+/** Every directory below the ones named by ZIM_GOLDEN_DIR that holds a `notebook.zim`: a Zim notebook. */
+export function notebookRoots(): string[] {
+  const dirs = (process.env.ZIM_GOLDEN_DIR ?? "").split(delimiter).filter(Boolean);
+  const roots: string[] = [];
+  const walk = (dir: string) => {
+    if (existsSync(join(dir, "notebook.zim"))) {
+      roots.push(dir);
+      return;
+    }
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.name.startsWith(".")) walk(join(dir, entry.name));
+    }
+  };
+  dirs.forEach(walk);
+  return roots;
 }

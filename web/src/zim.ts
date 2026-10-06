@@ -37,9 +37,12 @@ export function isZimReady(): boolean {
   return ready;
 }
 
-function assertReady(): void {
+/** Throw unless the wasm module has been loaded (every function that needs it calls this first). */
+export function assertZimReady(): void {
   if (!ready) throw new Error("the Zim wasm module isn't loaded: await initZim() first");
 }
+
+const assertReady = assertZimReady;
 
 /** The syntax spans of `text` (offsets in UTF-16 units). */
 export function highlight(text: string): Spans {

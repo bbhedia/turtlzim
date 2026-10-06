@@ -13,3 +13,10 @@ members = [
 exclude = [
     "core/turtl-core-rs",
 ]
+
+# Size matters for what a browser downloads, and these crates are small, so build them for size.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
