@@ -2,8 +2,10 @@
 
 The shared web UI decided on 2026-10-05 (CLAUDE.md, Open issues #1): one CodeMirror 6 editor that
 edits Zim wiki text "the way Zim does", reused by the browser app, the Tauri desktop shell and the
-Capacitor mobile shell. It is built first and standalone: no sync server, no account, no
-`turtl_core` (those come after; this package only needs a string in and a string out).
+Capacitor mobile shell. It was built first and standalone: no sync server, no account, no
+`turtl_core` (those come after; the editor only needs a string in and a string out). The notebook
+app built on top of it (pages, links, tree, search, import and export) is described in
+`zim-web-app.md`; the notebook rules it uses, in `zim-notebook.md`.
 
 ## Decisions
 
@@ -120,7 +122,7 @@ is a single block holding thousands of *unmatched* inline openers; see the spec'
 | File: bytes ⇄ {mark, line ending, text} | `core/zim-format/src/file.rs`, `decodePage`/`encodePage` in `core/zim-wasm` | 60,000 random files (every combination of `\r\n`, `\n`, `\r`, marks, multi-byte text) re-encode exactly; real Zim files; across the wasm boundary |
 | Syntax: text → spans | `core/zim-format/src/highlight.rs`, `highlight` in `core/zim-wasm` | see the span model above; again in TypeScript on every real page |
 | Editor logic: spans + selection → decorations, commands | `web/src/editor/` | Vitest, headless (CodeMirror's state layer needs no DOM) |
-| Editor in a browser: rendering, keystrokes, clicks, open/save | `web/test/browser.mjs` | real Chromium: every real Zim page loads and renders; typing and undo; checkbox clicks; Ctrl-click links; a CRLF+BOM file opened, edited and saved byte for byte; a mixed-endings file; a non-UTF-8 file refused |
+| Editor in a browser: rendering, keystrokes, clicks | `web/test/browser.mjs` | real Chromium: every real Zim page loads and renders; typing and undo; checkbox clicks; shortcuts and list editing; carriage returns shown and kept. The app scenarios of the same file (files in and out, links followed, saving) are listed in `zim-web-app.md` |
 
 ## Trying it from another machine
 
@@ -171,8 +173,9 @@ cd web && npm install && npm run wasm       # build the wasm into the web packag
 npm test                                    # Vitest (ZIM_GOLDEN_DIR=... adds the real pages)
 npm run build                               # typecheck + production build
 scripts/setup-browser.sh                    # once: Chromium, system libraries and a font, no root
-npm run test:browser                        # the built editor in a real browser
-SCREENSHOTS=dir npm run test:browser        # also writes screenshots: look at them
+npm run test:browser                        # the built app in a real browser
+SCREENSHOTS=dir npm run test:browser        # a failing scenario leaves a screenshot of the page in dir
+npm run screenshots dir                     # nine pictures of the app (light, dark, phone, dialogs): look at them
 ```
 
 **A browser needs a font to edit text.** On a machine with no fonts at all (typical for a server)
@@ -193,16 +196,20 @@ selection shows it directly.
 - [x] Editor: live formatting, live preview (markers dim or hide by caret), widgets (bullets,
       checkboxes with click-to-toggle, rules, image and anchor chips), block styling, link
       activation (Ctrl/Cmd-click), `createZimEditor` / `zimExtensions` API.
-- [x] Tests in a real browser on real Zim pages; demo page (open, save, show markup).
+- [x] Tests in a real browser on real Zim pages.
 - [x] Commands and keymap (inline toggles, headings, list continuation/indent/backspace, list kinds,
       checkboxes, links): 34 headless tests plus real key presses in the browser test.
+- [x] Notebook app around it (`zim-web-app.md`): page tree, links followed and drawn as missing,
+      backlinks, plain-text search, rename that keeps links intact, import and export of folders and
+      zips, saving that survives a reload or a closing page, phone layout.
 
 ## Not done yet
 
-- **Images** are chips with a drawn icon; nothing is loaded, because a standalone editor has no
-  notebook to resolve `./pictures/a.png` against. That arrives with the notebook layer.
-- **Internal links** only raise `onNavigate({kind: "page", target})`; resolving and completing page
-  names (typing `[[` to get a list) needs the notebook too.
+- **Images** are chips with a drawn icon; nothing is loaded. The notebook layer exists now, but it
+  does not store attachments yet, so there is nothing to resolve `./pictures/a.png` against
+  (`zim-web-app.md`, Not done yet).
+- **Completing page names** (typing `[[` to get a list of pages) is not there; following and
+  drawing links is (the editor raises `onNavigate`, the app resolves it with the notebook rules).
 - **Tables and object blocks** (`{{{code ...}}}`) are shown raw, as the format crate keeps them opaque.
 - **The header block** is shown, dimmed. Zim hides it; folding it is a small follow-up.
 - **Accessibility**: Tab is a list command (it traps keyboard focus, as most editors do; CodeMirror's

@@ -4,7 +4,7 @@ import { Decoration, EditorView } from "@codemirror/view";
 import type { DecorationSet } from "@codemirror/view";
 import { Kind, ListMarker, Opaque, VERBATIM_UNTERMINATED } from "../kinds";
 import type { Spans } from "../spans";
-import { setShowMarkup, showMarkupField, spansOf } from "./syntax";
+import { linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, spansOf } from "./syntax";
 import { BulletWidget, CheckboxWidget, ChipWidget, RuleWidget, isCheckbox } from "./widgets";
 
 /** The decorations of a document, and the subset of them that hide text (the caret skips those). */
@@ -22,7 +22,6 @@ const INLINE_CLASSES: Record<number, string> = {
   [Kind.InlineVerbatim]: "cm-zim-code-inline",
   [Kind.Superscript]: "cm-zim-sup",
   [Kind.Subscript]: "cm-zim-sub",
-  [Kind.Link]: "cm-zim-link",
   [Kind.LinkDisplay]: "cm-zim-link-display",
   [Kind.Tag]: "cm-zim-tag",
   [Kind.AutoUrl]: "cm-zim-url",
@@ -40,6 +39,8 @@ const INLINE_CLASSES: Record<number, string> = {
  */
 export function buildDecorations(state: EditorState, spans: Spans, showMarkup: boolean): Decorated {
   const doc = state.doc;
+  const linkStatus = state.facet(linkStatusFacet);
+  const statusOf = new Map<string, string>(); // each target is asked about once per rebuild
   const ranges = state.selection.ranges;
   const touches = (from: number, to: number): boolean => ranges.some((r) => r.from <= to && r.to >= from);
   const reveal = (from: number, to: number): boolean => showMarkup || touches(from, to);
@@ -142,6 +143,18 @@ export function buildDecorations(state: EditorState, spans: Spans, showMarkup: b
         break;
       }
 
+      case Kind.Link: {
+        let cls = "cm-zim-link";
+        const target = spans.next(Kind.LinkTarget, i, to);
+        if (linkStatus && target >= 0) {
+          const text = state.sliceDoc(spans.start(target), spans.end(target));
+          if (!statusOf.has(text)) statusOf.set(text, linkStatus(text));
+          if (statusOf.get(text) === "missing") cls += " cm-zim-link-missing";
+        }
+        mark(from, to, cls);
+        break;
+      }
+
       case Kind.LinkTarget:
         // With a display part (detail 1) the target is source, not text: hide it like the brackets.
         if (detail === 1 && parent >= 0 && !reveal(spans.start(parent), spans.end(parent))) replace(from, to);
@@ -184,7 +197,7 @@ function imageLabel(source: string): string {
 export const decorationsField = StateField.define<Decorated>({
   create: (state) => buildDecorations(state, spansOf(state), state.field(showMarkupField)),
   update(value, tr) {
-    const changed = tr.docChanged || tr.selection !== undefined || tr.effects.some((e) => e.is(setShowMarkup));
+    const changed = tr.docChanged || tr.selection !== undefined || tr.effects.some((e) => e.is(setShowMarkup) || e.is(refreshLinks));
     return changed ? buildDecorations(tr.state, spansOf(tr.state), tr.state.field(showMarkupField)) : value;
   },
   provide: (field) => [

@@ -23,7 +23,7 @@ This is a **notebook**: pages that link to each other, written in the Zim wiki f
 ===== Try this =====
 
 [ ] Open [[Projects:Garden]] and tick a task
-[ ] Rename a page (the pencil in the page bar) and watch the links to it follow
+[ ] Rename a page (the Rename button above it) and watch the links to it follow
 [ ] Follow a link to a page that doesn't exist, and start writing there
 [ ] Search for a word, then look at the backlinks of the page you land on
 `,

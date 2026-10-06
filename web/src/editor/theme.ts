@@ -59,6 +59,11 @@ export const zimTheme = EditorView.theme({
   ".cm-zim-link, .cm-zim-url": { color: "var(--zim-link, #0b57d0)", cursor: "pointer" },
   ".cm-zim-link-display, .cm-zim-link-target, .cm-zim-url": { textDecoration: "underline", textUnderlineOffset: "2px" },
   ".cm-zim-link .cm-zim-marker": { textDecoration: "none" },
+  // a link to a page that doesn't exist yet
+  ".cm-zim-link-missing, .cm-zim-link-missing .cm-zim-link-display, .cm-zim-link-missing .cm-zim-link-target": {
+    color: "var(--zim-missing, #b4521f)",
+    textDecorationStyle: "dashed",
+  },
 
   // syntax characters, while visible
   ".cm-zim-marker, .cm-zim-list-marker": {

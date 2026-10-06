@@ -95,6 +95,11 @@ export class NotebookSession {
     return this.model.get(name);
   }
 
+  /** When a page was last written (ms since the epoch), if there is such a page. */
+  modified(name: string): number | undefined {
+    return this.files.get(pageKey(name))?.modified;
+  }
+
   names(): string[] {
     return this.model.names();
   }
@@ -244,6 +249,13 @@ export class NotebookSession {
 
   // ---- leaving
 
+  /** One page as the file it would be (its bytes, with its own byte-order mark and line endings), at the path it has in a notebook folder. */
+  exportPage(name: string): ZipEntry | undefined {
+    if (!this.model.has(name)) return undefined;
+    const page = this.record(name);
+    return { path: pageToPath(page.name), bytes: encodePage({ text: page.text, bom: page.bom, lineEnding: page.lineEnding }), modified: new Date(page.modified) };
+  }
+
   /** The notebook as files: every page at its path with its own byte-order mark and line endings, and `notebook.zim`, so that Zim opens the folder. */
   exportFiles(): ZipEntry[] {
     const modified = (name: string) => new Date(this.files.get(pageKey(name))?.modified ?? Date.now());
@@ -260,7 +272,7 @@ export class NotebookSession {
 export async function createEmptyNotebook(store: NotebookStore, title: string, home = "Home"): Promise<NotebookInfo> {
   const page: StoredPage = {
     name: home,
-    text: newPageText(home, zimTimestamp()) + "\nThis notebook is empty. Make a page with the + next to the search box, or follow a link to a page that doesn't exist yet.\n",
+    text: newPageText(home, zimTimestamp()) + "\nThis notebook is empty. Make a page with New page, or follow a link to a page that doesn't exist yet.\n",
     bom: false,
     lineEnding: "lf",
     modified: Date.now(),

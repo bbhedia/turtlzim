@@ -11,7 +11,8 @@ import { zimKeymap } from "./keymap";
 import { decorationsField } from "./decorations";
 import { linkAt } from "./links";
 import type { LinkInfo } from "./links";
-import { setShowMarkup, showMarkupField, syntaxField } from "./syntax";
+import { linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, syntaxField } from "./syntax";
+import type { LinkStatus } from "./syntax";
 import { zimTheme } from "./theme";
 
 export { buildDecorations, decorationsField } from "./decorations";
@@ -19,13 +20,19 @@ export * as commands from "./commands";
 export { zimKeymap } from "./keymap";
 export { classifyLink, linkAt } from "./links";
 export type { LinkInfo, LinkKind } from "./links";
-export { setShowMarkup, showMarkupField, spansOf, syntaxField } from "./syntax";
+export { linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, spansOf, syntaxField } from "./syntax";
+export type { LinkStatus } from "./syntax";
 
 export interface ZimEditorOptions {
   /** Called after every change to the document. */
   onChange?: (update: ViewUpdate) => void;
   /** Called when the user follows a link (Ctrl/Cmd-click, or any click in a read-only editor). */
   onNavigate?: (link: LinkInfo) => void;
+  /**
+   * Whether a link's target leads to a page that exists (`"missing"` links are drawn differently).
+   * Call `refreshLinks()` on the editor when the answers may have changed.
+   */
+  linkStatus?: (target: string) => LinkStatus;
   /** Keep every syntax character visible (the default is live preview). */
   showMarkup?: boolean;
   /**
@@ -52,6 +59,7 @@ export interface ZimEditorOptions {
 export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
   return [
     ...(options.exactLineBreaks ? [EditorState.lineSeparator.of("\n")] : []),
+    ...(options.linkStatus ? [linkStatusFacet.of(options.linkStatus)] : []),
     syntaxField,
     showMarkupField.init(() => options.showMarkup ?? false),
     decorationsField,
@@ -99,6 +107,13 @@ export interface ZimEditor {
   /** Replace the whole page (the undo history starts over). */
   setText(text: string): void;
   setShowMarkup(show: boolean): void;
+  /** Draw the links again (the pages they lead to were added, removed or renamed). */
+  refreshLinks(): void;
+  /**
+   * Put the caret at `position` (a UTF-16 offset). By default the view scrolls to bring it to the
+   * top (to land on a heading); `scroll: false` only moves the caret, for opening a page.
+   */
+  goTo(position: number, options?: { focus?: boolean; scroll?: boolean }): void;
   focus(): void;
   destroy(): void;
 }
@@ -119,6 +134,14 @@ export function createZimEditor(parent: HTMLElement, doc = "", options: ZimEdito
     },
     setShowMarkup(show) {
       view.dispatch({ effects: setShowMarkup.of(show) });
+    },
+    refreshLinks() {
+      view.dispatch({ effects: refreshLinks.of(null) });
+    },
+    goTo(position, goOptions = {}) {
+      const at = Math.max(0, Math.min(position, view.state.doc.length));
+      view.dispatch({ selection: { anchor: at }, ...(goOptions.scroll === false ? {} : { effects: EditorView.scrollIntoView(at, { y: "start", yMargin: 24 }) }) });
+      if (goOptions.focus) view.focus();
     },
     focus: () => view.focus(),
     destroy: () => view.destroy(),

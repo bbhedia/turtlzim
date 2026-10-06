@@ -58,6 +58,20 @@ describe("a notebook session", () => {
     expect(events).toEqual(["page Home", "page New:Page", "structure"]);
   });
 
+  it("knows when each page was last written, which follows a page through a rename", async () => {
+    const s = await open([page("Home", "one", { modified: 100 }), page("Old", "two", { modified: 200 })]);
+    expect(s.modified("Home")).toBe(100);
+    expect(s.modified("home")).toBe(100);
+    expect(s.modified("Nope")).toBeUndefined();
+    const before = Date.now();
+    await s.save("Home", "changed");
+    expect(s.modified("Home")).toBeGreaterThanOrEqual(before);
+    expect(s.modified("Old")).toBe(200);
+    await s.rename("Old", "Newer:Name");
+    expect(s.modified("Old")).toBeUndefined();
+    expect(s.modified("Newer:Name")).toBe(200);
+  });
+
   it("makes new pages the way Zim does, spelled like the section they go in", async () => {
     const s = await open([page("Projects:Garden", "g")]);
     const name = await s.create("projects:Shed");
