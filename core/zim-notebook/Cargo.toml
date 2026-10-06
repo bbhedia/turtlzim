@@ -1,0 +1,9 @@
+[package]
+name = "zim-notebook"
+version = "0.1.0"
+edition = "2021"
+description = "Zim notebook semantics: page names, link resolution, the page tree, backlinks, and renames that keep links intact. Pure logic, no I/O: a storage backend feeds it pages."
+license = "GPL-3.0-or-later"
+
+[dependencies]
+zim-format = { path = "../zim-format" }

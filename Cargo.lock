@@ -187,6 +187,13 @@ name = "zim-format"
 version = "0.1.0"
 
 [[package]]
+name = "zim-notebook"
+version = "0.1.0"
+dependencies = [
+ "zim-format",
+]
+
+[[package]]
 name = "zim-wasm"
 version = "0.1.0"
 dependencies = [

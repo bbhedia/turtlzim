@@ -5,7 +5,8 @@
 # The pages are never copied into this repository (Zim is GPLv2; see the module docs of
 # core/zim-format/tests/golden_real_notebooks.rs). With no arguments this keeps a shallow
 # checkout of the Zim project in ~/.cache/turtlzim-labs/ (cloned on first use) and checks every
-# page in it: the user manual (a real 81-page notebook), the website, and Zim's own edge cases.
+# page in it: the user manual (a real 81-page notebook), the website, and Zim's own edge cases;
+# then checks the notebook rules (core/zim-notebook: links, tree, backlinks, renames) on the notebooks in it.
 # Give directories to check your own notebooks instead:
 #
 #     scripts/zim-golden.sh ~/Notebooks/Work ~/Notebooks/Home
@@ -27,3 +28,4 @@ fi
 
 # --release: the damaged-variants check parses ~16,000 pages, which takes a minute unoptimized.
 ZIM_GOLDEN_DIR=$corpus cargo test -p zim-format --release --test golden_real_notebooks -- --ignored --nocapture
+ZIM_GOLDEN_DIR=$corpus cargo test -p zim-notebook --release --test golden_notebooks -- --ignored --nocapture

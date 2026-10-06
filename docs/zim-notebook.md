@@ -1,0 +1,78 @@
+# Notebook semantics (`core/zim-notebook`)
+
+A Zim notebook is a set of pages with names; what the names mean, where a link leads, what the page
+tree looks like and what a rename must do to the links are rules, and they live in one pure Rust
+crate that every shell uses (the browser through wasm, the desktop and mobile shells natively). The
+crate does **no I/O**: a storage backend (a folder of `.txt` files, a database in the browser,
+encrypted records on a server) feeds it pages, so this layer does not decide *where* pages are kept
+or whether they are encrypted. The rules are Zim's, taken from its manual ("Pages", "Links"); no Zim
+source was read or copied.
+
+## Names (`name.rs`)
+
+`:` separates levels: `Projects:Garden:Plan` is the page `Plan` in the section `Garden` of `Projects`.
+Forbidden in a name: `? # / \ * " < > | %`, control characters, and a level starting with a dot (a
+hidden file, and `..` would leave the folder). Names compare **without regard to case** (two files
+differing only in case could not coexist on a case-insensitive file system) but keep their spelling,
+and an **underscore is a space** (`Auto_Formatting.txt` is `Auto Formatting`; this alone decides 161
+of the 301 links in Zim's manual). A section holding pages exists as a page too, with no text of its
+own. On disk a page is `Help/Auto_Formatting.txt`, and the folder `Help/Auto_Formatting/` holds its
+sub-pages and attachments.
+
+## Links (`link.rs`)
+
+| Target | Means |
+|---|---|
+| `scheme://...`, `mailto:...` | an address (`file://` is a file) |
+| contains `/` or `\` | a file (`./pictures/a.png`, `~/notes`, `/etc/hosts`) |
+| `#id` | a heading or anchor on the same page |
+| contains `?` | interwiki: `wp?wiki` |
+| `:Foo:Bar` | a page, from the top of the notebook |
+| `+Bar` | a sub-page of the page holding the link |
+| `Foo#id`, `:Foo#id` | a place in that page |
+| `Bar`, `Foo:Bar` | looked up **beside the page, then beside each of its parents**: the first section above the page that has a page named like the first part wins, and the rest follows it |
+
+A link to a page that doesn't exist yet still says which page it means: the one that would be
+created beside the page holding the link (or where the first part was found). `link_to(from, to)`
+writes the shortest text that resolves to `to` (`+Sub`, then the shortest tail of the name, then
+`:Full:Name`), *checking each candidate by resolving it*, because a short name can be shadowed by
+another page found nearer. A heading's id is its text in lower case, spaces as `-`, everything else
+but letters, digits, `_` and `-` dropped (`Link to a heading or object` is `link-to-a-heading-or-object`,
+the manual's own example).
+
+## Notebook (`notebook.rs`)
+
+`Notebook` holds `name -> text` and derives the rest: `tree()` (sections and pages in display order,
+case-insensitive, sections with no text marked), `backlinks(page)` (pages with a link that *resolves*
+to it, with the line of the first), `search(words)` (every word in the name or text, name matches
+first), `resolve`, `link_to`, and `rename(old, new, update_links)`.
+
+**Rename** moves the page and everything below it (`Foo` and `Foo:Bar` become `Baz` and `Baz:Bar`).
+With `update_links`, **every link that led to an existing page still leads to it afterwards**:
+links to moved pages are rewritten, and so are relative links on moved pages and any link whose
+meaning changed because a moved page now shadows (or no longer shadows) a name. A link keeps its
+character where it can (`:Absolute` stays absolute, `+Child` stays a child link) and its `#anchor`;
+links that led nowhere are left exactly as written; only link *targets* are edited. A section that
+only existed because of the pages that moved away is gone, and a link to it names a missing page.
+A rename that can't be done (nothing there, onto a page that exists, below itself) changes nothing.
+
+## What verifies it
+
+* 47 tests: hand-written cases, including the manual's own worked example of relative links.
+* **Zim's own manual notebook** (81 pages): all 301 page links resolve to existing pages. Weakening
+  the lookup to "beside the page only" breaks 79 of them, and dropping underscore-as-space breaks
+  161, so the test does discriminate.
+* Property tests on random notebooks of colliding names (`a:b:c`, `a:c`, ...): `link_to` always
+  leads to the page asked for (20,000 cases); after a random rename every link still leads to the
+  same (renamed) page, pages change in nothing but link targets, refused renames change nothing
+  (6,000 cases); backlinks equal a brute-force count (300 notebooks).
+* The same rename invariant on the real manual for eight renames (a section moving down a level, a
+  nested page to the top, ...): `Help` to `Docs:Handbook` moves 27 pages and rewrites 77 links, and
+  every link still leads where it did. Run with `scripts/zim-golden.sh`.
+
+## Not covered yet
+
+Unicode normalization (macOS file systems return decomposed names), Windows reserved names (`CON`),
+attachments and images (`./pic.png` is classified as a file link, nothing resolves it), the
+notebook's `home` page and journal sections, tags, and full-text search beyond substring matching
+(the core's SQLite FTS covers encrypted notebooks).
