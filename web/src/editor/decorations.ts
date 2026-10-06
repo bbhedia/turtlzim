@@ -4,8 +4,10 @@ import { Decoration, EditorView } from "@codemirror/view";
 import type { DecorationSet } from "@codemirror/view";
 import { Kind, ListMarker, Opaque, VERBATIM_UNTERMINATED } from "../kinds";
 import type { Spans } from "../spans";
-import { linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, spansOf } from "./syntax";
-import { BulletWidget, CheckboxWidget, ChipWidget, RuleWidget, isCheckbox } from "./widgets";
+import { imageParam, imagesIn } from "../notebook-core";
+import type { TextImage } from "../notebook-core";
+import { imageSourceFacet, linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, spansOf } from "./syntax";
+import { BulletWidget, CheckboxWidget, ChipWidget, ImageWidget, RuleWidget, isCheckbox } from "./widgets";
 
 /** The decorations of a document, and the subset of them that hide text (the caret skips those). */
 export interface Decorated {
@@ -40,10 +42,15 @@ const INLINE_CLASSES: Record<number, string> = {
 export function buildDecorations(state: EditorState, spans: Spans, showMarkup: boolean): Decorated {
   const doc = state.doc;
   const linkStatus = state.facet(linkStatusFacet);
+  const imageSource = state.facet(imageSourceFacet);
   const statusOf = new Map<string, string>(); // each target is asked about once per rebuild
+  const imageOf = new Map<string, TextImage | undefined>(); // and each image is read once
   const ranges = state.selection.ranges;
   const touches = (from: number, to: number): boolean => ranges.some((r) => r.from <= to && r.to >= from);
   const reveal = (from: number, to: number): boolean => showMarkup || touches(from, to);
+  // A picture stays a picture while the caret is beside it (arrowing past one must not make the page jump
+  // around); its source shows when it is selected, or the caret is inside the source.
+  const revealImage = (from: number, to: number): boolean => showMarkup || ranges.some((r) => r.from < to && r.to > from);
 
   const all: Range<Decoration>[] = [];
   const atomic: Range<Decoration>[] = [];
@@ -54,7 +61,7 @@ export function buildDecorations(state: EditorState, spans: Spans, showMarkup: b
   const mark = (from: number, to: number, cls: string): void => {
     if (from < to) all.push(Decoration.mark({ class: cls }).range(from, to));
   };
-  const replace = (from: number, to: number, widget?: BulletWidget | CheckboxWidget | ChipWidget | RuleWidget): void => {
+  const replace = (from: number, to: number, widget?: BulletWidget | CheckboxWidget | ChipWidget | ImageWidget | RuleWidget): void => {
     if (from >= to) return;
     const range = Decoration.replace(widget ? { widget } : {}).range(from, to);
     all.push(range);
@@ -161,13 +168,35 @@ export function buildDecorations(state: EditorState, spans: Spans, showMarkup: b
         else mark(from, to, "cm-zim-link-target");
         break;
 
-      case Kind.Image:
-        if (reveal(from, to)) mark(from, to, "cm-zim-image-source");
-        else {
-          replace(from, to, new ChipWidget("image", imageLabel(state.sliceDoc(from + 2, to - 2))));
-          skipUntil = to;
+      case Kind.Image: {
+        if (!imageSource ? reveal(from, to) : revealImage(from, to)) {
+          mark(from, to, "cm-zim-image-source");
+          break;
         }
+        const written = state.sliceDoc(from, to);
+        const label = imageLabel(written.slice(2, -2));
+        if (!imageSource) {
+          replace(from, to, new ChipWidget("image", label));
+        } else {
+          if (!imageOf.has(written)) imageOf.set(written, imagesIn(written)[0]);
+          const image = imageOf.get(written);
+          const source = image ? imageSource(image.path) : ({ status: "missing" } as const);
+          if (image && source.status === "ready") {
+            replace(from, to, new ImageWidget(source.url, image.path, image.alt ?? "", imageParam(image, "width"), imageParam(image, "height"), imageParam(image, "href") !== undefined));
+          } else {
+            const why: Record<string, string> = {
+              loading: "Loading the picture…",
+              missing: "There is no such file in this notebook.",
+              outside: "A picture outside the notebook is not loaded.",
+              unsupported: "This file is not a picture the browser can show safely.",
+              failed: "The picture could not be read from this browser's storage.",
+            };
+            replace(from, to, new ChipWidget("image", label, source.status, why[source.status] ?? ""));
+          }
+        }
+        skipUntil = to;
         break;
+      }
 
       case Kind.Anchor:
         if (reveal(from, to)) mark(from, to, "cm-zim-anchor-source");

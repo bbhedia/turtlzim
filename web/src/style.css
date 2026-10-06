@@ -228,6 +228,11 @@ mark { background: rgba(255, 213, 0, 0.35); color: inherit; border-radius: 2px; 
 .dialog-error:empty { display: none; }
 .check-row { display: flex; align-items: center; gap: 0.4rem; }
 .dialog-buttons { display: flex; justify-content: flex-end; gap: 0.5rem; }
+/* a picture shown large */
+.dialog:has(.viewer) { width: min(60rem, 94vw); }
+.viewer { max-height: 70vh; overflow: auto; text-align: center; background: var(--zim-code-bg); border-radius: 8px; padding: 0.5rem; }
+.viewer-image { max-width: 100%; height: auto; }
+.viewer-actions { display: flex; justify-content: flex-end; }
 .skipped { margin: 0; padding-left: 1.2rem; font-size: 0.85rem; color: var(--zim-muted); overflow-wrap: anywhere; }
 
 /* ---- narrow screens: the tree is an overlay, and the top bar takes two rows -------------------- */

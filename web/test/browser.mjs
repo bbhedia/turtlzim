@@ -1178,7 +1178,7 @@ try {
     await page.locator(".cm-zim-link", { hasText: "javascript:" }).click({ modifiers: ["Control"] });
     assert((await ui.status()).startsWith("Not opening javascript://alert(1)"), `the status says it was not opened (${await ui.status()})`);
     await page.locator(".cm-zim-link", { hasText: "file:" }).click({ modifiers: ["Control"] });
-    assert((await ui.status()).includes("can't be opened from a browser"), `a file link isn't opened either (${await ui.status()})`);
+    assert((await ui.status()).includes("outside this notebook"), `a path outside the notebook isn't opened either (${await ui.status()})`);
     assertEqual(context.pages().length, pagesBefore, "no window was opened");
     const [popup] = await Promise.all([context.waitForEvent("page"), page.locator(".cm-zim-link", { hasText: "opened-from-a-link" }).click({ modifiers: ["Control"] })]);
     await popup.waitForLoadState();

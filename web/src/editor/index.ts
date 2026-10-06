@@ -9,19 +9,19 @@ import type { ViewUpdate } from "@codemirror/view";
 import { toggleCheckboxAt } from "./commands";
 import { zimKeymap } from "./keymap";
 import { decorationsField } from "./decorations";
-import { linkAt } from "./links";
+import { imageAt, linkAt } from "./links";
 import type { LinkInfo } from "./links";
-import { linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, syntaxField } from "./syntax";
-import type { LinkStatus } from "./syntax";
+import { imageSourceFacet, linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, syntaxField } from "./syntax";
+import type { ImageSource, LinkStatus } from "./syntax";
 import { zimTheme } from "./theme";
 
 export { buildDecorations, decorationsField } from "./decorations";
 export * as commands from "./commands";
 export { zimKeymap } from "./keymap";
-export { classifyLink, linkAt } from "./links";
+export { classifyLink, imageAt, linkAt } from "./links";
 export type { LinkInfo, LinkKind } from "./links";
-export { linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, spansOf, syntaxField } from "./syntax";
-export type { LinkStatus } from "./syntax";
+export { imageSourceFacet, linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, spansOf, syntaxField } from "./syntax";
+export type { ImageSource, LinkStatus } from "./syntax";
 
 export interface ZimEditorOptions {
   /** Called after every change to the document. */
@@ -33,6 +33,12 @@ export interface ZimEditorOptions {
    * Call `refreshLinks()` on the editor when the answers may have changed.
    */
   linkStatus?: (target: string) => LinkStatus;
+  /**
+   * The picture behind an image's path as written (`./a.png`), so that images are drawn as pictures;
+   * without it they are chips with a name. Call `refreshLinks()` when the answers may have changed
+   * (a file arrived, or was added, removed or moved).
+   */
+  imageSource?: (path: string) => ImageSource;
   /** Keep every syntax character visible (the default is live preview). */
   showMarkup?: boolean;
   /**
@@ -60,6 +66,7 @@ export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
   return [
     ...(options.exactLineBreaks ? [EditorState.lineSeparator.of("\n")] : []),
     ...(options.linkStatus ? [linkStatusFacet.of(options.linkStatus)] : []),
+    ...(options.imageSource ? [imageSourceFacet.of(options.imageSource)] : []),
     syntaxField,
     showMarkupField.init(() => options.showMarkup ?? false),
     decorationsField,
@@ -71,6 +78,17 @@ export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
     EditorView.domEventHandlers({
       // A click on a checkbox widget toggles it (Shift-click: dropped instead of done).
       mousedown(event, view) {
+        // Double-clicking a picture selects its source, which brings the source back to be edited. (On the second
+        // press, before the editor selects a word: that would already have swapped the picture for its source.)
+        const picture = (event.target as HTMLElement | null)?.closest?.(".cm-zim-image");
+        if (picture && event.button === 0 && event.detail >= 2 && !view.state.readOnly) {
+          const info = imageAt(view.state, view.posAtDOM(picture));
+          if (info) {
+            view.dispatch({ selection: { anchor: info.from, head: info.to } });
+            event.preventDefault();
+            return true;
+          }
+        }
         const box = (event.target as HTMLElement | null)?.closest?.(".cm-zim-checkbox");
         if (!box || event.button !== 0 || view.state.readOnly) return false;
         const spec = toggleCheckboxAt(view.state, view.posAtDOM(box), event.shiftKey);
@@ -81,13 +99,16 @@ export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
       },
       click(event, view) {
         if (event.button !== 0 || !(event.ctrlKey || event.metaKey || view.state.readOnly)) return false;
-        const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
-        const link = pos === null ? null : linkAt(view.state, pos);
+        // A picture is followed as itself, not as whatever touches it.
+        const picture = (event.target as HTMLElement | null)?.closest?.(".cm-zim-image");
+        const pos = picture ? view.posAtDOM(picture) : view.posAtCoords({ x: event.clientX, y: event.clientY });
+        const link = pos === null ? null : picture ? imageAt(view.state, pos) : linkAt(view.state, pos);
         if (!link) return false;
         options.onNavigate?.(link);
         event.preventDefault();
         return true;
       },
+
     }),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) options.onChange?.(update);

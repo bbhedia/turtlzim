@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { beforeAll, describe, expect, it } from "vitest";
-import { buildDecorations, classifyLink, decorationsField, linkAt, spansOf, zimExtensions } from "../src/editor";
+import { buildDecorations, classifyLink, decorationsField, imageAt, linkAt, refreshLinks, spansOf, zimExtensions } from "../src/editor";
+import type { ImageSource } from "../src/editor";
 import { toggleCheckboxAt } from "../src/editor/commands";
-import { BulletWidget, CheckboxWidget, ChipWidget, RuleWidget } from "../src/editor/widgets";
+import { BulletWidget, CheckboxWidget, ChipWidget, ImageWidget, RuleWidget } from "../src/editor/widgets";
 import { ListMarker } from "../src/kinds";
 import { initZimSync } from "../src/zim";
 import { corpusFiles, readPage } from "./support";
@@ -179,6 +180,108 @@ describe("live preview: syntax characters hide until the caret reaches their con
     };
     expect(labelOf("{{./dir/photo.png?width=5}} end")).toBe("photo.png");
     expect(labelOf("{{./dir/photo.png|A nice photo}} end")).toBe("A nice photo");
+  });
+
+  describe("images, with a host that can show them", () => {
+    const sources: Record<string, ImageSource> = {
+      "./a.png": { status: "ready", url: "blob:a" },
+      "./slow.png": { status: "loading" },
+      "./gone.png": { status: "missing" },
+      "https://example.org/x.png": { status: "outside" },
+      "./doc.pdf": { status: "unsupported" },
+    };
+    const asked: string[] = [];
+    const withHost = (doc: string, caret?: number | [number, number], showMarkup = false): EditorState =>
+      EditorState.create({
+        doc,
+        ...(caret === undefined ? {} : { selection: typeof caret === "number" ? EditorSelection.cursor(caret) : EditorSelection.single(caret[0], caret[1]) }),
+        extensions: zimExtensions({
+          showMarkup,
+          imageSource: (path) => {
+            asked.push(path);
+            return sources[path] ?? { status: "missing" };
+          },
+        }),
+      });
+    const widgetsOf = (state: EditorState) => {
+      const found: Array<ImageWidget | ChipWidget> = [];
+      state.field(decorationsField).all.between(0, state.doc.length, (_f, _t, v) => {
+        const w = (v.spec as { widget?: unknown }).widget;
+        if (w instanceof ImageWidget || w instanceof ChipWidget) found.push(w);
+      });
+      return found;
+    };
+
+    it("draws a picture where the host has one, with its size, alt text and link", () => {
+      const doc = "x {{./a.png?width=120&height=80&href=Page|My photo}} y";
+      const [widget] = widgetsOf(withHost(doc, 0));
+      expect(widget).toBeInstanceOf(ImageWidget);
+      expect(widget).toMatchObject({ url: "blob:a", path: "./a.png", alt: "My photo", width: "120", height: "80", linked: true });
+      const [plain] = widgetsOf(withHost("{{./a.png}}", 0));
+      expect(plain).toMatchObject({ url: "blob:a", alt: "", width: undefined, height: undefined, linked: false });
+      // the widget replaces the whole source, markers and all
+      const state = withHost(doc, 0);
+      expect(decos(state).filter((d) => d.widget === "ImageWidget").map((d) => textOf(state, d))).toEqual(["{{./a.png?width=120&height=80&href=Page|My photo}}"]);
+      expect(decos(state).filter((d) => d.cls === "cm-zim-marker" || d.hidden)).toEqual([]);
+    });
+
+    it("draws a chip that says why, where there is no picture to draw", () => {
+      const chipFor = (path: string) => widgetsOf(withHost(`{{${path}|label}}`, 0))[0] as ChipWidget;
+      expect(chipFor("./slow.png")).toMatchObject({ kind: "image", state: "loading", text: "label" });
+      expect(chipFor("./gone.png")).toMatchObject({ state: "missing" });
+      expect(chipFor("./gone.png").title).toContain("no such file");
+      expect(chipFor("https://example.org/x.png")).toMatchObject({ state: "outside" });
+      expect(chipFor("./doc.pdf")).toMatchObject({ state: "unsupported" });
+      expect(chipFor("./unknown.png")).toMatchObject({ state: "missing" });
+    });
+
+    it("keeps the picture while the caret is beside it, and shows the source when it is selected or the caret is in it", () => {
+      const doc = "ab{{./a.png}}cd";
+      const [from, to] = [2, 13];
+      for (const caret of [from, to, 0, doc.length]) {
+        expect(widgetsOf(withHost(doc, caret)), `caret at ${caret}`).toHaveLength(1);
+      }
+      for (const selection of [[from, to], [0, doc.length], [from + 1, to - 1], [from - 1, from + 1]] as Array<[number, number]>) {
+        const state = withHost(doc, selection);
+        expect(widgetsOf(state), `selection ${selection}`).toHaveLength(0);
+        expect(decos(state).some((d) => d.cls === "cm-zim-image-source")).toBe(true);
+      }
+      expect(widgetsOf(withHost(doc, from + 4))).toHaveLength(0); // the caret inside the source
+      expect(widgetsOf(withHost(doc, 0, true))).toHaveLength(0); // show markup
+    });
+
+    it("asks the host once per image per drawing, with the path as written, and again when told to", () => {
+      asked.length = 0;
+      const state = withHost("{{./a.png}} {{./a.png|again}} {{./gone.png}}", 0);
+      expect(asked).toEqual(["./a.png", "./a.png", "./gone.png"]);
+      // a refresh draws it all again: a host whose answer changed is heard
+      sources["./gone.png"] = { status: "ready", url: "blob:now-there" };
+      const after = state.update({ effects: refreshLinks.of(null) }).state;
+      expect(widgetsOf(after).map((w) => (w instanceof ImageWidget ? w.url : w.state))).toEqual(["blob:a", "blob:a", "blob:now-there"]);
+      sources["./gone.png"] = { status: "missing" };
+    });
+
+    it("reuses the drawing of a picture that did not change", () => {
+      const a = new ImageWidget("blob:a", "./a.png", "alt", "10", undefined, false);
+      expect(a.eq(new ImageWidget("blob:a", "./a.png", "alt", "10", undefined, false))).toBe(true);
+      for (const other of [new ImageWidget("blob:b", "./a.png", "alt", "10", undefined, false), new ImageWidget("blob:a", "./a.png", "", "10", undefined, false), new ImageWidget("blob:a", "./a.png", "alt", "20", undefined, false), new ImageWidget("blob:a", "./a.png", "alt", "10", "5", false), new ImageWidget("blob:a", "./a.png", "alt", "10", undefined, true)]) {
+        expect(a.eq(other)).toBe(false);
+      }
+      expect(new ChipWidget("image", "x", "missing", "t").eq(new ChipWidget("image", "x", "loading", "t"))).toBe(false);
+    });
+
+    it("can be followed: Ctrl-click opens its picture, or goes where its href says", () => {
+      const doc = "{{./a.png?width=5|Alt}} and {{./b.png?href=Some:Page}} and [[Link]]";
+      const state = withHost(doc, 0);
+      expect(imageAt(state, 0)).toMatchObject({ kind: "image", target: "./a.png", label: "Alt", from: 0, to: 23 });
+      expect(imageAt(state, 0)?.href).toBeUndefined();
+      const second = doc.indexOf("{{./b.png");
+      expect(imageAt(state, second)).toMatchObject({ kind: "image", target: "./b.png", label: "./b.png", href: "Some:Page" });
+      expect(imageAt(state, second + 3)).toBeNull(); // only where a picture starts
+      // the revealed source can be followed too
+      expect(linkAt(state, doc.indexOf("a.png"))).toMatchObject({ kind: "image", target: "./a.png" });
+      expect(linkAt(state, doc.indexOf("Link"))).toMatchObject({ kind: "page", target: "Link" });
+    });
   });
 
   it("styles blocks line by line", () => {

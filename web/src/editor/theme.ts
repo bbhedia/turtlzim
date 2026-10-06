@@ -131,6 +131,16 @@ export const zimTheme = EditorView.theme({
     verticalAlign: "-0.04em",
     background: "linear-gradient(to top right, transparent 55%, currentColor 56%, currentColor 70%, transparent 71%)",
   },
+  // a picture, in place of its {{source}}
+  ".cm-zim-image": {
+    display: "inline-block",
+    maxWidth: "100%",
+    verticalAlign: "bottom",
+    borderRadius: "4px",
+    margin: ".15em 0",
+    cursor: "default",
+  },
+  ".cm-zim-image-linked": { cursor: "pointer", outline: "1px solid var(--zim-link, #0b57d0)", outlineOffset: "1px" },
   ".cm-zim-chip": {
     backgroundColor: "var(--zim-code-bg, #f0f1f3)",
     border: "1px solid var(--zim-border, #d0d7de)",
@@ -139,4 +149,7 @@ export const zimTheme = EditorView.theme({
     fontSize: ".9em",
     color: "var(--zim-muted, #57606a)",
   },
+  // a picture that can't be drawn says why: not found, outside the notebook, not a picture, unreadable
+  ".cm-zim-chip-missing, .cm-zim-chip-failed": { color: "var(--zim-missing, #b4521f)", borderStyle: "dashed", borderColor: "var(--zim-missing, #b4521f)" },
+  ".cm-zim-chip-outside, .cm-zim-chip-unsupported": { fontStyle: "italic" },
 });

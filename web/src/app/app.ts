@@ -3,10 +3,12 @@
 // Rust ones in wasm; the pages live in a store; this file is only the interface between a person and
 // those.
 import { createZimEditor } from "../editor";
-import type { LinkInfo, LinkStatus, ZimEditor } from "../editor";
-import { anchorsIn, checkPageName, newPageText, pageKey, zimTimestamp } from "../notebook-core";
+import type { ImageSource, LinkInfo, LinkStatus, ZimEditor } from "../editor";
+import { anchorsIn, checkPageName, classifyLink, newPageText, pageKey, zimTimestamp } from "../notebook-core";
 import type { Backlink, SearchHit } from "../notebook-core";
+import { FileUrls } from "../notebook/file-urls";
 import { IndexedDbStore } from "../notebook/idb";
+import { isImageType } from "../notebook/media";
 import { createSampleNotebook } from "../notebook/sample";
 import { NotebookSession, createEmptyNotebook } from "../notebook/session";
 import type { SessionEvent } from "../notebook/session";
@@ -105,6 +107,8 @@ export class App {
   private readonly keptInMemory: boolean;
   private readonly tree: TreeView;
   private readonly linkCache = new Map<string, LinkStatus>();
+  /** Addresses for the pictures of the open notebook. */
+  private urls: FileUrls | null = null;
   private saveTimer: number | undefined;
   private dirty = false;
   private saveFailed = false;
@@ -217,6 +221,7 @@ export class App {
     this.editor = createZimEditor(editorHost, "", {
       showMarkup: markup.checked,
       linkStatus: (target) => this.linkStatus(target),
+      imageSource: (path) => this.imageSource(path),
       onChange: () => this.onEditorChange(),
       onNavigate: (link) => void this.followLink(link),
     });
@@ -309,7 +314,9 @@ export class App {
     await this.flush();
     const session = await NotebookSession.open(this.store, id);
     this.session?.close();
+    this.urls?.close();
     this.session = session;
+    this.urls = new FileUrls(session, () => this.editor?.refreshLinks());
     this.current = null;
     session.onChange((event) => this.onSessionEvent(event));
     prefs.set("notebook", id);
@@ -332,6 +339,13 @@ export class App {
   }
 
   private onSessionEvent(event: SessionEvent): void {
+    if (event.kind === "files") {
+      // pictures and file links may lead somewhere else, or nowhere, now
+      this.urls?.sync();
+      this.linkCache.clear();
+      this.editor?.refreshLinks();
+      return;
+    }
     if (event.kind !== "structure") return;
     this.linkCache.clear();
     this.tree.setNodes(this.session.tree());
@@ -443,7 +457,11 @@ export class App {
   }
 
   private download(fileName: string, bytes: Uint8Array, type: string): void {
-    const link = h("a", { href: URL.createObjectURL(new Blob([bytes as BlobPart], { type })), download: fileName });
+    this.downloadBlob(fileName, new Blob([bytes as BlobPart], { type }));
+  }
+
+  private downloadBlob(fileName: string, blob: Blob): void {
+    const link = h("a", { href: URL.createObjectURL(blob), download: fileName });
     document.body.append(link);
     link.click();
     link.remove();
@@ -619,14 +637,64 @@ export class App {
     if (this.session && this.current) {
       const resolved = this.session.resolve(this.current.name, target);
       if (resolved.kind === "page") status = resolved.exists || resolved.page.toLowerCase() === this.current.name.toLowerCase() ? "exists" : "missing";
+      else if (resolved.kind === "file") {
+        const file = this.session.resolveFile(this.current.name, target);
+        if (file.kind === "notebook") status = file.exists ? "exists" : "missing";
+      }
     }
     this.linkCache.set(target, status);
     return status;
   }
 
+  /** What to draw for `{{path}}` on the open page: the picture, or why there isn't one. */
+  private imageSource(path: string): ImageSource {
+    if (!this.session || !this.current) return { status: "outside" };
+    const resolved = this.session.resolveFile(this.current.name, path);
+    if (resolved.kind === "outside") return { status: "outside" };
+    const info = resolved.exists ? this.session.fileInfo(resolved.path) : undefined;
+    if (!info) return { status: "missing" };
+    if (!isImageType(info.type)) return { status: "unsupported" };
+    const picture = this.urls?.get(info.path) ?? { status: "failed" as const };
+    return picture.status === "ready" ? { status: "ready", url: picture.url } : { status: picture.status };
+  }
+
+  /** Open the file a reference on the open page leads to: a picture is shown, anything else is downloaded. */
+  private async openFileReference(target: string): Promise<void> {
+    if (!this.current) return;
+    const resolved = this.session.resolveFile(this.current.name, target);
+    if (resolved.kind === "outside") return this.say(`${target} is a path outside this notebook, which a browser can't open.`);
+    if (!resolved.exists) return this.say(`There is no file ${resolved.path} in this notebook.`);
+    const info = this.session.fileInfo(resolved.path);
+    const blob = await this.session.fileBlob(resolved.path);
+    if (!info || !blob) return this.say(`${resolved.path} couldn't be read from this browser's storage.`);
+    const name = info.path.slice(info.path.lastIndexOf("/") + 1);
+    if (isImageType(blob.type)) await this.showPicture(name, blob);
+    else this.downloadBlob(name, blob);
+  }
+
+  /** A picture, large, in a dialog. It is an <img> and nothing else, so that nothing in it can run, whatever the file. */
+  private async showPicture(name: string, blob: Blob): Promise<void> {
+    const url = URL.createObjectURL(blob);
+    try {
+      await showDialog({
+        title: name,
+        body: [h("div", { class: "viewer" }, h("img", { class: "viewer-image", src: url, alt: name })), h("div", { class: "viewer-actions" }, h("button", { type: "button", class: "secondary", text: "Download", on: { click: () => this.downloadBlob(name, blob) } }))],
+        confirm: "Close",
+        noCancel: true,
+      });
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
   private async followLink(link: LinkInfo): Promise<void> {
     if (!this.current) return;
     switch (link.kind) {
+      case "image":
+        // a picture with an href goes where that says; otherwise it is shown large
+        if (link.href) await this.followLink({ ...link, kind: classifyLink(link.href), target: link.href });
+        else await this.openFileReference(link.target);
+        break;
       case "page":
       case "anchor": {
         const resolved = this.session.resolve(this.current.name, link.target);
@@ -650,7 +718,7 @@ export class App {
         if (/^mailto:/i.test(link.target)) window.location.href = link.target;
         break;
       case "file":
-        this.say(`${link.target} is a link to a file, which can't be opened from a browser (yet).`);
+        await this.openFileReference(link.target);
         break;
       case "interwiki":
         this.say(`${link.target} is an interwiki link; this notebook has no list of sites for it to use.`);
