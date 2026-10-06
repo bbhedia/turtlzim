@@ -9,6 +9,7 @@ import {
   headingId as wasmHeadingId,
   linksIn as wasmLinksIn,
   newPageText as wasmNewPageText,
+  pageKey as wasmPageKey,
   pageToPath as wasmPageToPath,
   parsePageName as wasmParsePageName,
   pathToPage as wasmPathToPage,
@@ -90,6 +91,12 @@ export function checkPageName(input: string): { name: string } | { error: string
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/** The key a page is filed under (its name in lower case): two spellings of one page share it. */
+export function pageKey(input: string): string {
+  assertZimReady();
+  return wasmPageKey(input);
 }
 
 /** What kind of target a link target is, without a notebook to look in. */

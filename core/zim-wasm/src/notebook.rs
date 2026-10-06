@@ -60,6 +60,13 @@ pub fn parse_page_name(input: &str) -> Result<String, JsError> {
     Ok(name(input)?.to_string())
 }
 
+/// The key a page is filed under: its name in lower case, which is what makes two spellings of a
+/// name the same page. Throws if the name isn't valid.
+#[wasm_bindgen(js_name = pageKey)]
+pub fn page_key(input: &str) -> Result<String, JsError> {
+    Ok(name(input)?.key())
+}
+
 /// What kind of target a link target is, without a notebook to look in: `"page"`, `"anchor"`,
 /// `"url"`, `"file"`, `"email"`, `"interwiki"` or `"invalid"`.
 #[wasm_bindgen(js_name = classifyLink)]

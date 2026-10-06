@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.1",
+    "fake-indexeddb": "^6.2.5",
     "playwright-core": "^1.63.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.2",
