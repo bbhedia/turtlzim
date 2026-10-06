@@ -116,11 +116,13 @@ scripts/zim-golden.sh                  # real Zim notebooks: byte-identical roun
 # Web app: Zim editor + notebook app (web/; see docs/zim-editor-plan.md and docs/zim-web-app.md)
 cd web && npm install
 npm run wasm                        # build core/zim-wasm into web/src/zim-wasm (needs wasm-pack)
+npm run core                        # build core/turtl-core-rs (the Turtl core: encrypted notebooks) into web/src/turtl-core
 npm run dev                         # dev server
 npm run build                       # typecheck + production build into web/dist
 npm test                            # Vitest: editor logic, headless (ZIM_GOLDEN_DIR=... adds real pages)
 scripts/setup-browser.sh            # once: Chromium + libraries + a font, no root
 npm run test:browser                # the built app in a real browser (ZIM_GOLDEN_DIR=... adds the real Zim manual; ONLY=text picks scenarios)
+npm run test:vault                  # the encrypted-notebook vault in a real browser: Worker, OPFS, reload, crash mid-write, one tab at a time
 npm run screenshots <dir>           # twelve pictures of the app to look at (light, dark, phone, dialogs, pictures)
 scripts/serve.sh start --host :: --port 8080   # serve web/dist in the background (see docs/zim-editor-plan.md: trying it from another machine)
 

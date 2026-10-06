@@ -196,6 +196,75 @@ try {
     }
   });
 
+  const SECRETS = {
+    notebook: "Zebra Journal", home: "Secret Plans Page", text: "the vault door code is 7391", other: "Hidden Sub Page Name",
+    path: "diagram-4417.png", bytes: "ATTACHMENT-BYTES-5529", type: "image/x-secret",
+  };
+
+  await scenario("encrypted notebooks are kept across a reload, and nothing of them can be read from what the browser keeps", async () => {
+    const context = await fresh();
+    try {
+      const page = await openLab(context);
+      await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+      const made = await mustWork(
+        await page.evaluate((s) => window.lab.notebooks.create(s.notebook, [["Home", `${s.home} ${s.text}`], [`Home:${s.other}`, "second page"]], [[s.path, s.bytes, s.type]]), SECRETS),
+        "making a notebook",
+      );
+      assertEqual([made.title, made.kind], [SECRETS.notebook, "encrypted"], "the notebook is as asked for");
+      await mustWork(await page.evaluate(([id, s]) => window.lab.notebooks.replace(id, [], [["Home", `${s.home} ${s.text}, edited`]]), [made.id, SECRETS]), "editing a page");
+      await mustWork(await lab(page, "lock"), "locking");
+
+      // what the browser keeps: the ids are there (the files are the right ones to look in), the secrets are not
+      const files = await mustWork(await lab(page, "opfsFiles"), "reading what the browser keeps");
+      assert(files.some(([, bytes]) => contains(bytes, made.id)), "the notebook's id is in them (which shows the files were read)");
+      for (const secret of [...Object.values(SECRETS), "second page", "edited", PASSPHRASE]) {
+        for (const [path, bytes] of files) assert(!contains(bytes, secret), `${JSON.stringify(secret)} is in ${path}`);
+      }
+
+      // after a reload and an unlock everything is there, as it was written
+      await page.reload();
+      await page.waitForFunction(() => window.lab !== undefined);
+      const refused = await page.evaluate(() => window.lab.notebooks.list());
+      assertEqual(refused.ok, false, "a locked vault shows nothing");
+      await mustWork(await lab(page, "unlock", PASSPHRASE), "unlocking");
+      const listed = await mustWork(await page.evaluate(() => window.lab.notebooks.list()), "listing");
+      assertEqual(listed.map((n) => [n.id, n.title, n.home, n.kind]), [[made.id, SECRETS.notebook, "Home", "encrypted"]], "the notebook is there");
+      const pages = await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading pages");
+      assertEqual(pages.map((p) => [p[0], p[1]]).sort(), [["Home", `${SECRETS.home} ${SECRETS.text}, edited`], [`Home:${SECRETS.other}`, "second page"]].sort(), "the pages are as they were left");
+      const attached = await mustWork(await page.evaluate((id) => window.lab.notebooks.files(id), made.id), "reading files");
+      assertEqual(attached, [[SECRETS.path, SECRETS.type, SECRETS.bytes.length, 2, SECRETS.bytes]], "the attachment is as it was, bytes and all");
+      await mustWork(await lab(page, "lock"), "locking");
+    } finally {
+      await context.close();
+    }
+  });
+
+  await scenario("a change cut off in the middle (the tab closes while it is written) leaves the notebook as it was", async () => {
+    const context = await fresh();
+    try {
+      const page = await openLab(context);
+      await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+      const made = await mustWork(await page.evaluate(() => window.lab.notebooks.create("Crash test", [["Home", "before"]], [])), "making a notebook");
+      // 600 pages take longer to write than the 150 ms the engine is given
+      const ended = await mustWork(await page.evaluate((id) => window.lab.notebooks.writeAndCrash(id, 600, 150), made.id), "writing and ending the engine");
+      assert(/^stopped: /.test(ended), `the write did not finish: ${ended}`);
+      assertEqual(await lab(page, "unlocked"), false, "the vault noticed that its engine was gone, and is locked");
+
+      // a new page, as after the tab was closed and opened again
+      await page.reload();
+      await page.waitForFunction(() => window.lab !== undefined);
+      await mustWork(await lab(page, "unlock", PASSPHRASE), "unlocking after the crash");
+      const pages = await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading pages");
+      assertEqual(pages.map((p) => [p[0], p[1]]), [["Home", "before"]], "not one of the 600 pages is there, and the one that was is as it was");
+      // and it is not damaged: the same write, left alone, goes through
+      await mustWork(await page.evaluate((id) => window.lab.notebooks.replace(id, [], Array.from({ length: 50 }, (_, i) => [`After ${i}`, "x"])), made.id), "writing after the crash");
+      assertEqual((await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading")).length, 51, "51 pages now");
+      await mustWork(await lab(page, "lock"), "locking");
+    } finally {
+      await context.close();
+    }
+  });
+
   await scenario("a page that is not secure is told it can't have encrypted notebooks", async () => {
     if (!lanAddress) {
       console.log("  (skipped: this machine has no address but localhost)");

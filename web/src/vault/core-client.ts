@@ -72,13 +72,18 @@ let clients = 0;
 export class CoreClient {
   private readonly pending = new Map<string, Pending>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
+  private readonly lostListeners = new Set<(reason: string) => void>();
   private readonly prefix = `c${++clients}r`;
   private counter = 0;
   private closed = false;
 
   constructor(private readonly transport: CoreTransport) {
     transport.onMessage = (channel, message) => this.receive(channel, message);
-    transport.onLost = (reason) => this.fail(new Error(`The engine that keeps the encrypted notebooks stopped unexpectedly (${reason}).`));
+    transport.onLost = (reason) => {
+      this.closed = true;
+      this.fail(new Error(`The engine that keeps the encrypted notebooks stopped unexpectedly (${reason}).`));
+      for (const listener of [...this.lostListeners]) listener(reason);
+    };
   }
 
   /** Start a core on `transport` and return the client for it. */
@@ -112,6 +117,12 @@ export class CoreClient {
   onEvent(listener: (event: CoreEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Be told if the core goes away without having been closed (its Worker died): everything waiting is refused, and nothing more can be asked. Returns the function that stops it. */
+  onLost(listener: (reason: string) => void): () => void {
+    this.lostListeners.add(listener);
+    return () => this.lostListeners.delete(listener);
   }
 
   /** Stop the core and end what it runs on. Requests still waiting for an answer are refused. */
@@ -224,12 +235,21 @@ export class WorkerTransport implements CoreTransport {
     }
   }
 
+  /**
+   * End the core without ceremony, as a crash or a closing tab does, and say so to whoever is waiting.
+   * (What a test uses to find out what is left after that.)
+   */
+  kill(reason: string): void {
+    this.lost(reason);
+  }
+
   private lost(reason: string): void {
     const failed = [...this.steps.values()];
     this.steps.clear();
     for (const step of failed) step.reject(new Error(reason));
-    if (!this.ended) this.onLost?.(reason);
+    const unexpected = !this.ended;
     this.end();
+    if (unexpected) this.onLost?.(reason);
   }
 
   private end(): void {

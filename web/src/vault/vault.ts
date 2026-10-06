@@ -82,6 +82,9 @@ function hex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/** What happens to a vault: it is `unlocked` or `locked` as asked, or `lost` when its engine dies on its own (and then it is locked too). */
+export type VaultEvent = { kind: "unlocked" } | { kind: "locked" } | { kind: "lost"; reason: string };
+
 export interface VaultOptions {
   /** Starts a core and says how to reach it. The default is the real thing: a Worker. */
   connect?: () => CoreTransport;
@@ -93,6 +96,7 @@ export class Vault {
   private client: CoreClient | null = null;
   private readonly connect: () => CoreTransport;
   private readonly persistence: Persistence | null;
+  private readonly listeners = new Set<(event: VaultEvent) => void>();
   /** The unlock or lock in progress: they go one at a time. */
   private busy: Promise<unknown> = Promise.resolve();
 
@@ -103,6 +107,28 @@ export class Vault {
 
   get unlocked(): boolean {
     return this.client !== null;
+  }
+
+  /** Be told when the vault is unlocked, locked, or lost. Returns the function that stops it. */
+  onChange(listener: (event: VaultEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(event: VaultEvent): void {
+    for (const listener of [...this.listeners]) listener(event);
+  }
+
+  /** The vault is open on `client` from now on: and ends if the engine dies. */
+  private adopt(client: CoreClient): void {
+    this.client = client;
+    client.onLost((reason) => {
+      if (this.client !== client) return;
+      this.client = null;
+      this.emit({ kind: "lost", reason });
+    });
+    void this.askToKeep();
+    this.emit({ kind: "unlocked" });
   }
 
   /** The core, for whoever reads and writes the notebooks: only while unlocked. */
@@ -140,8 +166,7 @@ export class Vault {
         await client.close();
         throw error;
       }
-      this.client = client;
-      void this.askToKeep();
+      this.adopt(client);
     });
   }
 
@@ -164,8 +189,7 @@ export class Vault {
         await client.close();
         throw error;
       }
-      this.client = client;
-      void this.askToKeep();
+      this.adopt(client);
     });
   }
 
@@ -187,6 +211,7 @@ export class Vault {
       client.request("user:logout", false).catch(() => undefined);
       await Promise.race([loggedOut, new Promise<void>((resolve) => setTimeout(resolve, 5000))]);
       await client.close();
+      this.emit({ kind: "locked" });
     });
   }
 
@@ -198,12 +223,20 @@ export class Vault {
     await this.exclusive(async () => {
       if (this.client) throw new Error("Lock the encrypted notebooks first.");
       const root = await navigator.storage.getDirectory();
-      try {
-        await root.removeEntry(VAULT_DIRECTORY, { recursive: true });
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "NotFoundError") return;
-        if (error instanceof DOMException && error.name === "NoModificationAllowedError") throw new VaultBusyError();
-        throw error;
+      // (a Worker that was just ended lets go of its files a moment later: another tab that has them doesn't)
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await root.removeEntry(VAULT_DIRECTORY, { recursive: true });
+          return;
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "NotFoundError") return;
+          if (error instanceof DOMException && error.name === "NoModificationAllowedError") {
+            if (attempt >= 30) throw new VaultBusyError();
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            continue;
+          }
+          throw error;
+        }
       }
     });
   }

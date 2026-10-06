@@ -114,6 +114,23 @@ describe("the core's client", () => {
     await expect(second.request("again")).rejects.toThrow(/locked/);
   });
 
+  it("tells whoever is listening when the core goes away on its own, and not when it is closed", async () => {
+    const transport = scripted(() => []);
+    const client = await CoreClient.boot(transport, null);
+    const reasons: string[] = [];
+    client.onLost((reason) => reasons.push(reason));
+    transport.lose("the worker died");
+    expect(reasons).toEqual(["the worker died"]);
+    await expect(client.request("anything")).rejects.toThrow(/locked/);
+
+    const calm = scripted(() => []);
+    const other = await CoreClient.boot(calm, null);
+    const heard: string[] = [];
+    other.onLost((reason) => heard.push(reason));
+    await other.close();
+    expect(heard).toEqual([]);
+  });
+
   it("closes the transport when the core can't be started, and says why", async () => {
     const transport = scripted(() => []);
     transport.boot = async () => {
@@ -236,6 +253,45 @@ describe("the vault", () => {
     });
     await expect(fakeEmpty.unlock(PASSPHRASE)).rejects.toBeInstanceOf(NoVaultError);
     expect(await fakeEmpty.exists()).toBe(false);
+  });
+
+  it("knows when its engine is lost, and is then locked, and says so", async () => {
+    // an engine that answers just enough to be unlocked, and can be made to die
+    let lose: (reason: string) => void = () => undefined;
+    const vault = new Vault({
+      persistence: null,
+      connect: () => {
+        const transport: CoreTransport = {
+          onMessage: null,
+          onLost: null,
+          async boot() {},
+          send(message: string) {
+            const [id, command] = JSON.parse(message) as string[];
+            const answer = command === "user:local-accounts" ? ["some-vault"] : {};
+            setTimeout(() => transport.onMessage?.("any", JSON.stringify({ id, e: 0, d: answer })), 0);
+            if (command === "user:logout") setTimeout(() => transport.onMessage?.("any", JSON.stringify({ e: "user:logout", d: null })), 0);
+          },
+          async close() {},
+        };
+        lose = (reason) => transport.onLost?.(reason);
+        return transport;
+      },
+    });
+    const events: string[] = [];
+    vault.onChange((event) => events.push(event.kind === "lost" ? `lost: ${event.reason}` : event.kind));
+    await vault.unlock(PASSPHRASE);
+    expect(vault.unlocked).toBe(true);
+    const waiting = vault.core.request("never answered");
+    lose("out of memory");
+    await expect(waiting).rejects.toThrow(/stopped unexpectedly/);
+    expect(vault.unlocked).toBe(false);
+    expect(() => vault.core).toThrow(/locked/);
+    expect(events).toEqual(["unlocked", "lost: out of memory"]);
+
+    // unlocking again starts another engine, and locking says so too
+    await vault.unlock(PASSPHRASE);
+    await vault.lock();
+    expect(events).toEqual(["unlocked", "lost: out of memory", "unlocked", "locked"]);
   });
 
   it("explains why the data can't be kept, or is in use, instead of showing what the core said", async () => {

@@ -4,6 +4,8 @@ import "fake-indexeddb/auto";
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import { pageKey } from "../src/notebook-core";
+import { TurtlStore } from "../src/vault/turtl-store";
+import { freshAccount } from "./helpers/direct-core";
 import { IndexedDbStore } from "../src/notebook/idb";
 import { MemoryStore } from "../src/notebook/store";
 import type { NotebookStore, StoredFile, StoredPage } from "../src/notebook/store";
@@ -20,8 +22,8 @@ const paths = async (store: NotebookStore, id: string) => (await store.listFiles
 const text = async (store: NotebookStore, id: string, path: string) => (await store.loadFile(id, path))?.text();
 let databases = 0;
 
-function contract(label: string, make: () => Promise<NotebookStore>) {
-  describe(`the store contract: ${label}`, () => {
+function contract(label: string, make: () => Promise<NotebookStore>, timeout = 5000) {
+  describe(`the store contract: ${label}`, { timeout }, () => {
     it("lists, updates and deletes notebooks", async () => {
       const store = await make();
       expect(await store.listNotebooks()).toEqual([]);
@@ -139,6 +141,24 @@ function contract(label: string, make: () => Promise<NotebookStore>) {
       expect(await paths(store, n.id)).toEqual(["case/A.png", "x.png", "y.png"]);
     });
 
+    it("lets a file be moved away and another be written where it was, in one change", async () => {
+      const store = await make();
+      const n = await store.createNotebook({ title: "N", home: "Home", kind: "open" }, [], [file("a.png", "old A"), file("b.png", "old B")]);
+      await store.replacePages(n.id, { remove: [], put: [], files: { move: [["a.png", "moved.png"]], put: [file("a.png", "new A")] } });
+      expect(await paths(store, n.id)).toEqual(["a.png", "b.png", "moved.png"]);
+      expect(await text(store, n.id, "a.png")).toBe("new A");
+      expect(await text(store, n.id, "moved.png")).toBe("old A");
+      expect(await text(store, n.id, "b.png")).toBe("old B");
+      // writing is last: what is written where a file was moved to is what is left there
+      await store.replacePages(n.id, { remove: [], put: [], files: { move: [["b.png", "c.png"]], put: [file("C.PNG", "written over the moved one")] } });
+      expect(await paths(store, n.id)).toEqual(["C.PNG", "a.png", "moved.png"]);
+      expect(await text(store, n.id, "c.png")).toBe("written over the moved one");
+      // and a file moved onto a path takes the place of what is there
+      await store.replacePages(n.id, { remove: [], put: [], files: { move: [["moved.png", "a.png"]] } });
+      expect(await paths(store, n.id)).toEqual(["C.PNG", "a.png"]);
+      expect(await text(store, n.id, "a.png")).toBe("old A");
+    });
+
     it("holds hundreds of files", async () => {
       const store = await make();
       const files = Array.from({ length: 600 }, (_, i) => file(`Section ${i % 20}/file ${i}.bin`, `content ${i}`));
@@ -151,6 +171,11 @@ function contract(label: string, make: () => Promise<NotebookStore>) {
 
 contract("memory", async () => new MemoryStore(pageKey));
 contract("IndexedDB", async () => IndexedDbStore.open(pageKey, `contract-${++databases}`));
+// (every test gets an account of its own in the core, whose key takes a second to make; and the notebooks are encrypted as they go in)
+contract("encrypted", async () => {
+  const core = await freshAccount();
+  return new TurtlStore(() => core, pageKey);
+}, 240_000);
 
 describe("IndexedDB, beyond the contract", () => {
   it("keeps notebooks between one opening of the database and the next", async () => {

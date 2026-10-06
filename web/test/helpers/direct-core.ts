@@ -7,6 +7,7 @@
 import { readFileSync } from "node:fs";
 import sodium from "libsodium-wrappers-sumo";
 import { bootCore, sendToCore } from "../../src/vault/core-boot";
+import { CoreClient } from "../../src/vault/core-client";
 import type { CoreTransport } from "../../src/vault/core-client";
 
 const wasm = readFileSync(new URL("../../src/turtl-core/turtl_core_bg.wasm", import.meta.url));
@@ -32,4 +33,28 @@ export class DirectTransport implements CoreTransport {
   async close(): Promise<void> {
     open.delete(this);
   }
+}
+
+/** Log the core's user out without waiting for the answer (it comes a second after the logout, which is done when the event is). */
+export async function logoutQuickly(client: CoreClient): Promise<void> {
+  const done = new Promise<void>((resolve) => {
+    const stop = client.onEvent((event) => {
+      if (event.e === "user:logout") {
+        stop();
+        resolve();
+      }
+    });
+  });
+  client.request("user:logout", false).catch(() => undefined);
+  await done;
+}
+
+let accounts = 0;
+
+/** A client of the core with an account of its own, new and empty, logged in (whoever was logged in before is logged out). */
+export async function freshAccount(): Promise<CoreClient> {
+  const client = await CoreClient.boot(new DirectTransport(), null);
+  await logoutQuickly(client);
+  await client.request("user:join", `test-account-${++accounts}-${Math.random().toString(16).slice(2, 10)}`, "a passphrase for the tests");
+  return client;
 }

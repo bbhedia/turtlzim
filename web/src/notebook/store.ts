@@ -62,8 +62,8 @@ export interface NotebookInfo {
   /** The page shown when the notebook is opened. */
   home: string;
   created: number;
-  /** "open": plain pages. (Encrypted notebooks come later and are another kind of store.) */
-  kind: "open";
+  /** "open": plain pages, kept in the browser's IndexedDB. "encrypted": kept as ciphertext in the vault (see vault/). */
+  kind: "open" | "encrypted";
 }
 
 export interface NotebookStore {
