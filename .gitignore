@@ -5,10 +5,12 @@
 # Node (web/desktop/mobile shells, sync server — added later)
 node_modules/
 dist/
+dist-lab/
 build/
 
-# wasm-pack output for the web package (npm run wasm in web/)
+# wasm-pack output for the web package (npm run wasm and npm run core in web/)
 web/src/zim-wasm/
+web/src/turtl-core/
 
 # Claude Code session-local state
 .claude/
