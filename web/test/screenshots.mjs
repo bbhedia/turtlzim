@@ -91,6 +91,47 @@ await page.evaluate(() => window.__zim.editor.setText("====== Pictures that can'
 await shot(page, "12-picture-states");
 await page.close();
 
+console.log("encrypted notebooks");
+page = await open({ width: 1280, height: 820 });
+const topDialog = () => page.locator("dialog.dialog").last();
+await page.locator(".notebook-button").click();
+await page.getByRole("menuitem", { name: "New notebook…" }).click();
+await topDialog().getByLabel("Name").fill("Diary");
+await topDialog().getByLabel("Kind").selectOption("encrypted");
+await shot(page, "13-new-encrypted-notebook");
+await topDialog().getByRole("button", { name: "Create", exact: true }).click();
+const making = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Encrypted notebooks", exact: true }) });
+await making.waitFor();
+await making.getByLabel("Passphrase", { exact: true }).fill("short");
+await shot(page, "14-passphrase-dialog");
+const passphrase = "pale river stone lantern";
+await making.getByLabel("Passphrase", { exact: true }).fill(passphrase);
+await making.getByLabel("Passphrase again").fill(passphrase);
+await making.getByLabel("I understand").check();
+await making.getByRole("button", { name: "Create encrypted notebooks" }).click();
+await page.waitForFunction(() => window.__zim.app.session?.info.kind === "encrypted");
+const told = page.locator("dialog.dialog", { hasText: "Keep a copy of encrypted notebooks" });
+await told.waitFor({ timeout: 3000 }).then(async () => {
+  await shot(page, "15-keep-a-copy-notice");
+  await told.getByRole("button", { name: "OK" }).click();
+}, () => undefined);
+await page.waitForFunction(() => document.querySelectorAll("dialog.dialog").length === 0);
+await goTo(page, "Secrets:Plans");
+await page.evaluate(() => window.__zim.editor.setText("====== Plans ======\n\nMeet at the old mill.\n"));
+await shot(page, "16-encrypted-notebook-open");
+await page.locator(".notebook-button").click();
+await shot(page, "17-menu-with-encrypted-notebook");
+await page.keyboard.press("Escape");
+await page.locator(".lock-button").click();
+await page.waitForFunction(() => window.__zim.app.session?.info.kind === "open" && document.querySelector(".lock-button").hidden);
+await page.reload();
+await page.waitForFunction(() => window.__zim !== undefined);
+await page.locator(".notebook-button").click();
+await page.getByRole("menuitem", { name: "Unlock encrypted notebooks…" }).click();
+await settle(page);
+await shot(page, "18-unlock-dialog");
+await page.close();
+
 console.log("desktop, dark");
 page = await open({ width: 1280, height: 820 }, "dark");
 await goTo(page, "Help:Links");

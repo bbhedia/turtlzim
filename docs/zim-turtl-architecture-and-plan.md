@@ -128,6 +128,12 @@ Confirm Zim's license only matters if you ever copy Zim's actual source.
 Biggest effort: steps 2–4 (Zim editor + WASM port). Highest risk: step 3 (crypto interop —
 reuse libsodium, never roll your own).
 
+**Status (2026-10-06).** Steps 1–4 are done for the web app, including the per-notebook choice:
+the Zim format is in the core, the core runs as wasm in a Worker, and a notebook is open (plain
+pages in IndexedDB) or encrypted (ciphertext kept by the Turtl core, unlocked with a passphrase),
+on one device, with no server (`docs/zim-web-app.md`, `docs/zim-encrypted-notebooks.md`). Steps 5–7
+(desktop, mobile, sync and sharing) are not started.
+
 ---
 
 ## 8. Summary

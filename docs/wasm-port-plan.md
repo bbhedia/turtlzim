@@ -886,3 +886,17 @@ Networking and concurrency are unified on async/await across both native and web
       downloads it and decrypts it to the original bytes; plus the same save, read and upload in the
       browser Worker, and a storage test of the blob helpers. Now: native `turtl_core` 86, wasm32 under
       Node 54, browser 9 scenarios.
+
+- [x] **The core in the web app, with no server** (`local_only`): the app runs this core in a module
+      Worker (`web/src/vault`) to keep encrypted notebooks, with libsodium.js injected exactly as
+      step 4b prescribes and the databases in OPFS. What that needed of the core: accounts that live on
+      one device (`models/user.rs`: `join_local`, `login_local`, the account's record in the kv
+      store, a key made at 128 MiB because there is no server to slow guessing down), a user id that
+      is a number JavaScript reads exactly, no sync and no queue, **atomic writes** (every dumpy
+      write is a savepoint: one commit, and nested inside a caller's transaction) and **batches**
+      (`profile:batch:begin|commit|rollback`, whose rollback rebuilds the in-memory profile and
+      search index), a private `props` field on notes. Verified by `flow_tests::local_only_flow`,
+      `local_only_on_disk_flow` (native: every file the core writes is read for plaintext) and
+      `local_batches_flow`, native and wasm32, and in Chromium by `web/test/vault-browser.mjs`
+      (persistence across reloads, a write cut off by killing the Worker, one tab at a time).
+      See `docs/zim-encrypted-notebooks.md`. Now: native `turtl_core` 91, wasm32 under Node 58.

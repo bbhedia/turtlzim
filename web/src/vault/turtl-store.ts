@@ -337,13 +337,15 @@ export class TurtlStore implements NotebookStore {
   /** Run `work` once what was asked of the store before it is done, and nothing after it until it is. */
   private run<T>(work: (core: CoreClient) => Promise<T>): Promise<T> {
     const run = this.queue.then(() => {
-      if (this.broken) throw this.broken;
       const core = this.core();
       if (core !== this.lastCore) {
-        // a different engine than last time (the vault was locked and unlocked): what was known of it is only a guess
+        // a different engine than last time (the vault was locked and unlocked): what was known of it is only a
+        // guess, and a change that could not be undone in the old one is not a worry about this one
         this.indexes.clear();
+        this.broken = null;
         this.lastCore = core;
       }
+      if (this.broken) throw this.broken;
       return work(core);
     });
     this.queue = run.catch(() => undefined);

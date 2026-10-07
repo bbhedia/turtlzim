@@ -1986,6 +1986,7 @@ try {
     assert((await making.innerText()).includes("Nobody can recover this passphrase"), "the dialog says nobody can recover the passphrase");
     const confirm = making.getByRole("button", { name: "Create encrypted notebooks" });
     assert(await confirm.isDisabled(), "nothing can be created with no passphrase");
+    assertDeepEqual((await making.locator(".field-problem").allInnerTexts()).filter(Boolean), [], "but nobody is told off for fields they have not reached");
     await making.getByLabel("Passphrase", { exact: true }).fill("short");
     assert((await making.innerText()).includes("at least 10 characters"), "a short passphrase is explained");
     await making.getByLabel("Passphrase", { exact: true }).fill(PASSPHRASE);

@@ -72,14 +72,20 @@ describe("the encrypted store, beyond the contract", () => {
     expect((await core.request<{ spaces: unknown[] }>("profile:load")).spaces).toEqual([]);
   }, SLOW);
 
-  it("refuses to be trusted when a failed change can't be undone", async () => {
-    const core = await freshAccount();
-    const store = new TurtlStore(() => core, pageKey);
+  it("refuses to be trusted when a failed change can't be undone, until the vault has been locked and unlocked", async () => {
+    let current = await freshAccount();
+    const store = new TurtlStore(() => current, pageKey);
     const n = await store.createNotebook({ title: "N", home: "Home", kind: "encrypted" }, [page("A", "a")]);
-    failing(core, "profile:sync:model", 2, true);
+    failing(current, "profile:sync:model", 2, true);
     await expect(store.replacePages(n.id, { remove: [], put: [page("B", "b"), page("C", "c")] })).rejects.toThrow("the core failed");
     await expect(store.loadPages(n.id)).rejects.toThrow(/Lock them and unlock them again/);
     await expect(store.listNotebooks()).rejects.toThrow(/Lock them and unlock them again/);
+
+    // an engine that is not the one that failed is trusted again (what it holds is its own business)
+    current = await freshAccount();
+    expect(await store.listNotebooks()).toEqual([]);
+    const fresh = await store.createNotebook({ title: "Fresh", home: "Home", kind: "encrypted" }, [page("Home", "works")]);
+    expect((await store.loadPages(fresh.id)).map((p) => p.text)).toEqual(["works"]);
   }, SLOW);
 
   it("is found again, whole, by a store that knows nothing of what the first one did", async () => {

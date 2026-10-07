@@ -2,10 +2,10 @@
 
 The browser app that puts the pieces together: the Zim editor (`web/src/editor`, see
 `zim-editor-plan.md`), the notebook rules (`core/zim-notebook` through wasm, see `zim-notebook.md`)
-and a place to keep pages. It is the *open notebook* half of roadmap step 4: pages are Zim text kept
-in the browser. There is no sync, no account and no encryption in it yet; those come with
-`turtl_core` (CLAUDE.md, Open issues #5), and a notebook's `kind` field (`"open"` today) is where
-that choice will live.
+and a place to keep pages. A notebook is either **open** (Zim text kept in the browser's IndexedDB:
+this document) or **encrypted** (kept as ciphertext by the Turtl core, unlocked with a passphrase:
+`zim-encrypted-notebooks.md`); a notebook's `kind` field says which. There is no sync and no account
+yet (CLAUDE.md, Open issues #5).
 
 ## What it does
 
@@ -35,6 +35,9 @@ that choice will live.
   download it. A panel under the page lists its attachments, with thumbnails, and inserts,
   downloads and deletes them. Attachments go with their page when it is renamed or deleted, and in
   and out with import and export.
+* **Encrypted notebooks.** New notebook (or Import) can make one; they are listed with the open ones
+  and behave the same, but are kept as ciphertext, need a passphrase, and are locked away with the
+  Lock button (see `zim-encrypted-notebooks.md` for how, what it protects, and its limits).
 * **A phone-sized screen** gets the tree as a drawer, and the top bar wraps.
 
 ## Layers
@@ -44,6 +47,8 @@ that choice will live.
 | Rules | `core/zim-notebook` (Rust) | names, link resolution, file references (`files.rs`), tree, backlinks, search, rename that keeps links and file references intact |
 | Bindings | `core/zim-wasm`, `web/src/notebook-core.ts` | `NotebookModel` (wasm `Notebook`), page names, `plain` text, `newPageText`, paths |
 | Store | `web/src/notebook/store.ts`, `idb.ts` | where pages are kept: `MemoryStore`, `IndexedDbStore` |
+| Encrypted store | `web/src/vault/` | `TurtlStore` (a store over the Turtl core in a Worker), the `Vault` that a passphrase unlocks: `zim-encrypted-notebooks.md` |
+| Router | `web/src/notebook/routed-store.ts` | open and encrypted notebooks as one list (encrypted ids start with `vault:`; nothing of them is there while the vault is locked) |
 | Session | `web/src/notebook/session.ts` | an open notebook: the model over a store; every change is written to the store before it is announced |
 | Files | `web/src/notebook/zim-files.ts`, `media.ts`, `web/src/zip.ts` | `notebook.zim`; folders and zips ⇄ pages and attachments; media types |
 | Pictures | `web/src/notebook/file-urls.ts`, `web/src/editor/` | object URLs for stored pictures; the editor draws `{{images}}` from them |
@@ -147,6 +152,21 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
     says so ("reload this page"); a tab that opens the app while an older tab still holds the database
     says why it is waiting, and goes on when that tab is closed or reloaded.
 
+17. **An encrypted notebook leaves nothing in the browser's own places.** The address, the tab's
+    title, `history.state`, `localStorage` (drafts, folded sections) and translation all carry page
+    names or text, and the browser keeps them. While an encrypted notebook is open the app keeps
+    each of them blank (`App.isPrivate`, `locate()`): the history entries hold a number and the names
+    stay in memory. A browser test scans IndexedDB, both storages, the Cache API and every private
+    file after a notebook with distinctive contents has been written and locked.
+18. **Open and encrypted notebooks are one list, from two stores.** `RoutedStore` sends each request
+    to the store its id belongs to; an encrypted notebook's id starts with `vault:` (ids of open ones
+    are UUIDs, so they can't). While the vault is locked its notebooks aren't listed at all and any
+    request for one is refused (a rejected promise, not a thrown error: a test found one that threw).
+19. **The app has to start on any address.** `crypto.randomUUID()` exists only on secure pages, and
+    the app used to fail to start on `http://192.168.10.10:8080` because of it (found by the test
+    that opens it there for the encrypted notebooks). Notebook ids now come from `getRandomValues`.
+    Only encrypted notebooks need a secure page.
+
 ## What verifies each layer
 
 | Layer | Verified by |
@@ -156,6 +176,7 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
 | Bindings | `cargo test -p zim-wasm` and `web/test/notebook-core.test.ts` (also run against the real manual) |
 | Stores | `web/test/store.test.ts`: the same contract on both stores, including files, moves (swaps, case-only), atomicity under failure, and opening a database made before files existed (`fake-indexeddb`) |
 | Session, files, zip | `web/test/session.test.ts` (rename/delete/failed write/export paths/import rules/zip round trips and damage; attachments through rename, delete and export; Zim's manual in and out, every file byte for byte) |
+| Encrypted notebooks | `zim-encrypted-notebooks.md` (what verifies what); `web/test/{vault,turtl-store,routed-store}.test.ts`, `store.test.ts` (the shared contract), `vault-browser.mjs` (`npm run test:vault`) |
 | Pictures | `web/test/editor.test.ts` (images with a host: pictures, chips and why, caret and selection rules, Ctrl-click), `commands.test.ts` (where a reference goes), `file-urls.test.ts` (loading, stale addresses, failures not retried) |
 | **The app in Chromium** | `web/test/browser.mjs`: the scenarios below, on the built app, served by the same server `npm run serve` runs |
 | How it looks | `npm run screenshots <dir>`: twelve screenshots (light, dark, phone, dialogs, search, menu, pictures, the viewer) to look at |
@@ -177,13 +198,19 @@ a folder with Windows files (BOM, CRLF, mixed endings, a Latin-1 file, case-clas
 invalid name, attachments, hidden files) edited and exported again; import into the open notebook;
 **the real Zim manual (81 pages and 34 attachments) imported through the file chooser, searched
 and followed, exported and every file compared byte for byte, then imported again from our zip and
-from a deflate zip that Python made**; links that could run code; deep links; a phone-sized screen.
+from a deflate zip that Python made**; links that could run code; deep links; a phone-sized screen;
+and encrypted notebooks through the interface: made with a passphrase and written in, locked and
+unlocked after a reload, Back and Forward and the address and tab title saying nothing, no draft
+left behind, export with its warning, import as encrypted, rename, delete, a lost passphrase erased,
+a short passphrase refused, auto-lock, the browser's promise to keep the data, a page that isn't
+secure, and a scan of everything the browser keeps for a notebook's contents.
 
 ## Running it
 
 ```bash
-cd web && npm install && npm run wasm && npm run build
+cd web && npm install && npm run wasm && npm run core && npm run build   # `core` builds the Turtl core for encrypted notebooks (a few minutes the first time)
 ZIM_GOLDEN_DIR=~/.cache/turtlzim-labs/zim-desktop-wiki npm test
+npm run test:vault                              # the vault in Chromium (needs the browser setup below)
 scripts/setup-browser.sh                        # once
 ZIM_GOLDEN_DIR=~/.cache/turtlzim-labs/zim-desktop-wiki npm run test:browser
 ONLY="rename" npm run test:browser              # just the scenarios whose name has "rename"
@@ -216,6 +243,6 @@ typing can reproduce (found as a rare flake, bisected, and the stress loop went 
   anything (some private windows) the app runs from memory and says so.
 * **Not yet Zim features:** journal pages and a calendar, a tag list, a table of contents, templates,
   page properties, the header block hidden (it is shown, dimmed), tables.
-* **Everything encrypted, synced or shared** (the point of the project): the store interface is the
-  seam; the encrypted kind of notebook, `turtl_core` and the sync server come next (CLAUDE.md, Open
-  issues #2, #5, #6).
+* **Synced or shared notebooks** (and the passphrase change, lazy indexing, and the other limits of the
+  encrypted kind: `zim-encrypted-notebooks.md`): the sync server comes next (CLAUDE.md, Open issues
+  #3, #5, #6).

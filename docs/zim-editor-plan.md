@@ -202,6 +202,10 @@ selection shows it directly.
 - [x] Notebook app around it (`zim-web-app.md`): page tree, links followed and drawn as missing,
       backlinks, plain-text search, rename that keeps links intact, import and export of folders and
       zips, saving that survives a reload or a closing page, phone layout.
+- [x] Encrypted notebooks (`zim-encrypted-notebooks.md`): the same editor over the Turtl core in a
+      Worker; a notebook is open or encrypted, and an encrypted one is kept out of the address, the
+      title and the browser's own storage.
+
 
 ## Not done yet
 

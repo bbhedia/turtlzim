@@ -42,6 +42,12 @@ is serialized back), so saving cannot change bytes; syntax spans for live format
 the core's `zim-format` parser compiled to wasm, so there is one Zim parser. Plan and status:
 `docs/zim-editor-plan.md`.
 
+Encrypted notebooks (chosen by the user 2026-10-06): the web app keeps them with **the Turtl core
+itself**, compiled to wasm and run in a Worker with `local_only` (no server): one local account (the
+vault, unlocked by a passphrase, scrypt at 128 MiB) holds one Turtl *space* per notebook and one *note*
+per page and per attachment. Design, threat model, limits and what verifies each claim:
+`docs/zim-encrypted-notebooks.md`.
+
 ---
 
 ## Stack
@@ -155,6 +161,13 @@ docker compose up                   # Postgres + server (define compose file)
   `core/zim-format/tests/golden_real_notebooks.rs`), and the corpus-free fuzz test runs in every
   `cargo test -p zim-format`. Run both after touching `core/zim-format`.
 - Never copy Zim source into this repo; reimplement the format from its documented syntax.
+- **An encrypted notebook's contents go nowhere but the vault.** Not the address, the tab's title,
+  `history.state`, `localStorage`/`sessionStorage`, IndexedDB, the Cache API, a log, or an error
+  message that is kept. A new feature of the app that remembers, stores or exposes anything about a
+  page (a name, text, a fold, a recent-pages list, a draft) has to check `App.isPrivate` and keep
+  quiet in an encrypted notebook; the scan in `web/test/browser.mjs` ("nothing of an encrypted
+  notebook is in anything the browser keeps") is what catches one that doesn't. The core's
+  `local_only` mode asks no server for anything.
 - Notebook rules (what a name or a link means, tree, backlinks, search, rename) live in
   `core/zim-notebook` and nowhere else: the web app calls them through wasm and holds none of its own.
   A UI change is not done until it has been looked at (`npm run screenshots`) and driven in the real
@@ -180,9 +193,11 @@ docker compose up                   # Postgres + server (define compose file)
 4. **iOS FFI build does not exist yet** in upstream (only Android JNI). Needs to be created.
 5. **Open-notebook sync privacy:** decide policy — local-only, sync-with-disclosure, or
    server-side key (at-rest, not end-to-end). Encrypted notebooks are always end-to-end.
+   (Encrypted notebooks exist now, on one device; syncing them to the Turtl server is not done.)
 6. **Web-crypto trust model:** a served web app could ship malicious JS ("host-proof hosting"
    critique). Mitigate with an installed PWA (pinned service worker + SRI); the packaged
-   desktop build is the strongest guarantee. Document the trade-off for users.
+   desktop build is the strongest guarantee. Document the trade-off for users. (Documented in
+   `docs/zim-encrypted-notebooks.md`; the PWA is not built yet.)
 7. **Zim editor fidelity:** live inline formatting, `[[internal links]]`, checkboxes,
    attachments, verbatim blocks — the largest UI task.
 8. **License check:** confirm Zim's exact license only matters if any Zim source is ever
@@ -197,6 +212,7 @@ docker compose up                   # Postgres + server (define compose file)
 - Zim wiki text format spec (implementation spec for `core/zim-format`): `docs/zim-wiki-format-spec.md`
 - `core-rs` revival notes (getting it building/testing on current toolchains): `docs/core-rs-revival-notes.md`
 - WASM port plan (crypto/storage/networking/concurrency approach + research): `docs/wasm-port-plan.md`
+- Encrypted notebooks (design, threat model, limits, what verifies what): `docs/zim-encrypted-notebooks.md`
 - The Zim editor (decisions, span model, keys, performance, serving it): `docs/zim-editor-plan.md`
 - Notebook rules (names, links, tree, backlinks, search, rename): `docs/zim-notebook.md`
 - The notebook app in the browser (stores, saving, import/export, what verifies it, gaps): `docs/zim-web-app.md`

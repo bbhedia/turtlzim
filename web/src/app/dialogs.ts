@@ -71,6 +71,9 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
       return values;
     };
 
+    /** The fields a person has typed in: a field they haven't reached yet is not scolded for being empty (though the dialog can't be confirmed until it is right). */
+    const touched = new Set<string>();
+
     const refresh = (): boolean => {
       let valid = true;
       const values = textValues();
@@ -78,8 +81,9 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
         const input = inputs.get(field.name) as HTMLInputElement;
         const problem = field.validate ? field.validate(input.value, values) : null;
         const slot = problems.get(field.name)!;
-        slot.textContent = problem ?? "";
-        input.setAttribute("aria-invalid", problem ? "true" : "false");
+        const shown = problem !== null && (touched.has(field.name) || input.value !== "");
+        slot.textContent = shown ? problem : "";
+        input.setAttribute("aria-invalid", shown ? "true" : "false");
         if (problem) valid = false;
       }
       confirmButton.disabled = !valid;
@@ -88,7 +92,7 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
 
     for (const field of options.fields ?? []) {
       const id = `field-${field.name}`;
-      const input = h("input", { id, type: field.type ?? "text", value: field.value ?? "", placeholder: field.placeholder, autocomplete: field.autocomplete ?? "off", spellcheck: "false", autocapitalize: "off", on: { input: () => { errorLine.textContent = ""; refresh(); } } });
+      const input = h("input", { id, type: field.type ?? "text", value: field.value ?? "", placeholder: field.placeholder, autocomplete: field.autocomplete ?? "off", spellcheck: "false", autocapitalize: "off", on: { input: () => { errorLine.textContent = ""; touched.add(field.name); refresh(); } } });
       const problem = h("span", { class: "field-problem", "aria-live": "polite" });
       inputs.set(field.name, input);
       problems.set(field.name, problem);
