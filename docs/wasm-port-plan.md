@@ -898,5 +898,9 @@ Networking and concurrency are unified on async/await across both native and web
       search index), a private `props` field on notes. Verified by `flow_tests::local_only_flow`,
       `local_only_on_disk_flow` (native: every file the core writes is read for plaintext) and
       `local_batches_flow`, native and wasm32, and in Chromium by `web/test/vault-browser.mjs`
-      (persistence across reloads, a write cut off by killing the Worker, one tab at a time).
-      See `docs/zim-encrypted-notebooks.md`. Now: native `turtl_core` 91, wasm32 under Node 58.
+      (persistence across reloads, a write cut off by killing the Worker at five different moments,
+      one tab at a time, a Worker that was cut off from the network, the browser's own log of the
+      requests the engine makes). What an independent review of this work found, and what was done
+      about it (the core refuses everything but a short list of commands and the network itself,
+      the engine has a heartbeat and a watchdog, locking works whatever else fails), is in
+      `docs/zim-encrypted-notebooks.md`. Now: native `turtl_core` 95, wasm32 under Node 61.

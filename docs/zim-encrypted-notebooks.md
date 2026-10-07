@@ -15,13 +15,19 @@ each claim is checked.
   *nobody can recover it for you*. One passphrase protects every encrypted notebook in the browser.
 * Encrypted notebooks are in the notebook menu beside the open ones, with an *encrypted* mark, and
   the same editor, links, search, attachments, rename, import and export work in them.
-* **Lock** (a button in the top bar, the notebook menu, or automatically after 30 minutes of nobody
-  touching the app) leaves the encrypted notebook and ends the engine that holds the keys. After
-  that the menu lists no encrypted notebook at all, and offers *Unlock encrypted notebooks…*.
+* **Lock** (a button in the top bar, the notebook menu, automatically after 30 minutes of nobody
+  touching the app, or when a page that the browser kept comes back to the screen) ends the engine
+  that holds the keys first, and then shows a notebook that is not encrypted instead (one is made if
+  there is none). A question that was open is closed. What was typed is saved first, for a few seconds
+  at most: if it can't be, pressing Lock asks whether to lose it, and a lock that nobody asked for goes
+  ahead and says what it cost. After that the menu lists no encrypted notebook at all, and offers
+  *Unlock encrypted notebooks…*.
 * **I forgot it…** in the unlock dialog is the only way out of a lost passphrase: it erases every
   encrypted notebook of the browser, after saying so.
-* Exporting an encrypted notebook says first that the zip is **not** encrypted.
-* A browser that won't promise to keep the data says so once (the notebooks are stored all the same).
+* Exporting an encrypted notebook says first that the zip is **not** encrypted; downloading a page
+  or an attachment says, in the status line, that the copy is not.
+* A browser that won't promise to keep the data says so once, when the browser has answered (which
+  can be after it asked the person); the notebooks are stored all the same.
 * Encrypted notebooks need a **secure page** (https, or `localhost`): the file system they live in
   exists only there. On any other address the app still works, and says why when one is asked for.
 
@@ -41,8 +47,9 @@ each claim is checked.
 |---|---|---|
 | The core, `local_only` | `core/turtl-core-rs/src` | accounts on one device (`models/user.rs`: `join_local`, `login_local`), no sync, atomic writes and batches (`storage.rs`, `dumpy`), notes with a private `props` field |
 | The engine's host | `web/src/vault/core-boot.ts`, `core-worker.ts` | starts the core in a module Worker the way `wasm_host.rs` prescribes: wasm, libsodium injected, databases in OPFS, config |
-| The client | `web/src/vault/core-client.ts` | requests as promises, `CoreError`, events, "the engine was lost" |
-| The vault | `web/src/vault/vault.ts` | one account that a passphrase unlocks: `create`, `unlock`, `lock`, `erase`; one tab at a time; says when it is lost |
+| The client | `web/src/vault/core-client.ts` | requests as promises, `CoreError`, events, text made fit for the engine's parser (half of a character can't be sent), and the watchdog: "the engine was lost" when it dies loudly, or has been waited for and has said nothing for 45 s |
+| The Worker's network cut-off | `web/src/vault/cut-off.ts` | after boot, `fetch`, `XMLHttpRequest`, `WebSocket` and the other ways a Worker has of reaching out refuse, for good |
+| The vault | `web/src/vault/vault.ts` | one account that a passphrase unlocks: `create`, `unlock`, `lock`, `erase`; one tab at a time; says when it is lost; locking never waits for an unlock that is under way (it ends that engine) |
 | The store | `web/src/vault/turtl-store.ts` | a `NotebookStore` over the core (below) |
 | The router | `web/src/notebook/routed-store.ts` | open and encrypted notebooks in one list; encrypted ids carry the prefix `vault:` |
 | The app | `web/src/app/app.ts` | the dialogs, the Lock button, and the **private mode** that keeps an open encrypted notebook out of every place the browser keeps things |
@@ -73,8 +80,11 @@ arrive together or not at all.
   account takes ~0.55 s in the wasm core under Node), eight times the work of a Turtl server
   account (N = 2^14). There is no server to slow guessing down and the data is within reach of
   whoever has the browser's files, so the passphrase's cost is all there is. The cost is stored with
-  the account (`LocalAccount.kdf`), so it can be raised later without locking anyone out. The salt
-  is made from the account's name, which is random.
+  the account (`LocalAccount.kdf`) and a login uses what is stored, so accounts can be made at a
+  higher cost later without locking anyone out; moving an existing account to a new cost needs a
+  re-key, which is not built. A stored cost that no device could pay (more than 1 GiB of memory or
+  2^25 operations) is refused without trying, so a damaged or planted record can't make a login run
+  for ever. The salt is made from the account's name, which is random.
   *Checked:* the known-answer test for this cost uses a key made by Python's `hashlib.scrypt`
   (OpenSSL), not libsodium, and runs natively and on wasm32 (`crypto::low::tests`).
 * **The passphrase is normalised first** (Unicode NFKC, in `Vault`, `normalizePassphrase`): an
@@ -92,8 +102,15 @@ arrive together or not at all.
   missing account are the same answer (`Unauthorized`).
 * **Locking.** `lock()` sends `user:logout` (the core drops the profile, search index and keys and
   closes its databases) and then **terminates the Worker**: its whole memory, with every key and
-  every decrypted page, is released at once. Nothing secret is held by the page's own thread, except
-  the passphrase while it is being typed and sent (see Limits).
+  every decrypted page, is released at once. If the engine does not answer within five seconds it is
+  terminated all the same, and a lock does not wait for an unlock that is under way: that engine is
+  ended and the unlock fails. The keys go before the screen is switched to another notebook (the app
+  is hidden meanwhile). The page's own
+  thread held the decrypted pages while the notebook was open (the editor, the notebook model, the
+  strings of the pages) and lets go of them at the lock: the model is freed, the editor's state
+  replaced, the store's index of page names forgotten, and what is left is for the garbage collector,
+  which is not a wipe (a JavaScript string can't be wiped). The passphrase is the one secret the page
+  holds in the same way (see Limits).
 
 ## What is stored, and what a thief of the browser's files learns
 
@@ -142,6 +159,13 @@ one character repeated, and a short list of the first passphrases a stranger wou
   reads the passphrase. The installed app (a pinned service worker, subresource integrity) and the
   packaged desktop build are the mitigations; this build has neither yet. Serve it yourself, or
   use it from a copy you trust.
+* **Someone who can write the files, not only read them**: they can delete the vault, put an older
+  copy of it back, or put one note's ciphertext in place of another's in the same notebook. The core
+  notices what it can't decrypt, but nothing here authenticates the database as a whole: this is
+  confidentiality, not integrity.
+* **A script on the page**, as far as the app can help it: nothing offers one a handle on the app
+  (`window.__zim` is there only for the tests, which ask for it before the page loads), but a script
+  that runs in the page can read what the page shows.
 * **A weak passphrase**, **a lost passphrase** (nothing recovers the data), **a copy you exported**
   (the zip is plain), **the browser deciding to delete the data** when the disk is full (it was asked
   not to: `navigator.storage.persist()`, and the app says if it would not promise).
@@ -163,6 +187,10 @@ both), unsaved typing in `localStorage` (a draft for the next start), and which 
 | Folded sections | remembered by name | not remembered |
 | Browser translation | offered | `translate=no` on the document (the editor itself is never offered: CodeMirror marks it so) |
 | Last notebook to reopen | its id | its id, in a separate key, used only to go back to it after an unlock |
+| Status line, notices, search results | whatever was said | cleared when the notebooks lock (a failed save names a page, a search box holds what was typed) |
+| Questions (dialogs) | stay until answered | closed when the notebooks lock; each one acts only on the notebook it was opened on |
+| Copies saved to the computer (a page, an attachment, an export) | a file | a plain file: the app says so, and an export asks first |
+| A page the browser keeps and shows again (Back) | as it was | hidden when it is put away, and the notebooks lock when it is shown |
 
 The ids kept are the notebooks' random ids, which are visible in the databases anyway.
 
@@ -180,9 +208,13 @@ The ids kept are the notebooks' random ids, which are visible in the databases a
   could send what a rollback then takes back). `TurtlStore` runs every change as one batch, which is
   also what makes importing a notebook of thousands of pages a single commit (2,000 pages in ~7 s in
   Chromium; opening them takes half a second).
-* **Evidence.** A browser test writes 600 pages and ends the Worker 150 ms in, as a closing tab
-  would: after a reload and an unlock the notebook is exactly as it was and still usable. The same
-  test with batching turned off leaves five of the pages behind, so the test can fail.
+* **Evidence.** A browser test writes 1,200 pages and ends the Worker at five different moments
+  (5, 60, 250, 800 and 2,500 ms in), as a closing tab would: after a reload and an unlock the
+  notebook has every page of the write or none of them, is still usable, and is listed once (the
+  four earliest moments are checked to really cut the write off: it takes seconds). The same test
+  with batching turned off leaves pages behind at the four moments that fall late enough for any to
+  have been written (2, 9, 26 and 81 of them in the run that was measured; the number depends on the
+  machine), so the test can fail.
   Unit tests: a change that fails halfway (the core refusing the fourth write of a rename) changes
   nothing and is retried as if it had never been tried; a failed undo makes the store refuse to be
   trusted until the vault is locked and unlocked.
@@ -199,6 +231,10 @@ The ids kept are the notebooks' random ids, which are visible in the databases a
   encrypted notebook when the vault is unlocked: 2.1 s for 2,700 notes (1.4 s of it is the key). A
   vault of tens of thousands of notes will be slow to open. The fix is to index lazily (list a
   notebook from the database's own indexes and decrypt only that notebook's notes); not done.
+* **Big imports get slower per page as they grow.** Measured in Chromium (one batch of notes of about
+  1 KB each): 500 take 1.8 s, 1,000 take 3.1 s, 2,000 take 6.5 s and 4,000 take 14.6 s; the cost of
+  one write rose from 2.7 ms to 4.2 ms across the 4,000, and the commit at the end is linear (about
+  a third of a millisecond a note). Nothing larger was measured.
 * **No passphrase change**, no recovery, no second device: sync with the Turtl server is the next
   step and needs the server revived (CLAUDE.md, Open issues 3 and 5).
 * **Attachments are at most 50 MB** each in an encrypted notebook: a file goes through the engine
@@ -210,26 +246,59 @@ The ids kept are the notebooks' random ids, which are visible in the databases a
   garbage collected; a JavaScript string can't be wiped.
 * **Unlock time and the engine's start-up** (~1.5 s for the key and the engine, more with a big
   vault) is a spinner in the dialog ("Unlocking…").
-* **A Worker that dies without a word** (killed by the browser for memory) can't be seen: the app
-  learns of an engine's death only when the Worker reports an error. Requests then wait until the
-  page is reloaded. (An engine that fails loudly locks the vault and says so; that is tested.)
+* **A Worker that dies without a word** (killed by the browser for memory) says nothing, so it is
+  noticed by its silence: it says it is alive every five seconds, and an engine that has a request
+  waiting and has said nothing for 45 seconds is taken to be dead, ended, and the vault is locked with
+  a message. A request can wait that long for such a death to be noticed. (An engine that fails loudly
+  locks the vault at once. Both are tested.)
 * **Natively** (a future desktop build of the same core), a note's attachment is a file beside the
-  database, which a rolled-back batch does not remove: it is left behind as an orphan (still
-  ciphertext). Not an issue in the browser, where attachments are rows of the database.
+  database. A file that a batch deletes is removed when the batch commits, not before, so a rollback
+  keeps it; a file that a rolled-back batch added is left behind as an orphan (still ciphertext). Not
+  an issue in the browser, where attachments are rows of the database.
 
 ## What verifies what
 
 | Claim | Checked by |
 |---|---|
 | A local account is made, refused for a wrong passphrase or a taken name, survives restarts, queues nothing and asks no server for anything; **no name, text, file name or file byte of a notebook is in any file the core writes**, and the files hold the ids (positive control) | `core/turtl-core-rs/src/flow_tests.rs`: `local_only_flow`, `local_only_on_disk_flow` (the second reads every file of a real on-disk run), natively; `local_only_flow` on wasm32 too. With mutation checks (an account made at the server's cost, a login ignoring the stored cost, queuing for sync restored, etc. all fail the tests) |
+| The core in this mode can't be made to reach a server: every command of the dispatcher but the short list in `dispatch::LOCAL_COMMANDS` is refused (the list of commands is read from the dispatcher's own source, so a new one is refused until it is added on purpose), the API refuses to build a request, a host can't send it events, messages it can't read are answered, the page is not handed the private key | `local_only_flow`, `unreadable_messages_flow`, and the `::ev` assertion in the wasm `host_api` test |
+| A stored account that asks for more than a device can do is refused without trying; a user record that the key does not open is not left logged in; a notebook of 33,000 notes is read; attachments follow their notes (deleted when the batch commits, for any user) | `local_account_tampered_flow`, dumpy's chunked-read test, `local_files_follow_their_notes_flow`, `local_files_in_batches_flow` |
 | The key derivation is what is claimed | `crypto::low::tests::can_generate_keys_at_the_local_cost` (key from Python's scrypt), native and wasm |
 | Writes are atomic; batches commit or roll back whole, memory included | dumpy tests (`a_failed_store_leaves_nothing_behind`, `writes_join_the_transaction_that_is_open`), `storage::tests::batches_are_whole_or_nothing`, `flow_tests::local_batches`; native and wasm |
-| The engine runs in a Worker, data survives reloads, one tab at a time, an insecure page is refused, a cut-off write leaves the notebook as it was, and nothing is readable in the browser's files | `web/test/vault-browser.mjs` (`npm run test:vault`), real Chromium, served under the app's CSP |
-| The store keeps the notebook-store contract, with files, moves, atomicity under failure; the vault's states and its client | `web/test/store.test.ts` (the same contract as the other stores), `turtl-store.test.ts`, `vault.test.ts` |
-| In the interface: made, written in, locked, unlocked; Back/Forward and the address say nothing; no draft; export warns; import and rename and delete; a lost passphrase is erased; a short passphrase is refused; an insecure page says so; auto-lock; **IndexedDB, localStorage, sessionStorage, the Cache API and every OPFS file hold none of a notebook's name, page names, text, tags, attachment name, type or bytes**, nor the passphrase | `web/test/browser.mjs`, the scenarios after "an encrypted notebook is made…" |
+| The engine runs in a Worker, data survives reloads, one tab at a time, an insecure page is refused, a write cut off at five different moments leaves the notebook whole or as it was, nothing is readable in the browser's files, a Worker that was cut off from the network can't use it or get it back (a probe in a real Worker, with a control that shows it could before), and the engine asks the network for nothing but its own files (the browser's own request log) | `web/test/vault-browser.mjs` (`npm run test:vault`), real Chromium, served under the app's CSP |
+| The store keeps the notebook-store contract, with files, moves, atomicity under failure; the vault's states and its client; an engine that goes silent is declared dead and one that keeps saying it is alive is not; a lock does not wait for an unlock and is not undone by one that finishes just after; the store forgets at a lock; text the engine could not read is never sent | `web/test/store.test.ts` (the same contract as the other stores), `turtl-store.test.ts`, `routed-store.test.ts`, `vault.test.ts`, `engine-failures.test.ts`, `cut-off.test.ts` |
+| In the interface: made, written in, locked, unlocked; Back/Forward and the address say nothing; no draft; export warns; import and rename and delete; a lost passphrase is erased; a short passphrase is refused; an insecure page says so; auto-lock; **IndexedDB, localStorage, sessionStorage, the Cache API and every OPFS file hold none of a notebook's name, page names, text (accented, Chinese and emoji too: looked for as UTF-8 and as UTF-16, with a control file that shows the scan finds UTF-8), tags, attachment name, type or bytes, nor what was typed in the search box or a dialog that was given up**, nor the passphrase | `web/test/browser.mjs`, the scenarios after "an encrypted notebook is made…" |
+| A question that was asked on one notebook can't change another; a lock closes questions and leaves the notebook shown instead untouched, and Back does not lead into the locked one; a lock asks before it loses typing and an idle one says what it lost, and none of that is anywhere the browser keeps things; a page the browser kept is hidden and then locks; a lock that can't switch the screen starts the page again; a dead engine locks the vault with a message and leaves nothing on the screen; a list of notebooks that can't be got is said so; Escape does not give up an unlock; a late answer from the browser about keeping the data is waited for; a plain copy is said to be plain; a page nobody asked to test has no `window.__zim` | `web/test/browser.mjs`, the scenarios under "What the review of the encrypted notebooks found" |
 
 The tests that can fail were checked to: each was run with the thing it tests broken (see the commit
 messages), and the ones that did not notice were tightened.
+
+## What the review found
+
+When the work was done, a reviewer with no part in building it went through the core, the web host,
+the app and these claims, looking for ways they fail. They found real problems in every layer. Each
+was fixed and given a test that fails without the fix (the mutation checks that showed it are in the
+commit messages). The ones that mattered most:
+
+| Found | What was done |
+|---|---|
+| The core in local mode could still be made to talk to a server: its API was only unused, the dispatcher answered every command (feedback, sync, ...), and a host could send it events | The API refuses to build a request in local mode. The dispatcher answers a short list of commands and refuses the rest; the test reads the dispatcher's own list, so a new command is refused until it is added on purpose. Events from a host are refused. The page is not handed the account's private key |
+| Locking depended on the screen: a save that never finished, a store that failed to list notebooks, or a question that was open (and was then answered about whatever notebook was shown) could keep the keys in memory or act on the wrong notebook | The keys go first (the engine is ended), then the screen. Waiting for a save is bounded, a lock does not wait for an unlock, questions are closed at a lock and each acts only on the notebook it was asked on, and if the screen can't be switched the page starts again instead of going on showing the notebook |
+| A page that the browser kept and showed again was unlocked, with the notebook on the screen | Hidden when it is put away, locked when it comes back |
+| Locking over typing that could not be saved lost it without a word | A lock that is asked for asks first; one that nobody asked for says what it cost |
+| An engine killed without a word was waited on for ever; so was a request with half of a character in it (JSON can't carry one, and the core's parser refused it unanswered) | A heartbeat and a watchdog (45 s of silence with a request waiting); text is made fit before it is sent |
+| The engine's Worker had `fetch` and the other ways out | They are taken away after boot, for good. This is a second lock, not a sandbox: only a policy stops a script being imported, and the app's own headers send one (`connect-src 'self'`) |
+| The page offered a handle on the whole app on `window` | Only a test, which asks before the page loads, gets one |
+| Page names lingered after a lock: in the store's index, in the status line (a failed save names a page), in a notice, in the search results, in the history's numbers | All are let go at a lock |
+| A read of more than 32,766 notes failed (SQLite's limit on the values of one statement); the attachments of a deleted note were removed only for some users; a stored account could ask for a cost that would hang a login | Reads in chunks (tested with 33,000); files follow their notes for every user, and go when the batch that deleted them commits; a cost beyond what a device can pay is refused |
+| The passphrase was counted before it was normalised: ten fullwidth digits passed for a ten-character passphrase, and were `1234567890` as a key | Counted as it becomes a key |
+| Some claims here were stronger than the code ("nothing secret is held by the page's own thread", "a Worker that dies without a word can't be seen", a cost that "can be raised later without locking anyone out", what a rolled-back batch does to files, what the crash test showed) | Corrected in this document |
+
+What the review also said that is **not fixed**, and is in Limits or below: unlocking decrypts and
+indexes everything; someone who can write the files can roll them back or swap ciphertexts; an
+existing account can't be moved to a new cost; the account record's own `id` is not authenticated;
+a browser that asks the person about keeping the data gets its answer waited for, however long that
+takes.
 
 ## Not done
 
@@ -240,3 +309,5 @@ messages), and the ones that did not notice were tightened.
   Open issue 5).
 * Lazy indexing (above), per-notebook passphrases (today one vault, one passphrase), a setting for
   the auto-lock time, a service worker with pinned code (Open issue 6).
+* Moving an existing account to a new scrypt cost (a re-key), and authenticating the account record
+  (its `id` and `kdf` are checked only by a login that must then decrypt the user record).

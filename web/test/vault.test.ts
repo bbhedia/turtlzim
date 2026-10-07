@@ -28,12 +28,17 @@ async function existingVault(): Promise<Vault> {
 
 describe("the core's client", () => {
   /** A transport that answers by script, to see what the client does with every kind of answer. */
-  function scripted(reply: (message: string[]) => unknown[]): CoreTransport & { sent: string[][]; lose(reason: string): void; closed: boolean } {
+  function scripted(reply: (message: string[]) => unknown[]): CoreTransport & { sent: string[][]; lose(reason: string): void; closed: boolean; terminated: boolean } {
     const transport = {
       sent: [] as string[][],
       closed: false,
       onMessage: null as CoreTransport["onMessage"],
       onLost: null as CoreTransport["onLost"],
+      onHeard: null as CoreTransport["onHeard"],
+      terminated: false,
+      terminate() {
+        transport.terminated = true;
+      },
       async boot() {},
       send(message: string) {
         const parsed = JSON.parse(message) as string[];
@@ -176,6 +181,17 @@ async function whoIsLoggedIn(): Promise<string> {
   }
 }
 
+describe("what a passphrase is counted as", () => {
+  it("is what the key is made from: fullwidth digits are digits, and an accent typed in two parts is one character", () => {
+    // (ten fullwidth digits are 1234567890 once they are a key)
+    expect(checkPassphrase("\uff11\uff12\uff13\uff14\uff15\uff16\uff17\uff18\uff19\uff10")).toMatch(/first a stranger would try/);
+    // (five letters with their accents typed apart are ten code points, and five characters)
+    expect(checkPassphrase("e\u0301a\u0301i\u0301o\u0301u\u0301")).toMatch(/at least 10 characters/);
+    // the same ten characters typed with the accents made in
+    expect(checkPassphrase("\u00e9\u00e1\u00ed\u00f3\u00fa\u00e9\u00e1\u00ed\u00f3\u00fa")).toBeNull();
+  });
+});
+
 describe("the passphrase as it becomes a key", () => {
   it("is the same however an accent was typed, and for fullwidth letters, and unchanged for ASCII", () => {
     const composed = "caf\u00e9 cr\u00e8me br\u00fbl\u00e9e";
@@ -239,6 +255,8 @@ describe("the vault", () => {
       const transport: CoreTransport = {
         onMessage: null,
         onLost: null,
+        onHeard: null,
+        terminate() {},
         async boot() {},
         send(message: string) {
           const [id, command, ...args] = JSON.parse(message) as string[];
@@ -308,6 +326,8 @@ describe("the vault", () => {
         const transport: CoreTransport = {
           onMessage: null,
           onLost: null,
+          onHeard: null,
+          terminate() {},
           async boot() {},
           send(message: string) {
             const [id, command] = JSON.parse(message) as string[];
@@ -346,6 +366,8 @@ describe("the vault", () => {
       const transport: CoreTransport = {
         onMessage: null,
         onLost: null,
+        onHeard: null,
+        terminate() {},
         async boot() {},
         send(message: string) {
           const [id, command] = JSON.parse(message) as string[];
@@ -362,6 +384,7 @@ describe("the vault", () => {
         const vault = new Vault({ persistence: null, connect: emptyEngine });
         expect(vault.persisted).toBeNull();
         await vault.create(PASSPHRASE);
+        expect(await vault.kept).toBe(answer);
         expect(vault.persisted).toBe(answer);
       });
     }
@@ -370,10 +393,12 @@ describe("the vault", () => {
       vi.stubGlobal("navigator", {});
       const none = new Vault({ persistence: null, connect: emptyEngine });
       await none.create(PASSPHRASE);
+      expect(await none.kept).toBeNull();
       expect(none.persisted).toBeNull();
       vi.stubGlobal("navigator", { storage: { persist: async () => { throw new Error("not allowed"); } } });
       const refusing = new Vault({ persistence: null, connect: emptyEngine });
       await refusing.create(PASSPHRASE);
+      expect(await refusing.kept).toBeNull();
       expect(refusing.persisted).toBeNull();
     });
   });
@@ -384,6 +409,8 @@ describe("the vault", () => {
       connect: () => ({
         onMessage: null,
         onLost: null,
+        onHeard: null,
+        terminate() {},
         async boot() {
           throw new Error(message);
         },
@@ -391,8 +418,12 @@ describe("the vault", () => {
         async close() {},
       }),
     });
-    await expect(failing("the stored data is in use by another tab or worker (close it and try again): Error").create(PASSPHRASE)).rejects.toBeInstanceOf(VaultBusyError);
-    await expect(failing("couldn't set up persistent storage: nope").unlock(PASSPHRASE)).rejects.toBeInstanceOf(VaultUnavailableError);
+    // (the core tags what it means: its prose is not read for the meaning, so a message that only mentions it is not taken for it)
+    await expect(failing("[in-use] the stored data is in use by another tab or worker (close it and try again): Error").create(PASSPHRASE)).rejects.toBeInstanceOf(VaultBusyError);
+    await expect(failing("[no-storage] couldn't set up persistent storage: nope").unlock(PASSPHRASE)).rejects.toBeInstanceOf(VaultUnavailableError);
     await expect(failing("something else entirely").unlock(PASSPHRASE)).rejects.toThrow("something else entirely");
+    const prose = failing("the stored data is in use by another tab or worker, in prose");
+    await expect(prose.unlock(PASSPHRASE)).rejects.not.toBeInstanceOf(VaultBusyError);
+    await expect(failing("couldn't set up persistent storage, in prose").unlock(PASSPHRASE)).rejects.not.toBeInstanceOf(VaultUnavailableError);
   });
 });

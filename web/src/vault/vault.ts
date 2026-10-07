@@ -71,7 +71,9 @@ export const MIN_PASSPHRASE_LENGTH = 10;
 const COMMON = new Set(["password", "passphrase", "1234567890", "0123456789", "qwertyuiop", "letmein123", "iloveyou123", "administrator"]);
 
 /** Why `passphrase` won't do for a vault, or null if it will. (Anyone who copies the vault's data can try passphrases as fast as their machines go, so a short or common one isn't enough.) */
-export function checkPassphrase(passphrase: string): string | null {
+export function checkPassphrase(typed: string): string | null {
+  // (as it will be made into a key: one that is fullwidth digits is the digits)
+  const passphrase = normalizePassphrase(typed);
   if ([...passphrase].length < MIN_PASSPHRASE_LENGTH) return `Use at least ${MIN_PASSPHRASE_LENGTH} characters: a few unrelated words make a good passphrase that is easy to remember.`;
   if (new Set([...passphrase]).size < 4) return "That passphrase repeats too few different characters.";
   if (COMMON.has(passphrase.toLowerCase())) return "That passphrase is one of the first a stranger would try.";
@@ -102,6 +104,8 @@ export interface VaultOptions {
   connect?: () => CoreTransport;
   /** Where the databases are kept. The default is the vault's directory; tests that have no file system pass null. */
   persistence?: Persistence | null;
+  /** How long the engine may say nothing, with a request waiting, before it is taken to be dead (ms). */
+  silenceMs?: number;
 }
 
 export class Vault {
@@ -111,12 +115,19 @@ export class Vault {
   private readonly listeners = new Set<(event: VaultEvent) => void>();
   /** Whether the browser promised to keep the vault's data when it is short of room (null: not asked, or not told). Without that promise it may delete it. */
   persisted: boolean | null = null;
-  /** The unlock or lock in progress: they go one at a time. */
+  private keptAnswer: Promise<boolean | null> = Promise.resolve(null);
+  /** Unlocking, making and erasing go one at a time (locking does not wait for them: see `lock`). */
   private busy: Promise<unknown> = Promise.resolve();
+  private readonly silenceMs: number | undefined;
+  /** Counts the locks: an unlock that began before one is over. */
+  private epoch = 0;
+  /** The engines that are being started, so that locking can end them. */
+  private readonly starting = new Set<CoreClient>();
 
   constructor(options: VaultOptions = {}) {
     this.connect = options.connect ?? (() => new WorkerTransport());
     this.persistence = options.persistence === undefined ? { directory: VAULT_DIRECTORY } : options.persistence;
+    this.silenceMs = options.silenceMs;
   }
 
   get unlocked(): boolean {
@@ -154,10 +165,11 @@ export class Vault {
   async exists(): Promise<boolean> {
     if (this.client) return true;
     return this.exclusive(async () => {
-      const client = await this.boot();
+      const client = await this.start();
       try {
         return (await client.request<string[]>("user:local-accounts")).length > 0;
       } finally {
+        this.starting.delete(client);
         await client.close();
       }
     });
@@ -169,18 +181,22 @@ export class Vault {
     if (problem) throw new Error(problem);
     await this.exclusive(async () => {
       if (this.client) throw new VaultExistsError();
-      const client = await this.boot();
+      const epoch = this.epoch;
+      const client = await this.start();
       try {
         if ((await client.request<string[]>("user:local-accounts")).length > 0) throw new VaultExistsError();
         // a name of its own, which is part of what the passphrase is made into a key with: nobody else's key is made the same way
         const name = hex(crypto.getRandomValues(new Uint8Array(16)));
         await client.request("user:join", name, normalizePassphrase(passphrase));
+        this.assertNotLockedSince(epoch);
       } catch (error) {
+        this.starting.delete(client);
         await client.close();
         throw error;
       }
+      this.starting.delete(client);
       this.adopt(client);
-      await this.askToKeep();
+      this.askToKeep();
     });
   }
 
@@ -188,7 +204,8 @@ export class Vault {
   async unlock(passphrase: string): Promise<void> {
     await this.exclusive(async () => {
       if (this.client) return;
-      const client = await this.boot();
+      const epoch = this.epoch;
+      const client = await this.start();
       try {
         const accounts = await client.request<string[]>("user:local-accounts");
         const name = accounts[0];
@@ -199,35 +216,52 @@ export class Vault {
           if (error instanceof CoreError && error.kind === "api" && error.subtype === "Unauthorized") throw new WrongPassphraseError();
           throw error;
         }
+        this.assertNotLockedSince(epoch);
       } catch (error) {
+        this.starting.delete(client);
         await client.close();
         throw error;
       }
+      this.starting.delete(client);
       this.adopt(client);
-      void this.askToKeep();
+      this.askToKeep();
     });
   }
 
-  /** Lock the vault: the core logs out and its Worker is ended, so nothing decrypted or secret stays in memory. */
+  /** An unlock that was asked for before the vault was last locked doesn't open it: the lock came later. */
+  private assertNotLockedSince(epoch: number): void {
+    if (epoch !== this.epoch) throw new Error("The encrypted notebooks were locked before this finished.");
+  }
+
+  /**
+   * Lock the vault: the core logs out and its Worker is ended, so nothing decrypted or secret stays in memory.
+   * It does not wait for anything else the vault is doing (an unlock that is stuck, say): that is over, and so
+   * is an engine that has stopped answering, which is ended after a few seconds all the same.
+   */
   async lock(): Promise<void> {
-    await this.exclusive(async () => {
-      const client = this.client;
-      if (!client) return;
-      this.client = null;
-      // the logout closes the databases; its answer comes a second later, but the event is immediate
-      const loggedOut = new Promise<void>((resolve) => {
-        const stop = client.onEvent((event) => {
-          if (event.e === "user:logout") {
-            stop();
-            resolve();
-          }
-        });
+    this.epoch++;
+    this.endStarting();
+    const client = this.client;
+    if (!client) return;
+    this.client = null;
+    // the logout closes the databases; its answer comes a second later, but the event is immediate
+    const loggedOut = new Promise<void>((resolve) => {
+      const stop = client.onEvent((event) => {
+        if (event.e === "user:logout") {
+          stop();
+          resolve();
+        }
       });
-      client.request("user:logout", false).catch(() => undefined);
-      await Promise.race([loggedOut, new Promise<void>((resolve) => setTimeout(resolve, 5000))]);
-      await client.close();
-      this.emit({ kind: "locked" });
     });
+    client.request("user:logout", false).catch(() => undefined);
+    await Promise.race([loggedOut, new Promise<void>((resolve) => setTimeout(resolve, 5000))]);
+    await client.close();
+    this.emit({ kind: "locked" });
+  }
+
+  private endStarting(): void {
+    for (const client of [...this.starting]) client.terminate();
+    this.starting.clear();
   }
 
   /**
@@ -262,29 +296,45 @@ export class Vault {
     return run;
   }
 
-  /** Start a core, turning what can go wrong with the storage into errors the app can explain. */
-  private async boot(): Promise<CoreClient> {
+  /**
+   * Start a core, turning what can go wrong with the storage into errors the app can explain. (The core says
+   * which it was with a tag at the start of its message, `[in-use]` or `[no-storage]`.) Until the caller
+   * has made it the vault's (or closed it) a lock ends it.
+   */
+  private async start(): Promise<CoreClient> {
     if (this.persistence) {
       const support = vaultSupport();
       if (!support.ok) throw new VaultUnavailableError(support.reason);
     }
+    const client = new CoreClient(this.connect(), this.silenceMs);
+    this.starting.add(client);
     try {
-      return await CoreClient.boot(this.connect(), this.persistence);
+      await client.start(this.persistence);
     } catch (error) {
+      this.starting.delete(client);
       const message = error instanceof Error ? error.message : String(error);
-      if (/in use by another tab/i.test(message)) throw new VaultBusyError();
-      if (/persistent storage/i.test(message)) throw new VaultUnavailableError("This browser won't keep private files for encrypted notebooks.");
+      if (message.includes("[in-use]")) throw new VaultBusyError();
+      if (message.includes("[no-storage]")) throw new VaultUnavailableError("This browser won't keep private files for encrypted notebooks.");
       throw error;
     }
+    return client;
   }
 
-  /** Ask the browser not to clear the vault's data when it is short of room: the data can't be recovered if it does. */
-  private async askToKeep(): Promise<void> {
-    try {
-      this.persisted = (await navigator.storage?.persist?.()) ?? null;
-    } catch {
-      // not allowed here: the notebooks are kept all the same, just not guaranteed to stay
-      this.persisted = null;
-    }
+  /** The browser's answer to whether it will keep the vault's data (see `persisted`), once it has given one. */
+  get kept(): Promise<boolean | null> {
+    return this.keptAnswer;
+  }
+
+  /** Ask the browser not to clear the vault's data when it is short of room: the data can't be recovered if it does. (Not waited for: a browser may ask the person.) */
+  private askToKeep(): void {
+    this.keptAnswer = (async () => {
+      try {
+        this.persisted = (await navigator.storage?.persist?.()) ?? null;
+      } catch {
+        // not allowed here: the notebooks are kept all the same, just not guaranteed to stay
+        this.persisted = null;
+      }
+      return this.persisted;
+    })();
   }
 }

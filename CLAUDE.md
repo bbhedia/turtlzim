@@ -128,7 +128,7 @@ npm run build                       # typecheck + production build into web/dist
 npm test                            # Vitest: editor logic, headless (ZIM_GOLDEN_DIR=... adds real pages)
 scripts/setup-browser.sh            # once: Chromium + libraries + a font, no root
 npm run test:browser                # the built app in a real browser (ZIM_GOLDEN_DIR=... adds the real Zim manual; ONLY=text picks scenarios)
-npm run test:vault                  # the encrypted-notebook vault in a real browser: Worker, OPFS, reload, crash mid-write, one tab at a time
+npm run test:vault                  # the encrypted-notebook vault in a real browser: Worker, OPFS, reload, crash mid-write (five moments), one tab at a time, the Worker's network cut-off, heartbeat and silent death
 npm run screenshots <dir>           # twelve pictures of the app to look at (light, dark, phone, dialogs, pictures)
 scripts/serve.sh start --host :: --port 8080   # serve web/dist in the background (see docs/zim-editor-plan.md: trying it from another machine)
 
@@ -165,9 +165,14 @@ docker compose up                   # Postgres + server (define compose file)
   `history.state`, `localStorage`/`sessionStorage`, IndexedDB, the Cache API, a log, or an error
   message that is kept. A new feature of the app that remembers, stores or exposes anything about a
   page (a name, text, a fold, a recent-pages list, a draft) has to check `App.isPrivate` and keep
-  quiet in an encrypted notebook; the scan in `web/test/browser.mjs` ("nothing of an encrypted
-  notebook is in anything the browser keeps") is what catches one that doesn't. The core's
-  `local_only` mode asks no server for anything.
+  quiet in an encrypted notebook (and what is on the screen after a lock, the status line and notices
+  included, must name nothing); the scan in `web/test/browser.mjs` ("nothing of an encrypted notebook
+  is in anything the browser keeps") is what catches one that doesn't. The core's `local_only` mode
+  asks no server for anything: it refuses the network where requests are made and answers only the
+  commands in `dispatch::LOCAL_COMMANDS` (a command that a local core needs is added there on purpose;
+  the test that reads every command of the dispatcher says which is missing). Locking must work
+  whatever else fails (the keys go first, the screen second), and a dialog that is confirmed later
+  acts only on the notebook it was opened on (`App.stale`).
 - Notebook rules (what a name or a link means, tree, backlinks, search, rename) live in
   `core/zim-notebook` and nowhere else: the web app calls them through wasm and holds none of its own.
   A UI change is not done until it has been looked at (`npm run screenshots`) and driven in the real

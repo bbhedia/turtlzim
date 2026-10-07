@@ -18,17 +18,43 @@ async function attempt<T>(work: () => Promise<T>): Promise<Outcome<T>> {
 
 /** The Worker transport of the engine started last, so that a test can end it as closing the tab would. */
 let lastTransport: WorkerTransport | null = null;
+const query = new URLSearchParams(location.search);
 const vault = new Vault({
   connect: () => (lastTransport = new WorkerTransport()),
   // (`?memory` keeps the databases in memory instead of the private file system: to tell what the file system costs)
-  persistence: new URLSearchParams(location.search).has("memory") ? null : undefined,
+  persistence: query.has("memory") ? null : undefined,
+  // (`?silence=3000`: how long an engine that is waited for may say nothing before it is taken to be dead)
+  silenceMs: query.has("silence") ? Number(query.get("silence")) : undefined,
 });
+/** What the vault said happened to it, in order. */
+const happened: string[] = [];
+vault.onChange((event) => happened.push(event.kind === "lost" ? `lost: ${event.reason}` : event.kind));
+/** How many times the engine's Worker has said anything since `listen`. */
+let heard = 0;
 const store = new TurtlStore(() => vault.core, pageKey);
 
 const page = (name: string, text: string): StoredPage => ({ name, text, bom: false, lineEnding: "lf", modified: 1 });
 const file = (path: string, text: string, type: string): StoredFile => ({ path, blob: new Blob([text], { type }), modified: 2 });
 
 const lab = {
+  /** Count what the engine's Worker says to the page (its heartbeat included) from now on. */
+  listen: () => {
+    const transport = lastTransport;
+    if (!transport) return false;
+    const before = transport.onHeard;
+    heard = 0;
+    transport.onHeard = () => {
+      heard++;
+      before?.();
+    };
+    return true;
+  },
+  heard: () => heard,
+  /** End the engine's Worker without a word, as a browser short of memory does: nothing is sent and nothing is thrown. */
+  killSilently: () => {
+    (lastTransport as unknown as { worker: Worker | null }).worker?.terminate();
+  },
+  happened: () => [...happened],
   support: () => vaultSupport(),
   secureContext: () => globalThis.isSecureContext,
   unlocked: () => vault.unlocked,
@@ -79,6 +105,30 @@ const lab = {
         return writing.then(() => "finished", (error: Error) => `stopped: ${error.message}`);
       }),
   },
+  /** Run the real network cut-off in a Worker of its own (probe-worker.ts), and report what that Worker can do before it and after. */
+  probeCutOff: (url: string) =>
+    attempt(
+      () =>
+        new Promise<{ before: string; after: Record<string, string>; restored: string[]; stillRefused: boolean }>((resolve, reject) => {
+          const worker = new Worker(new URL("./probe-worker.ts", import.meta.url), { type: "module" });
+          // (a probe that says nothing is a failure to report, not a test to wait for for ever)
+          const timer = setTimeout(() => {
+            worker.terminate();
+            reject(new Error("the probe said nothing for 15 seconds"));
+          }, 15_000);
+          worker.onmessage = (event) => {
+            clearTimeout(timer);
+            worker.terminate();
+            resolve(event.data);
+          };
+          worker.onerror = (event) => {
+            clearTimeout(timer);
+            worker.terminate();
+            reject(new Error(event.message));
+          };
+          worker.postMessage({ url });
+        }),
+    ),
   errors: { VaultBusyError: VaultBusyError.name, WrongPassphraseError: WrongPassphraseError.name, NoVaultError: NoVaultError.name },
   /** Every byte the origin-private file system holds, as [path, bytes]; the vault has to be locked (nothing may hold its files). */
   opfsFiles: () =>

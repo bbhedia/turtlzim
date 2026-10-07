@@ -18,6 +18,8 @@ export type WorkerRequest =
 export type WorkerReply =
   | { type: "booted" }
   | { type: "stopped" }
+  /** The engine is there: sent every few seconds, so that a page can tell an engine that is busy from one that has died. */
+  | { type: "alive" }
   /** Everything the core sends: `channel` says whether it is a response or an event. */
   | { type: "message"; channel: string; message: string }
   /** Something went wrong in answer to `op`. */
@@ -35,6 +37,9 @@ export interface CoreEvent {
   e: string;
   d: unknown;
 }
+
+/** How often the Worker says it is alive, in ms. */
+export const HEARTBEAT_MS = 5000;
 
 /** The channel the core's responses go out on. (Events go out on any other.) */
 export const RESPONSE_CHANNEL = "inproc://turtl-req-core-out";

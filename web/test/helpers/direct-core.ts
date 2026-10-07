@@ -18,6 +18,7 @@ const open = new Set<DirectTransport>();
 export class DirectTransport implements CoreTransport {
   onMessage: ((channel: string, message: string) => void) | null = null;
   onLost: ((reason: string) => void) | null = null;
+  onHeard: (() => void) | null = null;
 
   async boot(persistence: { directory: string } | null): Promise<void> {
     if (persistence) throw new Error("this transport has no file system to keep data in");
@@ -31,6 +32,11 @@ export class DirectTransport implements CoreTransport {
   }
 
   async close(): Promise<void> {
+    open.delete(this);
+  }
+
+  /** (The core here is the test's own process: nothing to end but this connection to it.) */
+  terminate(): void {
     open.delete(this);
   }
 }

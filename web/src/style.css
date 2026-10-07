@@ -82,6 +82,8 @@ button.secondary { background: transparent; }
   grid-template-areas: "top top" "side page" "status status";
 }
 .app[data-sidebar="closed"] { grid-template-columns: 0 minmax(0, 1fr); }
+/* while encrypted notebooks are being locked (or the page is away), nothing of them is on the screen */
+.app.locking { visibility: hidden; }
 .app[data-sidebar="closed"] .sidebar { display: none; }
 
 .topbar {

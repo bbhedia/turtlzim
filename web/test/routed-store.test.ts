@@ -73,6 +73,23 @@ describe("the store of open and encrypted notebooks", () => {
     expect(await store.listNotebooks()).toEqual([]);
   });
 
+  it("lists the open notebooks, and says why, when the encrypted ones can't be listed", async () => {
+    const problems: string[] = [];
+    const open = new MemoryStore(pageKey);
+    const sealed = new SealedStub(pageKey);
+    const store = new RoutedStore(open, sealed, () => true, (error) => problems.push(error.message));
+    await store.createNotebook({ title: "Plain", home: "Home", kind: "open" });
+    await store.createNotebook({ title: "Secret", home: "Home", kind: "encrypted" });
+    sealed.listNotebooks = async () => {
+      throw new Error("the engine is broken");
+    };
+    expect((await store.listNotebooks()).map((n) => n.title)).toEqual(["Plain"]);
+    expect(problems).toEqual(["the engine is broken"]);
+    // (and without anyone to tell, it is still the open ones, not an error that leaves the app with no notebooks to show)
+    const silent = new RoutedStore(open, sealed, () => true);
+    expect((await silent.listNotebooks()).map((n) => n.title)).toEqual(["Plain"]);
+  });
+
   it("knows nothing of the encrypted notebooks while the vault is locked, and refuses to touch them", async () => {
     const vault = { value: true };
     const { store } = make(vault);

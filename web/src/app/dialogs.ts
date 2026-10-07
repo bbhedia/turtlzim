@@ -54,6 +54,17 @@ export interface DialogOptions {
   submit?: (values: Record<string, string | boolean>) => Promise<string | void> | string | void;
 }
 
+/** The dialogs that are open now. */
+const shown = new Set<HTMLDialogElement>();
+
+/**
+ * Close every dialog that is open, as cancelling each does. For when what they are about has gone (the
+ * encrypted notebooks were locked): a dialog that stayed would go on to act on whatever is open instead.
+ */
+export function closeAllDialogs(): void {
+  for (const dialog of [...shown]) dialog.close("cancel");
+}
+
 /** Show a dialog. Resolves true if it was confirmed (and `submit` was happy), false if dismissed. */
 export function showDialog(options: DialogOptions): Promise<boolean> {
   return new Promise((resolve) => {
@@ -109,7 +120,10 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
       form.append(h("label", { class: "check-row", for: box.id }, box, " ", check.label));
     }
     const extra = (options.actions ?? []).map((action) => h("button", { type: "button", class: "secondary", text: action.label, on: { click: () => action.run(() => dialog.close("cancel")) } }));
-    form.append(errorLine, h("div", { class: "dialog-buttons" }, ...extra, options.noCancel ? null : h("button", { type: "button", class: "secondary", text: "Cancel", on: { click: () => dialog.close("cancel") } }), confirmButton));
+    const cancelButton = options.noCancel ? null : h("button", { type: "button", class: "secondary", text: "Cancel", on: { click: () => dialog.close("cancel") } });
+    form.append(errorLine, h("div", { class: "dialog-buttons" }, ...extra, cancelButton, confirmButton));
+    // (what is being done is not to be walked away from: a person who cancels expects it not to happen)
+    const walkAways = [...extra, ...(cancelButton ? [cancelButton] : [])];
 
     let working = false;
     form.addEventListener("submit", async (event) => {
@@ -117,6 +131,7 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
       if (working || !refresh()) return;
       working = true;
       confirmButton.disabled = true;
+      for (const button of walkAways) button.disabled = true;
       if (options.working) confirmButton.textContent = options.working;
       const values: Record<string, string | boolean> = {};
       for (const [name, input] of inputs) values[name] = input instanceof HTMLInputElement && input.type === "checkbox" ? input.checked : input.value;
@@ -127,6 +142,7 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
         problem = error instanceof Error ? error.message : String(error);
       }
       working = false;
+      for (const button of walkAways) button.disabled = false;
       confirmButton.textContent = options.confirm;
       if (problem) {
         errorLine.textContent = problem;
@@ -137,11 +153,17 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
     });
 
     dialog.append(form);
+    // Escape asks to close the dialog; while something is being done, it doesn't (closing it in code, for a lock, still does)
+    dialog.addEventListener("cancel", (event) => {
+      if (working) event.preventDefault();
+    });
     dialog.addEventListener("close", () => {
+      shown.delete(dialog);
       dialog.remove();
       resolve(dialog.returnValue === "ok");
     });
     document.body.append(dialog);
+    shown.add(dialog);
     dialog.showModal();
     refresh();
     const first = [...inputs.values()].find((i) => i instanceof HTMLInputElement && (i.type === "text" || i.type === "password")) as HTMLInputElement | undefined;

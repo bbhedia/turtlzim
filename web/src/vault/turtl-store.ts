@@ -279,6 +279,13 @@ export class TurtlStore implements NotebookStore {
    */
   private planFiles(index: NotebookIndex, change: FileChange) {
     const state = new Map<string, PlannedFile>([...index.files].map(([key, entry]) => [key, { ...entry, changed: false }]));
+    // a file is one note, so it can't be moved to two places (the other stores would copy it; nothing asks for that)
+    const sources = new Set<string>();
+    for (const [from] of change.move ?? []) {
+      const key = fileKey(from);
+      if (state.has(key) && sources.has(key)) throw new Error(`"${from}" can't be moved to two places at once.`);
+      sources.add(key);
+    }
     const moved: PlannedFile[] = [];
     for (const [from, to] of change.move ?? []) {
       const entry = state.get(fileKey(from));
@@ -348,8 +355,16 @@ export class TurtlStore implements NotebookStore {
       if (this.broken) throw this.broken;
       return work(core);
     });
-    this.queue = run.catch(() => undefined);
+    // (what the queue keeps is only that this is done: not what it came to, which can be a whole notebook's text)
+    this.queue = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  /** Forget everything known of the notebooks (their page names and paths): for when the vault is locked, so that nothing of them is held. */
+  reset(): void {
+    this.indexes.clear();
+    // (the next request takes the engine to be a new one, which is also to trust it again: see `run`)
+    this.lastCore = null;
   }
 
   private save<T = unknown>(core: CoreClient, action: "add" | "edit" | "delete", type: "space" | "note", data: unknown): Promise<T> {

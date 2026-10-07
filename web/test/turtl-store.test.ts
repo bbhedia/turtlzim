@@ -133,6 +133,55 @@ describe("the encrypted store, beyond the contract", () => {
     expect((await store.loadPages(second.id))[0]?.text).toBe("second");
   }, SLOW);
 
+  it("forgets what it knew of the notebooks when told to (the vault was locked), and learns it again from the core", async () => {
+    const core = await freshAccount();
+    const store = new TurtlStore(() => core, pageKey);
+    const held = () => (store as unknown as { indexes: Map<string, unknown> }).indexes.size;
+    const n = await store.createNotebook({ title: "N", home: "Home", kind: "encrypted" }, [page("Home", "h"), page("Other", "o")], [file("a.bin", "x")]);
+    expect(await names(store, n.id)).toEqual(["Home", "Other"]);
+    expect(held()).toBeGreaterThan(0);
+    store.reset();
+    // (page names and file paths are what an index holds: nothing of them stays in memory once the notebooks are locked)
+    expect(held()).toBe(0);
+    expect(await names(store, n.id)).toEqual(["Home", "Other"]);
+    expect(await paths(store, n.id)).toEqual(["a.bin"]);
+    expect(held()).toBeGreaterThan(0);
+  }, SLOW);
+
+  it("trusts the core again after a reset, as it does after the vault is locked and unlocked", async () => {
+    const core = await freshAccount();
+    const store = new TurtlStore(() => core, pageKey);
+    const n = await store.createNotebook({ title: "N", home: "Home", kind: "encrypted" }, [page("A", "a")]);
+    failing(core, "profile:sync:model", 2, true);
+    await expect(store.replacePages(n.id, { remove: [], put: [page("B", "b"), page("C", "c")] })).rejects.toThrow("the core failed");
+    await expect(store.loadPages(n.id)).rejects.toThrow(/Lock them and unlock them again/);
+    // (the engine that could not undo a change is ended by the lock: what the store holds is its own business)
+    core.request = Object.getPrototypeOf(core).request.bind(core);
+    store.reset();
+    expect((await store.loadPages(n.id)).map((p) => p.name).sort()).toContain("A");
+  }, SLOW);
+
+  it("keeps nothing of what it was asked for once it has answered (a queue that held the last result would hold a notebook's text)", async () => {
+    const core = await freshAccount();
+    const store = new TurtlStore(() => core, pageKey);
+    const n = await store.createNotebook({ title: "N", home: "Home", kind: "encrypted" }, [page("Home", "text nobody else should keep")]);
+    expect((await store.loadPages(n.id)).map((p) => p.text)).toEqual(["text nobody else should keep"]);
+    expect(await (store as unknown as { queue: Promise<unknown> }).queue).toBeUndefined();
+  }, SLOW);
+
+  it("won't move one file to two places, and changes nothing for the attempt", async () => {
+    const core = await freshAccount();
+    const store = new TurtlStore(() => core, pageKey);
+    const n = await store.createNotebook({ title: "N", home: "Home", kind: "encrypted" }, [page("Home")], [file("a.png", "pic")]);
+    const move = [["a.png", "b.png"], ["A.PNG", "c.png"]] as Array<[string, string]>;
+    await expect(store.replacePages(n.id, { remove: [], put: [], files: { move } })).rejects.toThrow(/can't be moved to two places/);
+    expect(await paths(store, n.id)).toEqual(["a.png"]);
+    expect(await (await store.loadFile(n.id, "a.png"))?.text()).toBe("pic");
+    // (one file to one place is what a rename does, and goes through)
+    await store.replacePages(n.id, { remove: [], put: [], files: { move: [["a.png", "b.png"]] } });
+    expect(await paths(store, n.id)).toEqual(["b.png"]);
+  }, SLOW);
+
   it("won't take an attachment too big to send through the engine, and changes nothing for it", async () => {
     const core = await freshAccount();
     const store = new TurtlStore(() => core, pageKey);

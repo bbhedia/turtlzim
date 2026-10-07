@@ -14,8 +14,12 @@ export interface CoreTransport {
   onMessage: ((channel: string, message: string) => void) | null;
   /** Called if the core goes away without having been asked to (its Worker died). */
   onLost: ((reason: string) => void) | null;
+  /** Called whenever the core is heard from, even if only to say that it is alive. */
+  onHeard: (() => void) | null;
   /** Stop the core and end what it runs on, so that whatever it held in memory (keys included) goes with it. */
   close(): Promise<void>;
+  /** End what the core runs on at once, without a word to it, and without waiting for anything. Nothing can be sent afterwards. */
+  terminate(): void;
 }
 
 /** What the core says when it refuses or fails: `{type, subtype?, message?, ...}`. */
@@ -60,6 +64,19 @@ function describe(command: string, detail: unknown): string {
   return `${command} failed: ${JSON.stringify(detail)}`;
 }
 
+/**
+ * A string with every lone surrogate (half of a character, which JavaScript strings can hold and JSON can't
+ * carry: `JSON.stringify` writes it as an escape that the core's parser refuses) made into the replacement
+ * character. A request the core can't read can't be answered, and one that isn't answered is waited for.
+ */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export function wellFormed(text: string): string {
+  return text.replace(LONE_SURROGATE, "\uFFFD");
+}
+
+/** How long a core that has requests waiting may say nothing at all, not even that it is alive, before it is taken to be dead (ms). */
+export const SILENCE_MS = 45_000;
+
 interface Pending {
   command: string;
   resolve: (value: unknown) => void;
@@ -76,26 +93,65 @@ export class CoreClient {
   private readonly prefix = `c${++clients}r`;
   private counter = 0;
   private closed = false;
+  private heard = Date.now();
+  private watchdog: ReturnType<typeof setInterval> | undefined;
 
-  constructor(private readonly transport: CoreTransport) {
+  /** `silenceMs`: how long a core with requests waiting may say nothing before it is taken to be dead. */
+  constructor(
+    private readonly transport: CoreTransport,
+    private readonly silenceMs = SILENCE_MS,
+  ) {
     transport.onMessage = (channel, message) => this.receive(channel, message);
-    transport.onLost = (reason) => {
-      this.closed = true;
-      this.fail(new Error(`The engine that keeps the encrypted notebooks stopped unexpectedly (${reason}).`));
-      for (const listener of [...this.lostListeners]) listener(reason);
+    transport.onHeard = () => {
+      this.heard = Date.now();
     };
+    transport.onLost = (reason) => this.lose(reason);
+    // an engine that is killed without a word (the browser does it when memory runs short) sends nothing at all,
+    // and what is waiting for it would wait for ever: so one that is waited on and silent too long is dead
+    this.watchdog = setInterval(() => {
+      if (this.pending.size > 0 && Date.now() - this.heard > this.silenceMs) {
+        this.transport.terminate();
+        this.lose(`it said nothing for ${Math.round(this.silenceMs / 1000)} seconds`);
+      }
+    }, Math.max(100, Math.min(5000, this.silenceMs / 4)));
+    (this.watchdog as { unref?: () => void }).unref?.();
   }
 
   /** Start a core on `transport` and return the client for it. */
-  static async boot(transport: CoreTransport, persistence: Persistence | null): Promise<CoreClient> {
-    const client = new CoreClient(transport);
+  static async boot(transport: CoreTransport, persistence: Persistence | null, silenceMs = SILENCE_MS): Promise<CoreClient> {
+    const client = new CoreClient(transport, silenceMs);
+    await client.start(persistence);
+    return client;
+  }
+
+  /** Start the core (with persistence, if given). If it can't be started the transport is closed, and the error says why. */
+  async start(persistence: Persistence | null): Promise<void> {
     try {
-      await transport.boot(persistence);
+      await this.transport.boot(persistence);
     } catch (error) {
-      await transport.close().catch(() => undefined);
+      clearInterval(this.watchdog);
+      this.closed = true;
+      await this.transport.close().catch(() => undefined);
       throw error;
     }
-    return client;
+    this.heard = Date.now();
+  }
+
+  private lose(reason: string): void {
+    if (this.closed) return;
+    this.closed = true;
+    clearInterval(this.watchdog);
+    this.fail(new Error(`The engine that keeps the encrypted notebooks stopped unexpectedly (${reason}).`));
+    for (const listener of [...this.lostListeners]) listener(reason);
+  }
+
+  /** End the core at once (what is waiting for it is refused), without letting it log out: for an engine that is still starting when the vault is locked. */
+  terminate(): void {
+    if (this.closed) return;
+    this.closed = true;
+    clearInterval(this.watchdog);
+    this.fail(new Error("The encrypted notebooks were locked before this finished."));
+    this.transport.terminate();
   }
 
   /** Send the core a command and wait for what it answers. Rejects with a `CoreError` if the core says no. */
@@ -103,9 +159,11 @@ export class CoreClient {
     if (this.closed) return Promise.reject(new Error("The encrypted notebooks are locked."));
     const id = `${this.prefix}${++this.counter}`;
     return new Promise<T>((resolve, reject) => {
+      // (counting the silence from when something began to wait)
+      if (this.pending.size === 0) this.heard = Date.now();
       this.pending.set(id, { command, resolve: resolve as (value: unknown) => void, reject });
       try {
-        this.transport.send(JSON.stringify([id, command, ...args]));
+        this.transport.send(JSON.stringify([id, command, ...args], (_key, value) => (typeof value === "string" ? wellFormed(value) : value)));
       } catch (error) {
         this.pending.delete(id);
         reject(error instanceof Error ? error : new Error(String(error)));
@@ -129,6 +187,7 @@ export class CoreClient {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    clearInterval(this.watchdog);
     this.fail(new Error("The encrypted notebooks were locked before this finished."));
     await this.transport.close();
   }
@@ -160,10 +219,14 @@ export class CoreClient {
   }
 }
 
+/** How long the engine has to start, in ms: it loads 3 MB of wasm and libsodium, then opens its databases (and waits a few seconds for another tab to let go of them). */
+const BOOT_MS = 60_000;
+
 /** The real thing: the core in a module Worker of its own (core-worker.ts). */
 export class WorkerTransport implements CoreTransport {
   onMessage: ((channel: string, message: string) => void) | null = null;
   onLost: ((reason: string) => void) | null = null;
+  onHeard: (() => void) | null = null;
   private worker: Worker | null;
   private steps = new Map<"booted" | "stopped", { resolve: () => void; reject: (error: Error) => void }>();
   private ended = false;
@@ -175,8 +238,19 @@ export class WorkerTransport implements CoreTransport {
     worker.onmessageerror = () => this.lost("a message could not be read");
   }
 
-  boot(persistence: Persistence | null): Promise<void> {
-    return this.step("booted", { op: "boot", persistence });
+  async boot(persistence: Persistence | null): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("The engine that keeps the encrypted notebooks did not start.")), BOOT_MS);
+    });
+    try {
+      await Promise.race([this.step("booted", { op: "boot", persistence }), late]);
+    } catch (error) {
+      this.end();
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   send(message: string): void {
@@ -212,8 +286,19 @@ export class WorkerTransport implements CoreTransport {
     });
   }
 
+  terminate(): void {
+    // (a start or a stop that is waited for is over: nobody is left to answer it, and what waits on it must not wait for the clock to run out)
+    const waiting = [...this.steps.values()];
+    this.steps.clear();
+    for (const step of waiting) step.reject(new Error("The encrypted notebooks were locked before this finished."));
+    this.end();
+  }
+
   private fromWorker(reply: WorkerReply): void {
+    this.onHeard?.();
     switch (reply.type) {
+      case "alive":
+        break;
       case "booted":
       case "stopped": {
         const step = this.steps.get(reply.type);

@@ -15,13 +15,20 @@ export class RoutedStore implements NotebookStore {
     private readonly encrypted: NotebookStore,
     /** Whether the vault is unlocked: only then are its notebooks there. */
     private readonly vaultOpen: () => boolean,
+    /** Told when the encrypted notebooks can't be listed: the list is then the open ones, so that the app can still be used (and the vault locked). */
+    private readonly onProblem?: (error: Error) => void,
   ) {}
 
   async listNotebooks(): Promise<NotebookInfo[]> {
     const open = await this.open.listNotebooks();
     if (!this.vaultOpen()) return open;
-    const encrypted = (await this.encrypted.listNotebooks()).map((info) => ({ ...info, id: ENCRYPTED_PREFIX + info.id }));
-    return [...open, ...encrypted];
+    try {
+      const encrypted = (await this.encrypted.listNotebooks()).map((info) => ({ ...info, id: ENCRYPTED_PREFIX + info.id }));
+      return [...open, ...encrypted];
+    } catch (error) {
+      this.onProblem?.(error instanceof Error ? error : new Error(String(error)));
+      return open;
+    }
   }
 
   async createNotebook(info: Omit<NotebookInfo, "id" | "created">, pages?: StoredPage[], files?: StoredFile[]): Promise<NotebookInfo> {

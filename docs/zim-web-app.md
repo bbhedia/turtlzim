@@ -157,7 +157,11 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
     names or text, and the browser keeps them. While an encrypted notebook is open the app keeps
     each of them blank (`App.isPrivate`, `locate()`): the history entries hold a number and the names
     stay in memory. A browser test scans IndexedDB, both storages, the Cache API and every private
-    file after a notebook with distinctive contents has been written and locked.
+    file after a notebook with distinctive contents (accented, Chinese and emoji text too, and what
+    was typed in the search box and in dialogs that were given up) has been written and locked, and
+    again after locks that were not the ordinary kind (typing that could not be saved, a question left
+    open). A lock leaves nothing of the notebook on the screen either: the status line and notices are
+    cleared, and the app is hidden while it happens and when the browser keeps the page away.
 18. **Open and encrypted notebooks are one list, from two stores.** `RoutedStore` sends each request
     to the store its id belongs to; an encrypted notebook's id starts with `vault:` (ids of open ones
     are UUIDs, so they can't). While the vault is locked its notebooks aren't listed at all and any
@@ -176,7 +180,7 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
 | Bindings | `cargo test -p zim-wasm` and `web/test/notebook-core.test.ts` (also run against the real manual) |
 | Stores | `web/test/store.test.ts`: the same contract on both stores, including files, moves (swaps, case-only), atomicity under failure, and opening a database made before files existed (`fake-indexeddb`) |
 | Session, files, zip | `web/test/session.test.ts` (rename/delete/failed write/export paths/import rules/zip round trips and damage; attachments through rename, delete and export; Zim's manual in and out, every file byte for byte) |
-| Encrypted notebooks | `zim-encrypted-notebooks.md` (what verifies what); `web/test/{vault,turtl-store,routed-store}.test.ts`, `store.test.ts` (the shared contract), `vault-browser.mjs` (`npm run test:vault`) |
+| Encrypted notebooks | `zim-encrypted-notebooks.md` (what verifies what); `web/test/{vault,engine-failures,cut-off,turtl-store,routed-store}.test.ts`, `store.test.ts` (the shared contract), `vault-browser.mjs` (`npm run test:vault`) |
 | Pictures | `web/test/editor.test.ts` (images with a host: pictures, chips and why, caret and selection rules, Ctrl-click), `commands.test.ts` (where a reference goes), `file-urls.test.ts` (loading, stale addresses, failures not retried) |
 | **The app in Chromium** | `web/test/browser.mjs`: the scenarios below, on the built app, served by the same server `npm run serve` runs |
 | How it looks | `npm run screenshots <dir>`: twelve screenshots (light, dark, phone, dialogs, search, menu, pictures, the viewer) to look at |
@@ -202,8 +206,17 @@ from a deflate zip that Python made**; links that could run code; deep links; a 
 and encrypted notebooks through the interface: made with a passphrase and written in, locked and
 unlocked after a reload, Back and Forward and the address and tab title saying nothing, no draft
 left behind, export with its warning, import as encrypted, rename, delete, a lost passphrase erased,
-a short passphrase refused, auto-lock, the browser's promise to keep the data, a page that isn't
-secure, and a scan of everything the browser keeps for a notebook's contents.
+a short passphrase refused, auto-lock, the browser's promise to keep the data (also when it comes
+late), a page that isn't secure, and a scan of everything the browser keeps for a notebook's contents;
+and what the review of them found: a question asked on one notebook can't change another, a lock
+closes questions and asks before it loses typing, a page the browser kept is hidden and locks when
+it comes back, a lock that can't switch the screen starts the page again, a dead engine, an unlock
+that Escape can't give up, a page nobody asked to test having no handle on the app.
+
+The app offers a test hook, `window.__zim` (the app and its editor), only to a page that was asked
+for one: the test sets `window.__ZIM_TEST__` before the page's own scripts run (an init script of the
+browser context). A page without that has no handle on the notebook that is open, an unlocked
+encrypted one included.
 
 ## Running it
 

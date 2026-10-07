@@ -5,6 +5,8 @@
 // protocol.ts.
 import sodium from "libsodium-wrappers-sumo";
 import { bootCore, sendToCore, stopTheCore } from "./core-boot";
+import { cutOffFromTheNetwork } from "./cut-off";
+import { HEARTBEAT_MS } from "./protocol";
 import type { WorkerReply, WorkerRequest } from "./protocol";
 
 interface WorkerScope {
@@ -23,6 +25,9 @@ scope.onmessage = async (event) => {
           persistence: request.persistence,
           onMessage: (channel, message) => scope.postMessage({ type: "message", channel, message }),
         });
+        cutOffFromTheNetwork();
+        // (a page that hears nothing for long takes the engine for dead)
+        setInterval(() => scope.postMessage({ type: "alive" }), HEARTBEAT_MS);
         scope.postMessage({ type: "booted" });
         break;
       case "send":

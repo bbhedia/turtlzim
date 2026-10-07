@@ -57,13 +57,13 @@ async function scenario(name, run) {
 let browser;
 
 /** A page of the lab in `context` (a browser profile of its own unless one is given), with what it reports collected. `expected` is what the browser says that is no surprise. */
-async function openLab(context, where = origin, expected = []) {
+async function openLab(context, where = origin, expected = [], query = "") {
   const page = await context.newPage();
   page.on("pageerror", (error) => problems.push(`[page error] ${error.message}`));
   page.on("console", (message) => {
     if (message.type() === "error" && !expected.some((pattern) => pattern.test(message.text()))) problems.push(`[console error] ${message.text()}`);
   });
-  await page.goto(`${where}/`);
+  await page.goto(`${where}/${query}`);
   await page.waitForFunction(() => window.lab !== undefined);
   return page;
 }
@@ -239,27 +239,115 @@ try {
     }
   });
 
-  await scenario("a change cut off in the middle (the tab closes while it is written) leaves the notebook as it was", async () => {
+  // The engine is ended without a word (as closing the tab does) at a different moment of a write of 1,200 pages each
+  // time: at the very start, in the middle of the work, late. Whenever it falls, the change is whole or not there at all.
+  for (const after of [5, 60, 250, 800, 2500]) {
+    await scenario(`a change cut off in the middle (the tab closes ${after} ms into writing 1,200 pages) leaves the notebook whole, or as it was`, async () => {
+      const context = await fresh();
+      try {
+        const page = await openLab(context);
+        await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+        const made = await mustWork(await page.evaluate(() => window.lab.notebooks.create("Crash test", [["Home", "before"]], [])), "making a notebook");
+        const ended = await mustWork(await page.evaluate(([id, after]) => window.lab.notebooks.writeAndCrash(id, 1200, after), [made.id, after]), "writing and ending the engine");
+        const finished = ended === "finished";
+        assert(finished || /^stopped: /.test(ended), `the write neither finished nor stopped: ${ended}`);
+        // (so that this does not pass by the engine being ended after the work was done: writing 1,200 pages takes seconds)
+        if (after <= 800) assert(!finished, `the engine was ended ${after} ms in, and the write had finished: ${ended}`);
+        if (!finished) assertEqual(await lab(page, "unlocked"), false, "the vault noticed that its engine was gone, and is locked");
+
+        // a new page, as after the tab was closed and opened again
+        await page.reload();
+        await page.waitForFunction(() => window.lab !== undefined);
+        await mustWork(await lab(page, "unlock", PASSPHRASE), "unlocking after the crash");
+        const pages = await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading pages");
+        if (finished) assertEqual(pages.length, 1201, "the write finished, and every page of it is there");
+        else assertEqual(pages.map((p) => [p[0], p[1]]), [["Home", "before"]], "not one of the 1,200 pages is there, and the one that was is as it was");
+        // and it is not damaged: a write, left alone, goes through, and the notebook can be listed and read as a whole
+        await mustWork(await page.evaluate((id) => window.lab.notebooks.replace(id, [], Array.from({ length: 50 }, (_, i) => [`After ${i}`, "x"])), made.id), "writing after the crash");
+        assertEqual((await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading")).length, pages.length + 50, "the pages written afterwards are there");
+        assertEqual((await mustWork(await page.evaluate(() => window.lab.notebooks.list()), "listing")).length, 1, "and the notebook is listed once");
+        await mustWork(await lab(page, "lock"), "locking");
+      } finally {
+        await context.close();
+      }
+    });
+  }
+
+  await scenario("the engine's Worker says that it is alive every few seconds while nothing else is going on", async () => {
     const context = await fresh();
     try {
       const page = await openLab(context);
       await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
-      const made = await mustWork(await page.evaluate(() => window.lab.notebooks.create("Crash test", [["Home", "before"]], [])), "making a notebook");
-      // 600 pages take longer to write than the 150 ms the engine is given
-      const ended = await mustWork(await page.evaluate((id) => window.lab.notebooks.writeAndCrash(id, 600, 150), made.id), "writing and ending the engine");
-      assert(/^stopped: /.test(ended), `the write did not finish: ${ended}`);
-      assertEqual(await lab(page, "unlocked"), false, "the vault noticed that its engine was gone, and is locked");
-
-      // a new page, as after the tab was closed and opened again
-      await page.reload();
-      await page.waitForFunction(() => window.lab !== undefined);
-      await mustWork(await lab(page, "unlock", PASSPHRASE), "unlocking after the crash");
-      const pages = await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading pages");
-      assertEqual(pages.map((p) => [p[0], p[1]]), [["Home", "before"]], "not one of the 600 pages is there, and the one that was is as it was");
-      // and it is not damaged: the same write, left alone, goes through
-      await mustWork(await page.evaluate((id) => window.lab.notebooks.replace(id, [], Array.from({ length: 50 }, (_, i) => [`After ${i}`, "x"])), made.id), "writing after the crash");
-      assertEqual((await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading")).length, 51, "51 pages now");
+      assertEqual(await lab(page, "listen"), true, "listening to the engine");
+      await page.waitForTimeout(11_500);
+      const heard = await lab(page, "heard");
+      assert(heard >= 2, `the engine said it was alive ${heard} times in 11 seconds (it should every 5)`);
       await mustWork(await lab(page, "lock"), "locking");
+    } finally {
+      await context.close();
+    }
+  });
+
+  await scenario("an engine that is ended without a word is found out by its silence: what waits for it is refused, and the vault says it was lost", async () => {
+    const context = await fresh();
+    try {
+      const page = await openLab(context, origin, [], "?silence=3000");
+      await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+      assertEqual(await lab(page, "whoAmI").then((o) => o.ok), true, "the engine answers");
+      await lab(page, "killSilently");
+      const started = Date.now();
+      // (a request that is never refused is a failure to report, not something to wait for for ever)
+      const asked = await Promise.race([lab(page, "whoAmI"), new Promise((_, reject) => setTimeout(() => reject(new Error("a request to a dead engine was never refused")), 20_000))]);
+      const waited = Date.now() - started;
+      assertEqual(asked.ok, false, "a request to a dead engine is refused");
+      assert(/stopped unexpectedly/.test(asked.message), `and says why: ${asked.message}`);
+      assert(waited >= 2500 && waited < 15_000, `after about the time it was allowed to be silent (${waited} ms)`);
+      assertEqual(await lab(page, "unlocked"), false, "the vault is locked");
+      const events = await lab(page, "happened");
+      assert(events.some((e) => e.startsWith("lost: it said nothing")), `and was told that it was lost: ${JSON.stringify(events)}`);
+      // and it can be unlocked again at once: nothing of the dead engine is in the way
+      await mustWork(await lab(page, "unlock", PASSPHRASE), "unlocking again");
+      await mustWork(await lab(page, "lock"), "locking");
+    } finally {
+      await context.close();
+    }
+  });
+
+  await scenario("a Worker that has been cut off from the network can't use it, and can't get it back", async () => {
+    const context = await fresh();
+    try {
+      const page = await openLab(context);
+      const probe = await mustWork(await lab(page, "probeCutOff", `${origin}/`), "running the probe");
+      // (the control: before the cut-off the Worker could reach this very page, so a refusal after it means something)
+      assertEqual(probe.before, "status 200", "before the cut-off the Worker can fetch a file");
+      for (const [way, outcome] of Object.entries(probe.after)) assert(outcome.includes("can't use the network"), `${way}: ${outcome}`);
+      assertEqual(Object.keys(probe.after).sort(), ["EventSource", "SharedWorker", "WebSocket", "WebTransport", "Worker", "XMLHttpRequest", "fetch", "fetchCalled", "importScripts"], "every way of reaching out was tried");
+      assertEqual(probe.restored, [], "and the code in the Worker could not bring one back");
+      assertEqual(probe.stillRefused, true, "fetch is refused after all that");
+    } finally {
+      await context.close();
+    }
+  });
+
+  await scenario("the engine asks the network for nothing: its files are loaded, and then no request leaves for anywhere else", async () => {
+    const context = await fresh();
+    const seen = [];
+    context.on("request", (request) => seen.push({ url: request.url(), method: request.method(), body: request.postData() }));
+    try {
+      const page = await openLab(context);
+      await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+      assert(seen.some((r) => /\.wasm(\?|$)/.test(r.url)), `the log sees the requests of the engine's Worker (it loaded its wasm): ${JSON.stringify(seen.map((r) => r.url))}`);
+      const made = await mustWork(await page.evaluate(() => window.lab.notebooks.create("Quiet", [["Home", "x"]], [["a.bin", "bytes", "application/x-test"]])), "making a notebook");
+      await mustWork(await page.evaluate((id) => window.lab.notebooks.replace(id, [], [["More", "text"]]), made.id), "writing");
+      await mustWork(await lab(page, "lock"), "locking");
+      await mustWork(await lab(page, "unlock", PASSPHRASE), "unlocking");
+      await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading");
+      await mustWork(await lab(page, "lock"), "locking again");
+      for (const request of seen) {
+        assert(request.url.startsWith(`${origin}/`), `a request left the page's own address: ${request.url}`);
+        assertEqual([request.method, request.body], ["GET", null], `${request.url} was asked for with more than a plain GET`);
+        assert(/\.(js|wasm|html|css)(\?.*)?$|\/$/.test(request.url), `${request.url} is not one of the files of the app`);
+      }
     } finally {
       await context.close();
     }

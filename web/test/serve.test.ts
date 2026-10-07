@@ -334,7 +334,8 @@ describe.skipIf(!hasOpenssl)("https", () => {
       const timer = setTimeout(() => reject(new Error(`no address announced: ${output}`)), 15000);
       child.stdout.on("data", () => {
         const match = /https:\/\/127\.0\.0\.1:\d+\//.exec(output);
-        if (match) {
+        // (what it says about the certificate comes in the lines after the address: wait for all that is asserted on)
+        if (match && output.includes("self-signed")) {
           clearTimeout(timer);
           resolve(match[0]);
         }

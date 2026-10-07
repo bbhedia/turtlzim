@@ -25,6 +25,7 @@ const browser = await launchBrowser();
 
 async function open(viewport, colorScheme = "light") {
   const context = await browser.newContext({ viewport, colorScheme, acceptDownloads: true });
+  await context.addInitScript(() => { window.__ZIM_TEST__ = true; });
   const page = await context.newPage();
   page.on("pageerror", (e) => console.log("[page error]", e.message));
   page.on("console", (m) => m.type() === "error" && console.log("[console error]", m.text()));
@@ -122,8 +123,19 @@ await shot(page, "16-encrypted-notebook-open");
 await page.locator(".notebook-button").click();
 await shot(page, "17-menu-with-encrypted-notebook");
 await page.keyboard.press("Escape");
+// typing that can't be saved (the disk is full, say), and Lock pressed: the person is asked before it is lost
+await page.evaluate(() => { window.__zim.app.session.save = async () => { throw new Error("the disk is full"); }; });
+await page.locator(".cm-content").click();
+await page.keyboard.press("Control+End");
+await page.keyboard.type("A line the vault could not take.");
+await page.locator(".lock-button").click();
+await topDialog().waitFor();
+await shot(page, "17b-lock-without-saving");
+await topDialog().getByRole("button", { name: "Cancel" }).click();
+await page.evaluate(() => { delete window.__zim.app.session.save; });
 await page.locator(".lock-button").click();
 await page.waitForFunction(() => window.__zim.app.session?.info.kind === "open" && document.querySelector(".lock-button").hidden);
+await shot(page, "17c-locked-and-back-in-an-open-notebook");
 await page.reload();
 await page.waitForFunction(() => window.__zim !== undefined);
 await page.locator(".notebook-button").click();
