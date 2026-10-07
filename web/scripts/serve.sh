@@ -2,13 +2,15 @@
 # Keeps the editor's static server (scripts/serve.mjs, see its header) running in the background, so it
 # goes on serving after you log out. No root and no systemd; it does not come back after a reboot.
 #
-#   scripts/serve.sh start [--host 0.0.0.0] [--port 8080] [--auth user:pass]
+#   scripts/serve.sh start [--host 0.0.0.0] [--port 8080] [--auth user:pass] [--tls]
 #   scripts/serve.sh stop | restart | status | log [-f]
 #
 # The default is 127.0.0.1:8080: this machine only, reachable from yours through an SSH tunnel
 #   ssh -L 8080:127.0.0.1:8080 you@this-server      then open http://localhost:8080
 # To let other machines in, pass --host 0.0.0.0 (IPv4) or --host :: (IPv4 and IPv6), and let the
-# port through the firewall (e.g. `sudo ufw allow 8080/tcp`). Put the password in the environment
+# port through the firewall (e.g. `sudo ufw allow 8080/tcp`). Encrypted notebooks need a secure page
+# (https, or localhost): --tls serves https with a self-signed certificate made for this machine (the
+# browser warns once), or use the tunnel. Put the password in the environment
 # (ZIM_WEB_AUTH=user:password scripts/serve.sh start ...): --auth would show in the process list.
 # `restart` without options reuses the ones of the last `start`. Serves web/dist: `npm run build`
 # refreshes it, and the running server picks the new files up without a restart.
@@ -43,7 +45,7 @@ running_pid() {
 addresses() {
     local line
     line=$(grep -n '^Serving' "$logfile" 2>/dev/null | tail -n 1 | cut -d: -f1 || true)
-    [ -n "$line" ] && tail -n "+$line" "$logfile" | head -n 12 | grep -E '^(Serving|  http|Listening)' || true
+    [ -n "$line" ] && tail -n "+$line" "$logfile" | head -n 12 | grep -E '^(Serving|  http|Listening|The certificate)' || true
 }
 
 start() {

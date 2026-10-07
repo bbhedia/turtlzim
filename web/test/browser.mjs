@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { networkInterfaces, tmpdir } from "node:os";
 import { delimiter, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createStaticServer } from "../scripts/serve.mjs";
+import { createStaticServer, selfSignedCertificate } from "../scripts/serve.mjs";
 import { launchBrowser } from "./browser-launch.mjs";
 import { png } from "./pictures.mjs";
 
@@ -2201,6 +2201,45 @@ try {
     } finally {
       await context.close();
       open.close();
+    }
+  });
+
+  await scenario("served over https with a certificate made for the machine (serve.mjs --tls), a page on a network address can have encrypted notebooks", async () => {
+    const lan = Object.values(networkInterfaces()).flat().find((n) => n && n.family === "IPv4" && !n.internal)?.address;
+    let tls;
+    try {
+      tls = selfSignedCertificate(join(work, "tls"));
+    } catch {
+      console.log("  (skipped: no openssl to make a certificate with)");
+      return;
+    }
+    if (!lan) {
+      console.log("  (skipped: this machine has no address but localhost)");
+      return;
+    }
+    const secure = createStaticServer({ dir: dist, tls });
+    await new Promise((resolve) => secure.listen(0, "0.0.0.0", resolve));
+    // (the certificate is self-signed: a person clicks through the browser's warning, which this does for them)
+    const context = await browser.newContext({ ignoreHTTPSErrors: true });
+    context.setDefaultTimeout(10_000);
+    try {
+      const page = await context.newPage();
+      page.on("pageerror", (error) => problems.push(`[page error] ${error.message}`));
+      page.on("console", (message) => message.type() === "error" && problems.push(`[console error] ${message.text()}`));
+      await page.goto(`https://${lan}:${secure.address().port}/`);
+      await ready(page);
+      assertEqual(await page.evaluate(() => isSecureContext), true, "an https page is a secure context, whoever signed its certificate");
+      const ui = driver(page, context);
+      await newEncryptedNotebook(ui, "Over the network");
+      assertEqual(await ui.notebookTitle(), "Over the network", "the encrypted notebook is made");
+      await ui.typeAtEnd("written over https\n");
+      await ui.flush();
+      assertEqual(await ui.saveState(), "Saved", "and written in");
+      await page.locator(".lock-button").click();
+      await isOpenNotebook(page);
+    } finally {
+      await context.close();
+      secure.close();
     }
   });
 

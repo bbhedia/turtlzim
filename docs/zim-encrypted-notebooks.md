@@ -186,7 +186,9 @@ The ids kept are the notebooks' random ids, which are visible in the databases a
 * **Secure page, one tab.** OPFS's fast files exist only in a dedicated Worker on a secure page
   (https or localhost), and one Worker at a time can use a directory: a second tab is told the vault
   is in use. (`http://192.168.10.10:8080` is not secure: use an SSH tunnel, `ssh -L
-  8080:127.0.0.1:8080 you@server`, and open `http://localhost:8080`, or https.)
+  8080:127.0.0.1:8080 you@server`, and open `http://localhost:8080`; or serve over https with
+  `scripts/serve.sh start --host :: --port 8443 --tls`, which makes a self-signed certificate: the
+  browser warns once and then the page is secure. A test creates an encrypted notebook that way.)
 * **Unlocking costs the whole vault.** `local_start` decrypts and indexes *every* note of *every*
   encrypted notebook when the vault is unlocked: 2.1 s for 2,700 notes (1.4 s of it is the key). A
   vault of tens of thousands of notes will be slow to open. The fix is to index lazily (list a

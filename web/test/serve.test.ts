@@ -1,13 +1,15 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { X509Certificate } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createStaticServer, urlsFor } from "../scripts/serve.mjs";
+import { createStaticServer, selfSignedCertificate, urlsFor } from "../scripts/serve.mjs";
 
 // A site in a temp directory next to a secret that is *not* in it: nothing may ever return the secret.
 const SECRET = "the secret outside the site";
@@ -273,3 +275,100 @@ describe("the command line", () => {
     expect(existsSync(pidFile)).toBe(false);
   });
 });
+
+const hasOpenssl = spawnSync("openssl", ["version"]).status === 0;
+
+describe.skipIf(!hasOpenssl)("https", () => {
+  /** GET `path` over https from a server whose certificate nobody signed. */
+  const secureRequest = (port: number, path: string) =>
+    new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }>((resolve, reject) => {
+      https
+        .get({ host: "127.0.0.1", port, path, rejectUnauthorized: false }, (res) => {
+          let body = "";
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }));
+        })
+        .on("error", reject);
+    });
+
+  it("makes a certificate that names this machine, and keeps it until the machine's addresses change", () => {
+    const directory = join(outside, "tls-1");
+    const first = selfSignedCertificate(directory);
+    const parsed = new X509Certificate(first.cert);
+    expect(parsed.subjectAltName).toContain("DNS:localhost");
+    expect(parsed.subjectAltName).toContain("IP Address:127.0.0.1");
+    // for the day it is needed: a private key that only its owner can read
+    expect(statSync(join(directory, "key.pem")).mode & 0o077).toBe(0);
+    // asked again, it is the same one (not another every time the server starts)
+    expect(selfSignedCertificate(directory).cert.equals(first.cert)).toBe(true);
+    // the machine's addresses changed: a certificate for the old ones is no use
+    writeFileSync(join(directory, "names.txt"), "IP:10.9.8.7");
+    const second = selfSignedCertificate(directory);
+    expect(second.cert.equals(first.cert)).toBe(false);
+    // and one that is nearly a year old is made again
+    const old = new Date(Date.now() - 301 * 24 * 3600 * 1000);
+    utimesSync(join(directory, "cert.pem"), old, old);
+    expect(selfSignedCertificate(directory).cert.equals(second.cert)).toBe(false);
+  });
+
+  it("serves the same site with the same security headers, and plain http gets nothing from it", async () => {
+    const server = createStaticServer({ dir: site, tls: selfSignedCertificate(join(outside, "tls-2")) });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const res = await secureRequest(port, "/");
+    expect(res.status).toBe(200);
+    expect(res.headers["content-security-policy"]).toContain("default-src 'self'");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    expect((await secureRequest(port, "/../secret.txt")).status).toBe(404);
+    await expect(request(port, "/")).rejects.toThrow();
+  });
+
+  it("is asked for on the command line, and says that the certificate is its own", async () => {
+    const state = join(outside, "state");
+    const child = spawn(process.execPath, [script(), "--dir", site, "--port", "0", "--tls"], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, XDG_STATE_HOME: state } });
+    let output = "";
+    child.stdout.on("data", (chunk) => (output += chunk));
+    child.stderr.on("data", (chunk) => (output += chunk));
+    const url = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`no address announced: ${output}`)), 15000);
+      child.stdout.on("data", () => {
+        const match = /https:\/\/127\.0\.0\.1:\d+\//.exec(output);
+        if (match) {
+          clearTimeout(timer);
+          resolve(match[0]);
+        }
+      });
+    });
+    try {
+      expect(output).toContain("over https");
+      expect(output).toContain("self-signed");
+      expect((await secureRequest(Number(new URL(url).port), "/")).status).toBe(200);
+      expect(existsSync(join(state, "zim-web", "tls", "cert.pem"))).toBe(true);
+    } finally {
+      const exit = new Promise<number | null>((resolve) => child.on("exit", resolve));
+      child.kill("SIGTERM");
+      await exit;
+    }
+  });
+
+  it("takes a certificate of one's own, and refuses half of one or two kinds", () => {
+    const own = selfSignedCertificate(join(outside, "tls-own"));
+    const files = { cert: join(outside, "tls-own", "cert.pem"), key: join(outside, "tls-own", "key.pem") };
+    expect(own.cert.length).toBeGreaterThan(0);
+    const run = (...args: string[]) => spawnSync(process.execPath, [script(), ...args], { encoding: "utf8" });
+    expect(run("--cert", files.cert).stderr).toContain("--cert and --key go together");
+    expect(run("--key", files.key).stderr).toContain("--cert and --key go together");
+    expect(run("--tls", "--cert", files.cert, "--key", files.key).stderr).toContain("not both");
+    expect(run("--dir", site, "--cert", join(outside, "nothing.pem"), "--key", files.key).stderr).toContain("serve:");
+  });
+
+  it("names https in the addresses it announces", () => {
+    expect(urlsFor("127.0.0.1", 8443, "https")).toEqual(["https://127.0.0.1:8443/"]);
+    expect(urlsFor("::1", 8443, "https")).toEqual(["https://[::1]:8443/"]);
+  });
+});
+
+function script() {
+  return fileURLToPath(new URL("../scripts/serve.mjs", import.meta.url));
+}

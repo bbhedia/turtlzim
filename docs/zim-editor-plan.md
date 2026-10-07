@@ -140,6 +140,7 @@ cd web && npm run build                       # refreshes dist/; a running serve
 scripts/serve.sh start --host :: --port 8080  # in the background, survives logout (IPv4 and IPv6)
 scripts/serve.sh status | log [-f] | stop | restart
 ZIM_WEB_AUTH=name:password scripts/serve.sh start --host ::   # ask visitors for a password
+scripts/serve.sh start --host :: --port 8443 --tls            # https, with a certificate it makes itself (below)
 npm run serve                                 # in the foreground instead (127.0.0.1:8080 unless told otherwise)
 ```
 
@@ -151,6 +152,12 @@ It listens on 127.0.0.1 unless told otherwise. Ways to reach it, easiest first:
    `sudo ufw allow 8080/tcp`, or only from your address:
    `sudo ufw allow from YOUR.IP to any port 8080 proto tcp` (undo: `sudo ufw delete allow 8080/tcp`).
    Behind a router (a private 192.168.x.x address) the router must also forward the port.
+   **Encrypted notebooks need a secure page**, which `http://192.168.x.x` is not: add `--tls` and the
+   server makes a self-signed certificate for this machine's addresses (needs `openssl`; kept in
+   `~/.local/state/zim-web/tls`, made again if the addresses change). The browser warns once
+   (Advanced, then Proceed), and from then on the page is a secure one: OPFS, and so the vault, work.
+   The warning is only that nobody the browser trusts signed the certificate; for something you
+   keep, use a real one (`--cert FILE --key FILE`) or the tunnel.
 3. **Copy `web/dist` to a web server you already have** (`rsync -av web/dist/ host:/var/www/zim/`).
    The build uses relative URLs, so it works from any folder; make sure `.wasm` is served as
    `application/wasm`.
@@ -159,10 +166,10 @@ It listens on 127.0.0.1 unless told otherwise. Ways to reach it, easiest first:
 
 What visiting exposes: the editor's own files, nothing else. Everything the editor does happens in the
 visitor's browser; a page opened from their disk never reaches the server, and the server stores
-nothing. Plain HTTP is enough for this editor. Basic authentication over HTTP is sent in clear, so it
-keeps casual visitors out but protects nothing on an untrusted network (use the tunnel, or TLS in
-front). The real app will need HTTPS: browsers only offer OPFS storage, service workers and
-`crypto.subtle` to secure contexts (`localhost` counts, a bare IP address does not).
+nothing. Plain HTTP is enough for open notebooks. Basic authentication over HTTP is sent in clear, so it
+keeps casual visitors out but protects nothing on an untrusted network (use the tunnel, or `--tls`).
+Encrypted notebooks need HTTPS (or `localhost`): browsers only offer OPFS storage, service workers and
+`crypto.subtle` to secure contexts (`localhost` counts, a bare IP address over http does not).
 
 ## Running it
 
