@@ -156,9 +156,12 @@ one character repeated, and a short list of the first passphrases a stranger wou
   memory and the pages in the editor. Lock when you step away (it also locks itself after 30 minutes).
 * **A web server that serves different code** (CLAUDE.md, Open issue 6, "host-proof hosting"). The
   app's code is fetched from wherever it is hosted; a server that wanted to could send code that
-  reads the passphrase. The installed app (a pinned service worker, subresource integrity) and the
-  packaged desktop build are the mitigations; this build has neither yet. Serve it yourself, or
-  use it from a copy you trust.
+  reads the passphrase. The installed app (`docs/zim-pwa.md`) is a mitigation: it checks every file
+  against a list, runs the version that was approved and offers a new one, and `scripts/pwa.mjs
+  --remote` shows what a server serves. It is not a proof: the worker script comes from the host
+  too, and a changed one is installed by the browser by itself. The packaged desktop build, whose
+  code does not come from a server, is the strongest answer, and is not built yet. Serve it
+  yourself, or use it from a copy you trust.
 * **Someone who can write the files, not only read them**: they can delete the vault, put an older
   copy of it back, or put one note's ciphertext in place of another's in the same notebook. The core
   notices what it can't decrypt, but nothing here authenticates the database as a whole: this is
@@ -308,6 +311,6 @@ takes.
   would store ciphertext only; it needs the server revived and a decision about accounts: CLAUDE.md,
   Open issue 5).
 * Lazy indexing (above), per-notebook passphrases (today one vault, one passphrase), a setting for
-  the auto-lock time, a service worker with pinned code (Open issue 6).
+  the auto-lock time.
 * Moving an existing account to a new scrypt cost (a re-key), and authenticating the account record
   (its `id` and `kdf` are checked only by a login that must then decrypt the user record).

@@ -171,6 +171,13 @@ keeps casual visitors out but protects nothing on an untrusted network (use the 
 Encrypted notebooks need HTTPS (or `localhost`): browsers only offer OPFS storage, service workers and
 `crypto.subtle` to secure contexts (`localhost` counts, a bare IP address over http does not).
 
+The built app saves itself on a visitor's device with a service worker (`dist/sw.js`, made by the build): after
+the first visit it starts without the server, and a new build put on the server is **offered** to visitors,
+who approve it (the page shows its id and the files that differ). Serve `sw.js` with `Cache-Control:
+no-cache` (`scripts/serve.mjs` does) and `manifest.webmanifest` as `application/manifest+json`. A worker
+needs a certificate the browser trusts: with `serve.sh --tls` (self-signed) the app and the encrypted
+notebooks work, but the app is not saved for offline use. Details and limits: `docs/zim-pwa.md`.
+
 ## Running it
 
 ```bash

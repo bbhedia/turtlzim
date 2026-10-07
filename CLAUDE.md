@@ -124,7 +124,8 @@ cd web && npm install
 npm run wasm                        # build core/zim-wasm into web/src/zim-wasm (needs wasm-pack)
 npm run core                        # build core/turtl-core-rs (the Turtl core: encrypted notebooks) into web/src/turtl-core
 npm run dev                         # dev server
-npm run build                       # typecheck + production build into web/dist
+npm run build                       # typecheck + production build into web/dist, with its service worker (dist/sw.js, the list of every file and its SHA-256)
+npm run pwa:check                   # is dist/ what its sw.js was made for?  (node scripts/pwa.mjs --remote ADDRESS: what a server serves)
 npm test                            # Vitest: editor logic, headless (ZIM_GOLDEN_DIR=... adds real pages)
 scripts/setup-browser.sh            # once: Chromium + libraries + a font, no root
 npm run test:browser                # the built app in a real browser (ZIM_GOLDEN_DIR=... adds the real Zim manual; ONLY=text picks scenarios)
@@ -173,6 +174,13 @@ docker compose up                   # Postgres + server (define compose file)
   the test that reads every command of the dispatcher says which is missing). Locking must work
   whatever else fails (the keys go first, the screen second), and a dialog that is confirmed later
   acts only on the notebook it was opened on (`App.stale`).
+- **The built app is pinned by its service worker** (`web/pwa/sw.js`, `docs/zim-pwa.md`). It lists every file of
+  `dist/` with its SHA-256 and runs the app from the version that was approved. So: a file the app fetches at run
+  time has to be a file of the build (it is then listed and checked on its own); the worker makes no request to
+  anywhere but the app's own folder and keeps nothing but those files; the worker is plain JavaScript that is
+  type-checked (`tsc -p pwa`), and a change to it is a new version of the app. Do not turn it into a runtime
+  cache or add a way to skip the check. `window.__ZIM_TEST__` scenarios run with service workers blocked unless
+  they are about the worker.
 - Notebook rules (what a name or a link means, tree, backlinks, search, rename) live in
   `core/zim-notebook` and nowhere else: the web app calls them through wasm and holds none of its own.
   A UI change is not done until it has been looked at (`npm run screenshots`) and driven in the real
@@ -200,9 +208,12 @@ docker compose up                   # Postgres + server (define compose file)
    server-side key (at-rest, not end-to-end). Encrypted notebooks are always end-to-end.
    (Encrypted notebooks exist now, on one device; syncing them to the Turtl server is not done.)
 6. **Web-crypto trust model:** a served web app could ship malicious JS ("host-proof hosting"
-   critique). Mitigate with an installed PWA (pinned service worker + SRI); the packaged
-   desktop build is the strongest guarantee. Document the trade-off for users. (Documented in
-   `docs/zim-encrypted-notebooks.md`; the PWA is not built yet.)
+   critique). Mitigated, not solved: the app can be installed and its code pinned by a service
+   worker (every file checked against a list, a new version offered and waiting for approval,
+   works offline: `docs/zim-pwa.md`), but the worker script itself comes from the host, so a
+   hostile host is not stopped, only made checkable (`scripts/pwa.mjs --remote`). The packaged
+   desktop build is the strongest guarantee. The trade-off is documented for users in
+   `docs/zim-pwa.md` and `docs/zim-encrypted-notebooks.md`.
 7. **Zim editor fidelity:** live inline formatting, `[[internal links]]`, checkboxes,
    attachments, verbatim blocks — the largest UI task.
 8. **License check:** confirm Zim's exact license only matters if any Zim source is ever
@@ -218,6 +229,7 @@ docker compose up                   # Postgres + server (define compose file)
 - `core-rs` revival notes (getting it building/testing on current toolchains): `docs/core-rs-revival-notes.md`
 - WASM port plan (crypto/storage/networking/concurrency approach + research): `docs/wasm-port-plan.md`
 - Encrypted notebooks (design, threat model, limits, what verifies what): `docs/zim-encrypted-notebooks.md`
+- The app on the device (installable, offline, pinned code, updates that wait for approval): `docs/zim-pwa.md`
 - The Zim editor (decisions, span model, keys, performance, serving it): `docs/zim-editor-plan.md`
 - Notebook rules (names, links, tree, backlinks, search, rename): `docs/zim-notebook.md`
 - The notebook app in the browser (stores, saving, import/export, what verifies it, gaps): `docs/zim-web-app.md`

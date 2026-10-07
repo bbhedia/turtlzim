@@ -39,6 +39,7 @@ const TYPES = {
   ".mjs": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
   ".svg": "image/svg+xml",
   ".png": "image/png",
@@ -47,7 +48,7 @@ const TYPES = {
   // Browsers compile wasm while it downloads only if it is served with this exact type.
   ".wasm": "application/wasm",
 };
-const COMPRESSIBLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".txt", ".svg", ".wasm"]);
+const COMPRESSIBLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".webmanifest", ".txt", ".svg", ".wasm"]);
 
 // What the editor needs and no more. 'wasm-unsafe-eval' lets the page compile its own WebAssembly;
 // CodeMirror adds <style> elements and style attributes at run time, hence 'unsafe-inline' for

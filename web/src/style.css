@@ -191,7 +191,7 @@ mark { background: rgba(255, 213, 0, 0.35); color: inherit; border-radius: 2px; 
 /* ---- the page ---------------------------------------------------------------------------- */
 
 .page { grid-area: page; overflow: auto; min-width: 0; display: flex; flex-direction: column; }
-.pagebar, .notice, .editor-host, .attachments, .backlinks { width: 100%; max-width: 54rem; margin-inline: auto; }
+.pagebar, .notice, .update-banner, .editor-host, .attachments, .backlinks { width: 100%; max-width: 54rem; margin-inline: auto; }
 .pagebar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.7rem 1rem 0.3rem; }
 .breadcrumb { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem; min-width: 0; }
 .crumb { border: 0; background: none; padding: 0.1rem 0.2rem; color: var(--zim-link); }
@@ -203,6 +203,11 @@ mark { background: rgba(255, 213, 0, 0.35); color: inherit; border-radius: 2px; 
 
 .notice { margin-top: 0.4rem; margin-bottom: 0.2rem; padding: 0.5rem 0.8rem; background: var(--notice-bg); border: 1px solid var(--zim-border); border-radius: 8px; font-size: 0.9rem; width: calc(100% - 2rem); }
 .notice[hidden] { display: none; }
+.update-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.6rem; margin-top: 0.4rem; margin-bottom: 0.2rem; padding: 0.45rem 0.8rem; background: var(--notice-bg); border: 1px solid var(--zim-border); border-radius: 8px; font-size: 0.9rem; width: calc(100% - 2rem); }
+.update-banner[hidden] { display: none; }
+.update-banner .update-text { flex: 1 1 14rem; }
+.changed-files { margin: 0.3rem 0; padding-left: 1.2rem; font-family: ui-monospace, monospace; font-size: 0.82rem; overflow-wrap: anywhere; }
+dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
 
 .editor-host { flex: 1 0 auto; }
 .editor-host .cm-editor { min-height: 55vh; }

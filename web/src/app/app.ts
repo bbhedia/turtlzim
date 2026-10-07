@@ -22,6 +22,7 @@ import type { VaultEvent } from "../vault";
 import { TurtlStore } from "../vault/turtl-store";
 import { createZip, readZip } from "../zip";
 import { closeAllDialogs, showDialog, showMessage } from "./dialogs";
+import type { Phase, Pwa } from "../pwa/register";
 import { clear, h, highlighted } from "./dom";
 import { TreeView } from "./tree-view";
 
@@ -108,6 +109,11 @@ const PRIVATE_ADDRESS = "#/";
 /** "1 page", "2 pages". */
 const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? "" : "s"}`;
 
+/** The start of a version's id, as much as is shown beside a name. */
+const shortId = (id: string): string => id.slice(0, 8);
+
+const megabytes = (bytes: number): string => `${(bytes / 1048576).toFixed(1)} MB`;
+
 interface Current {
   name: string;
   /** Whether the page has text in the notebook yet (a page you've only looked at doesn't). */
@@ -131,6 +137,12 @@ export class App {
   private leftUnlocked = false;
   /** The person has been asked whether to lock and lose what could not be saved, and has not answered. */
   private askingToLose = false;
+  /** What the service worker says (see pwa/): which version runs, and whether another waits to be approved. */
+  private pwa: Pwa | null = null;
+  private pwaPhase: Phase | null = null;
+  /** The new version that the person said "Not now" to, so that it is not offered again on this page. */
+  private updateDismissedFor: string | null = null;
+  private toldReplaced = false;
   /** How long the vault may be left alone (ms). A field so that a test can shorten it. */
   autoLockMs = AUTO_LOCK_MS;
   private autoLockTimer: number | undefined;
@@ -164,6 +176,8 @@ export class App {
     markup: HTMLInputElement;
     breadcrumb: HTMLElement;
     notice: HTMLElement;
+    updateBanner: HTMLElement;
+    updateText: HTMLElement;
     editorHost: HTMLElement;
     backlinks: HTMLDetailsElement;
     backlinkCount: HTMLElement;
@@ -250,6 +264,14 @@ export class App {
     const download = h("button", { type: "button", text: "Download", title: "Download this page as a .txt file", on: { click: () => this.downloadPage() } });
     const remove = h("button", { type: "button", class: "danger-text", text: "Delete", on: { click: () => void this.deletePage() } });
     const notice = h("div", { class: "notice", role: "status", hidden: true });
+    const updateText = h("span", { class: "update-text" });
+    const updateBanner = h(
+      "div",
+      { class: "update-banner", role: "status", hidden: true },
+      updateText,
+      h("button", { type: "button", class: "primary", text: "Update…", on: { click: () => void this.updateDialog() } }),
+      h("button", { type: "button", text: "Not now", on: { click: () => this.dismissUpdate() } }),
+    );
     const editorHost = h("div", { id: "editor", class: "editor-host" });
     const attachmentCount = h("span", { class: "count" });
     const attachmentList = h("ul", { class: "attachment-list" });
@@ -266,7 +288,7 @@ export class App {
       h("div", { class: "sidebar-tools" }, button("Fold all", { on: { click: () => this.tree.foldAll(true) } }), button("Unfold all", { on: { click: () => this.tree.foldAll(false) } })),
       this.tree.element,
     );
-    const page = h("main", { class: "page" }, h("div", { class: "pagebar" }, breadcrumb, h("div", { class: "page-actions" }, rename, subpage, attach, download, remove)), notice, editorHost, attachments, backlinks);
+    const page = h("main", { class: "page" }, h("div", { class: "pagebar" }, breadcrumb, h("div", { class: "page-actions" }, rename, subpage, attach, download, remove)), updateBanner, notice, editorHost, attachments, backlinks);
 
     root.append(
       h(
@@ -386,7 +408,7 @@ export class App {
     folderInput.addEventListener("change", () => void this.readPickedFiles(folderInput, "folder"));
     zipInput.addEventListener("change", () => void this.readPickedFiles(zipInput, "zip"));
 
-    return { root, page, sidebarToggle, notebookButton, notebookMenu, lock, search, searchResults, markup, breadcrumb, notice, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, attach, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput };
+    return { root, page, sidebarToggle, notebookButton, notebookMenu, lock, search, searchResults, markup, breadcrumb, notice, updateBanner, updateText, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, attach, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput };
   }
 
   private toggleSidebar(): void {
@@ -543,6 +565,13 @@ export class App {
         h("hr", {}),
         item("Delete notebook…", () => void this.deleteNotebook(), { class: "menu-item danger-text" }),
       );
+      const pwa = this.pwa;
+      if (pwa) {
+        this.els.notebookMenu.append(h("hr", {}));
+        if (pwa.state.offer) this.els.notebookMenu.append(item(`Update the app (${shortId(pwa.state.offer.id)})…`, () => void this.updateDialog()));
+        if (pwa.canInstall) this.els.notebookMenu.append(item("Install the app…", () => void pwa.install()));
+        this.els.notebookMenu.append(item("About this version…", () => void this.aboutDialog()));
+      }
       this.els.notebookMenu.hidden = false;
       this.els.notebookButton.setAttribute("aria-expanded", "true");
       (this.els.notebookMenu.querySelector("button") as HTMLElement | null)?.focus();
@@ -895,7 +924,7 @@ export class App {
       // (one question is enough, whoever pressed Lock twice; a lock that nobody asked for closes it, and goes ahead)
       if (this.askingToLose) return;
       this.askingToLose = true;
-      const goOn = await this.confirmLockingLoses().finally(() => (this.askingToLose = false));
+      const goOn = await this.confirmLosing("Lock without saving?", "What you typed last has not reached the encrypted notebook: it could not be saved just now. If you lock the encrypted notebooks now, it is lost.", "Lock, and lose it").finally(() => (this.askingToLose = false));
       if (!goOn) return;
     }
     // (all that took time: the vault may be locked by now, or be locking)
@@ -932,13 +961,116 @@ export class App {
     return !(this.dirty || this.saving > 0 || this.saveFailed);
   }
 
-  private confirmLockingLoses(): Promise<boolean> {
-    return showDialog({
-      title: "Lock without saving?",
-      body: ["What you typed last has not reached the encrypted notebook: it could not be saved just now. If you lock the encrypted notebooks now, it is lost."],
-      confirm: "Lock, and lose it",
-      danger: true,
+  private confirmLosing(title: string, body: string, confirm: string): Promise<boolean> {
+    return showDialog({ title, body: [body], confirm, danger: true });
+  }
+
+  // ------------------------------------------------------------------------------------------
+  // the app on the device (the service worker: pwa/, web/pwa/sw.js)
+
+  /** Show what the service worker does: a banner when a new version waits, and items in the notebook menu. */
+  usePwa(pwa: Pwa): void {
+    this.pwa = pwa;
+    // (a page that has to start again for another version saves what was typed first, and asks if that can't be)
+    pwa.restart = () => this.restartForUpdate();
+    pwa.onChange(() => this.renderPwa());
+    this.renderPwa();
+  }
+
+  private renderPwa(): void {
+    const pwa = this.pwa;
+    if (!pwa) return;
+    const { phase, offer, replaced, running } = pwa.state;
+    this.els.updateBanner.hidden = !offer || this.updateDismissedFor === offer.id;
+    if (offer) this.els.updateText.textContent = `A new version of the app is ready (${shortId(offer.id)}). Nothing changes until you update.`;
+    if (this.pwaPhase === "installing" && phase === "ready") this.say("The app is saved on this device: it works without the network.");
+    this.pwaPhase = phase;
+    if (replaced && !this.toldReplaced) {
+      this.toldReplaced = true;
+      this.warn(`The version of the app that you had (${shortId(replaced)}) could not be restored on this device, and the server no longer has it: this one (${shortId(running ?? "")}) runs instead.`);
+    }
+  }
+
+  private dismissUpdate(): void {
+    this.updateDismissedFor = this.pwa?.state.offer?.id ?? null;
+    this.renderPwa();
+  }
+
+  /** Start the page again, for a version that was approved (here or in another tab): what was typed is saved first. */
+  private async restartForUpdate(): Promise<boolean> {
+    if (!(await this.settle()) && !(await this.confirmLosing("Start again without saving?", "What you typed last has not reached the notebook: it could not be saved just now. If the app starts again now, it is lost.", "Start again, and lose it"))) return false;
+    location.reload();
+    return true;
+  }
+
+  /** What the new version is, and the question whether to run it from now on. */
+  private async updateDialog(): Promise<void> {
+    const pwa = this.pwa;
+    const offer = pwa?.state.offer;
+    if (!pwa || !offer) return;
+    const shown = offer.changed.slice(0, 8);
+    await showDialog({
+      title: "Update the app",
+      body: [
+        h("p", {}, "This version: ", h("code", { text: pwa.state.running ?? "unknown" }), " ", h("br"), "New version: ", h("code", { text: offer.id })),
+        `The new version is ${count(offer.files, "file")} (${megabytes(offer.bytes)}) and ${count(offer.changed.length, "file")} of them differ from this one:`,
+        h("ul", { class: "changed-files" }, ...shown.map((name) => h("li", { text: name })), offer.changed.length > shown.length ? h("li", { text: `… and ${offer.changed.length - shown.length} more` }) : null),
+        h("p", {}, "Each file was checked against the list the new version was built with, so they are the files it names. To be sure that it is the version you expect, compare its id with the one that was published, or check what the server serves with ", h("code", { text: "node scripts/pwa.mjs --remote ADDRESS" }), "."),
+        this.vault.unlocked ? "Updating starts the app again, which locks the encrypted notebooks. What you typed is saved first." : "Updating starts the app again. What you typed is saved first.",
+      ],
+      confirm: "Update and start again",
+      working: "Updating…",
+      submit: async () => {
+        try {
+          await pwa.approve();
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      },
     });
+  }
+
+  /** Which version this is, whether it is saved on the device, and a way to look for a new one. */
+  private async aboutDialog(): Promise<void> {
+    const pwa = this.pwa;
+    if (!pwa) return;
+    const { phase, reason, running, files, bytes, offer, replaced, refused } = pwa.state;
+    const lines: Array<string | HTMLElement> = [];
+    if (phase === "ready" && running) {
+      lines.push(h("p", {}, "Version ", h("code", { text: running })));
+      lines.push(`This app is saved on this device (${count(files, "file")}, ${megabytes(bytes)}): it starts without the network, and its code changes only when you approve an update.`);
+    } else if (phase === "installing" || phase === "starting") lines.push("The app is being saved on this device…");
+    else lines.push(reason ?? "This copy of the app is not saved on this device.");
+    if (offer) lines.push(`A new version (${offer.id}) is ready: choose “Update the app” in the notebook menu to see what changes.`);
+    if (refused) lines.push("A new version was found, but its files were not what it says it is made of, so it was not installed.");
+    if (replaced) lines.push(`The version that you had (${replaced}) could not be restored on this device, and the server no longer had it, so the one that runs now took its place.`);
+    lines.push(h("p", {}, "The version is a fingerprint of every file of the app and of the code that keeps it as it is: two copies that show the same one are the same app. (A server that wanted to cheat could show any version: to check what it serves, without this page in the way, run ", h("code", { text: "node scripts/pwa.mjs --remote ADDRESS" }), " from the web folder.)"));
+    await showDialog({
+      title: "About this version",
+      body: lines,
+      confirm: "Close",
+      noCancel: true,
+      actions: phase === "ready" ? [{ label: "Look for a new version", run: (close) => (close(), void this.lookForUpdate()) }] : [],
+    });
+  }
+
+  private async lookForUpdate(): Promise<void> {
+    const pwa = this.pwa;
+    if (!pwa) return;
+    this.say("Looking for a new version…");
+    try {
+      await pwa.update();
+    } catch (error) {
+      this.say(`Couldn't look for a new version: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const { offer, refused } = pwa.state;
+    if (offer) {
+      this.updateDismissedFor = null;
+      this.renderPwa();
+      this.say(`A new version is ready (${shortId(offer.id)}): see the notebook menu.`);
+    } else if (refused) this.say("A new version was found, but its files could not be checked, so it was not installed.");
+    else this.say("This is the newest version.");
   }
 
   // ------------------------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import "./style.css";
 import { App } from "./app/app";
 import type { ZimEditor } from "./editor";
+import { Pwa, browserHost } from "./pwa/register";
 import { SAMPLE } from "./sample";
 import { initZim } from "./zim";
 
@@ -17,6 +18,10 @@ async function main(): Promise<void> {
   const root = document.getElementById("app") as HTMLElement;
   await initZim();
   const app = await App.start(root);
+  // the app is saved on the device (and kept as it is until a new version is approved) by a service worker
+  const pwa = new Pwa(browserHost());
+  app.usePwa(pwa);
+  void pwa.start();
   // (a handle on the app is a handle on whatever it has open, an unlocked encrypted notebook too: only a test asks for one)
   if (window.__ZIM_TEST__ === true) window.__zim = { app, editor: app.editor, editorSample: SAMPLE };
 }

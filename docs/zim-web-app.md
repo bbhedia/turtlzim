@@ -53,6 +53,7 @@ yet (CLAUDE.md, Open issues #5).
 | Files | `web/src/notebook/zim-files.ts`, `media.ts`, `web/src/zip.ts` | `notebook.zim`; folders and zips ⇄ pages and attachments; media types |
 | Pictures | `web/src/notebook/file-urls.ts`, `web/src/editor/` | object URLs for stored pictures; the editor draws `{{images}}` from them |
 | App | `web/src/app/` | the interface: tree, dialogs, search, import and export, saving |
+| On the device | `web/pwa/sw.js`, `web/src/pwa/`, `web/scripts/pwa.mjs`, `web/public/` | the service worker that saves the app and pins its files, its registration and the offers of a new version, the manifest and icons: `zim-pwa.md` |
 
 The app holds no notebook rules of its own: what a link means, what a rename must rewrite and what
 search finds are the Rust ones, so desktop and mobile shells get them unchanged.
@@ -180,6 +181,7 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
 | Bindings | `cargo test -p zim-wasm` and `web/test/notebook-core.test.ts` (also run against the real manual) |
 | Stores | `web/test/store.test.ts`: the same contract on both stores, including files, moves (swaps, case-only), atomicity under failure, and opening a database made before files existed (`fake-indexeddb`) |
 | Session, files, zip | `web/test/session.test.ts` (rename/delete/failed write/export paths/import rules/zip round trips and damage; attachments through rename, delete and export; Zim's manual in and out, every file byte for byte) |
+| The app on the device | `zim-pwa.md` (what verifies what): `web/test/pwa-worker.test.ts` (the worker, in a pretend browser), `pwa-page.test.ts`, `pwa-build.test.ts`, and the scenarios "The app on the device" in `browser.mjs` |
 | Encrypted notebooks | `zim-encrypted-notebooks.md` (what verifies what); `web/test/{vault,engine-failures,cut-off,turtl-store,routed-store}.test.ts`, `store.test.ts` (the shared contract), `vault-browser.mjs` (`npm run test:vault`) |
 | Pictures | `web/test/editor.test.ts` (images with a host: pictures, chips and why, caret and selection rules, Ctrl-click), `commands.test.ts` (where a reference goes), `file-urls.test.ts` (loading, stale addresses, failures not retried) |
 | **The app in Chromium** | `web/test/browser.mjs`: the scenarios below, on the built app, served by the same server `npm run serve` runs |
@@ -212,6 +214,10 @@ and what the review of them found: a question asked on one notebook can't change
 closes questions and asks before it loses typing, a page the browser kept is hidden and locks when
 it comes back, a lock that can't switch the screen starts the page again, a dead engine, an unlock
 that Escape can't give up, a page nobody asked to test having no handle on the app.
+
+The scenarios run with service workers blocked, except those about the app being saved on the device
+(see `zim-pwa.md`: ten of them, each with its own copy of the built app on a server of its own, so that a
+second version can be put on it).
 
 The app offers a test hook, `window.__zim` (the app and its editor), only to a page that was asked
 for one: the test sets `window.__ZIM_TEST__` before the page's own scripts run (an init script of the

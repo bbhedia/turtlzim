@@ -4,9 +4,11 @@
 //   npm run build && node test/screenshots.mjs <directory>
 //
 // Needs the browser that scripts/setup-browser.sh installs.
-import { mkdirSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeServiceWorker } from "../scripts/pwa.mjs";
 import { createStaticServer } from "../scripts/serve.mjs";
 import { launchBrowser } from "./browser-launch.mjs";
 import { png } from "./pictures.mjs";
@@ -24,7 +26,7 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 const browser = await launchBrowser();
 
 async function open(viewport, colorScheme = "light") {
-  const context = await browser.newContext({ viewport, colorScheme, acceptDownloads: true });
+  const context = await browser.newContext({ viewport, colorScheme, acceptDownloads: true, serviceWorkers: "block" });
   await context.addInitScript(() => { window.__ZIM_TEST__ = true; });
   const page = await context.newPage();
   page.on("pageerror", (e) => console.log("[page error]", e.message));
@@ -149,6 +151,38 @@ page = await open({ width: 1280, height: 820 }, "dark");
 await goTo(page, "Help:Links");
 await shot(page, "9-dark-links");
 await page.close();
+
+console.log("the app on the device (a copy of the app, so that a second version can be put on its server)");
+const copy = mkdtempSync(join(tmpdir(), "zim-shots-"));
+cpSync(fileURLToPath(new URL("../dist/", import.meta.url)), copy, { recursive: true });
+writeServiceWorker(copy);
+const site = createStaticServer({ dir: copy });
+await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));
+const saved = await browser.newContext({ viewport: { width: 1280, height: 820 }, serviceWorkers: "allow" });
+await saved.addInitScript(() => { window.__ZIM_TEST__ = true; });
+page = await saved.newPage();
+page.on("pageerror", (e) => console.log("[page error]", e.message));
+await page.goto(`http://127.0.0.1:${site.address().port}/`);
+await page.waitForFunction(() => window.__zim?.app?.pwa?.state.phase === "ready", null, { timeout: 30000 });
+await page.locator(".notebook-button").click();
+await shot(page, "19-menu-with-about");
+await page.getByRole("menuitem", { name: "About this version…" }).click();
+await shot(page, "20-about-this-version");
+await page.getByRole("button", { name: "Close" }).click();
+// a second version arrives on the server
+const main = `assets/${readdirSync(join(copy, "assets")).find((f) => /^index-.*\.js$/.test(f))}`;
+writeFileSync(join(copy, main), `${readFileSync(join(copy, main), "utf8")}\n/* the next version */\n`);
+writeFileSync(join(copy, "icons/new-icon-note.txt"), "a file that the next version has and this one does not");
+writeServiceWorker(copy);
+await page.evaluate(() => window.__zim.app.pwa.update());
+await page.waitForFunction(() => !!window.__zim.app.pwa.state.offer);
+await shot(page, "21-new-version-banner");
+await page.getByRole("button", { name: "Update…" }).click();
+await shot(page, "22-update-the-app");
+await page.getByRole("button", { name: "Cancel" }).click();
+await saved.close();
+site.close();
+rmSync(copy, { recursive: true, force: true });
 
 await browser.close();
 server.close();

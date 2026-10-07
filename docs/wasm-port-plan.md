@@ -155,8 +155,8 @@ the crate at all, which also removes the wasm-pack `package.json` trap (Step 4b-
 (3) the dependency lives in the web app's (or Tauri/Capacitor shell's) own `package.json`, resolved
 by the bundler it already uses, so quirks in how libsodium.js packages itself are the host's to
 handle rather than the core's; (4) the trust model is unchanged: the host is the app, so which
-libsodium build it loads was always the app's responsibility (SRI, pinned service worker; open
-issue #6), and `cryptoSelfTest()` lets it assert at startup that what it injected behaves like
+libsodium build it loads was always the app's responsibility (SRI, pinned service worker: built, see
+`docs/zim-pwa.md`, with its limits; open issue #6), and `cryptoSelfTest()` lets it assert at startup that what it injected behaves like
 native (it catches a wrong build or a version mismatch, not a malicious host). The alternative
 that was weighed, a second ES-module copy of the bridge chosen by a build flag, would have left a
 JS file and a per-target duplicate inside the crate.

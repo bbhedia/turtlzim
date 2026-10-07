@@ -15,10 +15,11 @@
 // failing scenario leaves a screenshot of the page in it); ONLY (run the scenarios whose name
 // contains this text). Needs python3 (its zipfile module reads and writes the zips this test checks).
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { networkInterfaces, tmpdir } from "node:os";
 import { delimiter, dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeServiceWorker } from "../scripts/pwa.mjs";
 import { createStaticServer, selfSignedCertificate } from "../scripts/serve.mjs";
 import { launchBrowser } from "./browser-launch.mjs";
 import { png } from "./pictures.mjs";
@@ -95,8 +96,9 @@ const exposeApp = () => {
  * A fresh browser profile (so a fresh IndexedDB: the sample notebook, nothing else) with the app
  * open. `beforeLoad`, if given, is a function that runs in the page before any of its own scripts.
  */
-async function openApp({ beforeLoad, ...options } = {}) {
-  const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1100, height: 900 }, ...options });
+async function openApp({ beforeLoad, at = origin, ...options } = {}) {
+  // (a service worker keeps the app in a cache of its own: the scenarios that are about that ask for it with `serviceWorkers: "allow"`)
+  const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1100, height: 900 }, serviceWorkers: "block", ...options });
   context.setDefaultTimeout(10_000);
   await context.addInitScript(exposeApp);
   if (beforeLoad) await context.addInitScript(beforeLoad);
@@ -105,7 +107,7 @@ async function openApp({ beforeLoad, ...options } = {}) {
   page.on("console", (message) => {
     if (message.type() === "error") problems.push(`[console error] ${message.text()}`);
   });
-  await page.goto(`${origin}/`);
+  await page.goto(`${at}/`);
   await ready(page);
   livePage = page;
   return { context, ui: driver(page, context) };
@@ -2081,6 +2083,14 @@ try {
       places.localStorage = JSON.stringify({ ...localStorage });
       places.sessionStorage = JSON.stringify({ ...sessionStorage });
       places.caches = JSON.stringify(await caches.keys());
+      // (what a service worker keeps: the files of the app, and nothing else may be there)
+      for (const name of await caches.keys()) {
+        const cache = await caches.open(name);
+        for (const request of await cache.keys()) {
+          const stored = await cache.match(request, { ignoreVary: true });
+          places[`cache:${name}:${new URL(request.url).pathname}`] = stored ? latin1(await stored.arrayBuffer()) : "";
+        }
+      }
       const walk = async (dir, prefix) => {
         for await (const [name, handle] of dir.entries()) {
           if (handle.kind === "directory") await walk(handle, `${prefix}${name}/`);
@@ -2598,7 +2608,7 @@ try {
   });
 
   await scenario("a page that nobody asked to test offers no handle on the app", async () => {
-    const context = await browser.newContext();
+    const context = await browser.newContext({ serviceWorkers: "block" });
     context.setDefaultTimeout(10_000);
     try {
       const page = await context.newPage();
@@ -2620,7 +2630,7 @@ try {
     }
     const open = createStaticServer({ dir: dist });
     await new Promise((resolve) => open.listen(0, "0.0.0.0", resolve));
-    const context = await browser.newContext();
+    const context = await browser.newContext({ serviceWorkers: "block" });
     context.setDefaultTimeout(10_000);
     await context.addInitScript(exposeApp);
     try {
@@ -2661,7 +2671,7 @@ try {
     const secure = createStaticServer({ dir: dist, tls });
     await new Promise((resolve) => secure.listen(0, "0.0.0.0", resolve));
     // (the certificate is self-signed: a person clicks through the browser's warning, which this does for them)
-    const context = await browser.newContext({ ignoreHTTPSErrors: true });
+    const context = await browser.newContext({ ignoreHTTPSErrors: true, serviceWorkers: "block" });
     context.setDefaultTimeout(10_000);
     await context.addInitScript(exposeApp);
     try {
@@ -2683,6 +2693,412 @@ try {
       await context.close();
       secure.close();
     }
+  });
+
+  // ==========================================================================================
+  // The app on the device: a service worker keeps it (pwa/sw.js, src/pwa/, docs/zim-pwa.md)
+  // ==========================================================================================
+
+  /**
+   * A copy of the built app that a scenario can change, served on a port of its own, with the worker made
+   * for the files it has. `publish` changes files and makes the worker again: a new version on the server.
+   */
+  async function siteCopy(name) {
+    const dir = join(work, name);
+    cpSync(dist, dir, { recursive: true });
+    let version = writeServiceWorker(dir);
+    const requests = [];
+    const site = createStaticServer({ dir, log: (line) => requests.push(line) });
+    await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));
+    return {
+      dir,
+      requests,
+      origin: `http://127.0.0.1:${site.address().port}`,
+      get version() {
+        return version;
+      },
+      /** The app's main script: the file that a scenario changes to make a version of its own. */
+      mainScript: `assets/${readdirSync(join(dir, "assets")).find((f) => /^index-.*\.js$/.test(f))}`,
+      publish(changes) {
+        for (const [path, text] of Object.entries(changes)) writeFileSync(join(dir, path), text);
+        version = writeServiceWorker(dir);
+        return version;
+      },
+      stop() {
+        site.closeAllConnections?.();
+        site.close();
+      },
+    };
+  }
+
+  /** Listen to a page the way `openApp` does the first one. */
+  const watch = (page) => {
+    page.on("pageerror", (error) => problems.push(`[page error] ${error.message}`));
+    page.on("console", (message) => message.type() === "error" && problems.push(`[console error] ${message.text()}`));
+  };
+  const pwaReady = (page, id) => page.waitForFunction((id) => { const s = window.__zim?.app?.pwa?.state; return s?.phase === "ready" && (!id || s.running === id); }, id, { timeout: 30_000 });
+  const pwaOffers = (page, id) => page.waitForFunction((id) => window.__zim?.app?.pwa?.state.offer?.id === id, id, { timeout: 30_000 });
+  const mainScriptText = (page) => page.evaluate(async () => (await fetch(document.querySelector('script[type="module"]').src)).text());
+  const cachesOf = (page) =>
+    page.evaluate(async () => {
+      const found = {};
+      for (const name of await caches.keys()) found[name] = (await (await caches.open(name)).keys()).map((r) => new URL(r.url).pathname).sort();
+      return found;
+    });
+
+  /** The app, saved on the device by its worker (and the page reloaded once, so that the worker is the one that answers). */
+  async function savedApp(site, options = {}) {
+    const opened = await openApp({ at: site.origin, serviceWorkers: "allow", ...options });
+    await pwaReady(opened.ui.page, site.version.id);
+    await opened.ui.reload();
+    await pwaReady(opened.ui.page, site.version.id);
+    return opened;
+  }
+
+  await scenario("the app is saved on the device by a service worker: every file of the version is kept, and after that the page itself comes from the worker", async () => {
+    const site = await siteCopy("pwa-install");
+    const { context, ui } = await openApp({ at: site.origin, serviceWorkers: "allow" });
+    try {
+      const { page } = ui;
+      const id = site.version.id;
+      await pwaReady(page, id);
+      assert((await ui.status()).includes("saved on this device"), `it says that the app is saved (${await ui.status()})`);
+      const kept = await cachesOf(page);
+      assertDeepEqual(Object.keys(kept).sort(), ["zim-web-state", `zim-web-v-${id}`], "what is kept is the worker's: its record, and the version's files");
+      assertDeepEqual(kept[`zim-web-v-${id}`], site.version.files.map((f) => `/${f.url}`).sort(), "every file of the version is in it");
+      // from now on the page comes from the worker, and the server is asked for nothing but the worker's own script
+      site.requests.length = 0;
+      const response = await page.reload();
+      await ready(page);
+      assert(response.fromServiceWorker(), "the page comes from the worker");
+      await pwaReady(page, id);
+      const asked = site.requests.map((line) => line.split(" ")[2]).filter((path) => path !== "/sw.js");
+      assertDeepEqual(asked, [], "and so does every file of it");
+      // what a browser looks for to offer to install it: it is asked whether anything is in the way
+      const devtools = await context.newCDPSession(page);
+      const { installabilityErrors } = await devtools.send("Page.getInstallabilityErrors");
+      // (a browser that a test starts is an incognito one, which can't install anything: that is the one thing in the way)
+      assertDeepEqual(installabilityErrors.filter((e) => e.errorId !== "in-incognito"), [], "the browser finds nothing in the way of installing the app");
+      const manifest = await page.evaluate(async () => {
+        const link = document.querySelector('link[rel="manifest"]');
+        const response = await fetch(link.href);
+        const json = await response.json();
+        const icons = await Promise.all(json.icons.map(async (icon) => (await fetch(new URL(icon.src, link.href))).ok));
+        return { type: response.headers.get("content-type"), json, icons };
+      });
+      assert(/application\/manifest\+json/.test(manifest.type), `the manifest is served as one (${manifest.type})`);
+      assertEqual(manifest.json.display, "standalone", "it asks for a window of its own");
+      assert(manifest.icons.length >= 3 && manifest.icons.every(Boolean), "and its icons are there");
+      // what the person can see of it
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "About this version…" }).click();
+      const about = topDialog(page);
+      await about.waitFor();
+      const shown = await about.innerText();
+      assert(shown.includes(id), "the version is shown");
+      assert(shown.includes("saved on this device") && shown.includes("only when you approve an update"), `and what it means: ${shown}`);
+      await about.getByRole("button", { name: "Close" }).click();
+    } finally {
+      await context.close();
+      site.stop();
+    }
+  });
+
+  await scenario("a saved app starts with the server gone, and a notebook, an encrypted one too, can be made, written in, locked and unlocked", async () => {
+    const site = await siteCopy("pwa-offline");
+    const { context, ui } = await savedApp(site);
+    try {
+      const { page } = ui;
+      site.stop();
+      await ui.reload();
+      assert((await ui.rows()).includes("Home"), "the app started from the worker alone: the sample notebook is there");
+      // an open notebook
+      await ui.chooseFromMenu("New notebook…");
+      await ui.confirmDialog("Create", { Name: "Made offline" });
+      await ui.typeAtEnd("written with no server\n");
+      await ui.flush();
+      assertEqual(await ui.saveState(), "Saved", "it saves");
+      // an encrypted one: its engine (a Worker and its wasm) comes from the worker's cache too
+      await newEncryptedNotebook(ui, "Vault made offline");
+      await ui.goto("Secret page");
+      await ui.typeAtEnd("written in the vault, with no server\n");
+      await ui.flush();
+      assertEqual(await ui.saveState(), "Saved", "the vault saves");
+      await page.locator(".lock-button").click();
+      await isOpenNotebook(page);
+      await unlockFromMenu(ui);
+      assert((await ui.pageText("Secret page")).includes("written in the vault, with no server"), "and gives it back after an unlock");
+      await page.locator(".lock-button").click();
+      await isOpenNotebook(page);
+    } finally {
+      await context.close();
+    }
+  });
+
+  await scenario("a new version waits to be approved: the app stays as it is, even when every tab was closed and a new one opened, until it is approved; then it starts on the new one", async () => {
+    const site = await siteCopy("pwa-update");
+    const { context, ui } = await savedApp(site);
+    try {
+      const { page } = ui;
+      const v1 = site.version.id;
+      const original = await mainScriptText(page);
+      const v2 = site.publish({ [site.mainScript]: `${original}\n/* a second version of the app */\n` }).id;
+      assert(v1 !== v2, "the new version has an id of its own");
+      // the browser finds the new worker when a page is opened; this asks it to look now
+      await page.evaluate(() => window.__zim.app.pwa.update());
+      await pwaOffers(page, v2);
+      const banner = page.locator(".update-banner");
+      await banner.waitFor();
+      assert((await banner.innerText()).includes(v2.slice(0, 8)), `the banner names the new version (${await banner.innerText()})`);
+      // nothing has changed: the page runs the version it was started from, and the files that are served are that one's
+      assertEqual(await page.evaluate(() => window.__zim.app.pwa.state.running), v1, "it runs the old version");
+      assert(!(await mainScriptText(page)).includes("a second version"), "and what is served is the old script");
+      assertDeepEqual(Object.keys(await cachesOf(page)).sort(), ["zim-web-state", `zim-web-v-${v1}`, `zim-web-v-${v2}`].sort(), "the new files are kept beside the old ones");
+      // the question says what differs
+      await banner.getByRole("button", { name: "Update…" }).click();
+      const asking = topDialog(page);
+      await asking.waitFor();
+      const said = await asking.innerText();
+      assert(said.includes(v1) && said.includes(v2), "it names both versions");
+      assert(said.includes(site.mainScript), "and the file that differs");
+      assert(said.includes("starts the app again"), "and what updating does");
+      await asking.getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(page);
+      await banner.getByRole("button", { name: "Not now" }).click();
+      assert(await banner.isHidden(), "Not now puts the banner away");
+      await ui.openMenu();
+      assert(await ui.menu().getByRole("menuitem", { name: /Update the app/ }).isVisible(), "but the menu has the way to it");
+      await page.keyboard.press("Escape");
+
+      // reloaded without approving: still the old version, and the offer is still there
+      await ui.reload();
+      await pwaReady(page, v1);
+      await pwaOffers(page, v2);
+      assert(!(await mainScriptText(page)).includes("a second version"), "a reload does not approve it");
+      // The browser makes a waiting worker the active one when the last tab it controls is closed. (Done here,
+      // as the browser does it, with the tab still open: DevTools' skipWaiting.) The new worker is the one that
+      // answers now, and it goes on answering with the version that was approved.
+      const devtools = await context.newCDPSession(page);
+      await devtools.send("ServiceWorker.enable");
+      await devtools.send("ServiceWorker.skipWaiting", { scopeURL: `${site.origin}/` });
+      await page.waitForFunction(async () => {
+        const registration = await navigator.serviceWorker.getRegistration();
+        return !!registration && !registration.waiting && !!registration.active;
+      });
+      await ui.reload();
+      await pwaReady(page, v1);
+      await pwaOffers(page, v2);
+      assert(!(await mainScriptText(page)).includes("a second version"), "the new worker, made the active one, still answers with the approved version");
+      assertDeepEqual(Object.keys(await cachesOf(page)).sort(), ["zim-web-state", `zim-web-v-${v1}`, `zim-web-v-${v2}`].sort(), "and keeps both versions' files");
+      // every tab closed and a new one opened: the same
+      await page.close();
+      const again = await context.newPage();
+      watch(again);
+      await again.goto(`${site.origin}/`);
+      await ready(again);
+      await pwaReady(again, v1);
+      await pwaOffers(again, v2);
+      assert(!(await mainScriptText(again)).includes("a second version"), "a page opened after the last one was closed still runs the old version");
+
+      // approved: the page starts again, on the new version, and the old files are gone
+      await again.locator(".update-banner").getByRole("button", { name: "Update…" }).click();
+      await Promise.all([again.waitForEvent("load"), topDialog(again).getByRole("button", { name: "Update and start again" }).click()]);
+      await ready(again);
+      await pwaReady(again, v2);
+      assert((await mainScriptText(again)).includes("a second version"), "the page runs the new version");
+      assertDeepEqual(Object.keys(await cachesOf(again)).sort(), ["zim-web-state", `zim-web-v-${v2}`].sort(), "and the old files are gone");
+      assert(await again.locator(".update-banner").isHidden(), "nothing is offered any more");
+    } finally {
+      await context.close();
+      site.stop();
+    }
+  });
+
+  await scenario("a version approved in one tab starts the others again, on the new version: also one that was opened before the app was saved", async () => {
+    const site = await siteCopy("pwa-two-tabs");
+    // (the first tab is opened when there is no worker: the worker takes it over once it is installed, but the tab
+    // did not start under it, and no change of worker will ever tell it that the version has changed)
+    const { context, ui } = await openApp({ at: site.origin, serviceWorkers: "allow" });
+    try {
+      const first = ui.page;
+      const v1 = site.version.id;
+      await pwaReady(first, v1);
+      const second = await context.newPage();
+      watch(second);
+      await second.goto(`${site.origin}/`);
+      await ready(second);
+      await pwaReady(second, v1);
+      const v2 = site.publish({ [site.mainScript]: `${await mainScriptText(second)}\n/* the next version */\n` }).id;
+      await second.evaluate(() => window.__zim.app.pwa.update());
+      await pwaOffers(second, v2);
+      await second.locator(".update-banner").getByRole("button", { name: "Update…" }).click();
+      await Promise.all([first.waitForEvent("load"), second.waitForEvent("load"), topDialog(second).getByRole("button", { name: "Update and start again" }).click()]);
+      await ready(first);
+      await ready(second);
+      await pwaReady(first, v2);
+      await pwaReady(second, v2);
+      assert((await mainScriptText(first)).includes("the next version"), "the tab that did not approve runs the new version too");
+    } finally {
+      await context.close();
+      site.stop();
+    }
+  });
+
+  await scenario("a new version whose files are not what its list says is refused, and the app goes on as it was", async () => {
+    const site = await siteCopy("pwa-refused");
+    const { context, ui } = await savedApp(site);
+    try {
+      const { page } = ui;
+      const v1 = site.version.id;
+      const original = await mainScriptText(page);
+      const v2 = site.publish({ [site.mainScript]: `${original}\n/* what was built */\n` }).id;
+      // the file is changed on its way: the server now sends something that the list does not say (as long, so that only its hash can tell)
+      writeFileSync(join(site.dir, site.mainScript), `${original}\n/* what was sent! */\n`);
+      await page.evaluate(() => window.__zim.app.pwa.update());
+      await page.waitForFunction(() => window.__zim.app.pwa.state.refused === true);
+      const state = await page.evaluate(() => window.__zim.app.pwa.state);
+      assertEqual(state.offer, null, "nothing is offered");
+      assertEqual(state.running, v1, "the app runs as it did");
+      assert(await page.locator(".update-banner").isHidden(), "the banner is not shown");
+      assertDeepEqual(Object.keys(await cachesOf(page)).sort(), ["zim-web-state", `zim-web-v-${v1}`].sort(), "nothing of the refused version is kept");
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "About this version…" }).click();
+      assert((await topDialog(page).innerText()).includes("was not installed"), "the version dialog says that one was found and not installed");
+      await topDialog(page).getByRole("button", { name: "Close" }).click();
+      // the file is put right: the version is found again, and now it installs
+      writeFileSync(join(site.dir, site.mainScript), `${original}\n/* what was built */\n`);
+      await page.evaluate(() => window.__zim.app.pwa.update());
+      await pwaOffers(page, v2);
+    } finally {
+      await context.close();
+      site.stop();
+    }
+  });
+
+  await scenario("a file that the browser cleared is fetched again only if it is the file that was installed: a changed one is never run", async () => {
+    const site = await siteCopy("pwa-cleared");
+    // (the version has room at the end of its script, so that the changed script can be as long as it was)
+    const bundle = readFileSync(join(site.dir, site.mainScript), "utf8");
+    const built = `${bundle}\n/*${"x".repeat(80)}*/\n`;
+    site.publish({ [site.mainScript]: built });
+    const { context, ui } = await savedApp(site);
+    try {
+      const { page } = ui;
+      const id = site.version.id;
+      const original = await mainScriptText(page);
+      assertEqual(original, built, "the script is the one that was built");
+      // the browser clears the files (it does when the disk runs short), and the server's script has been changed: to something that would run, and is as long
+      await page.evaluate((name) => caches.delete(name), `zim-web-v-${id}`);
+      const head = `${bundle}\nwindow.__tampered_ran = true;/*`;
+      const evil = `${head}${"x".repeat(built.length - head.length - 3)}*/\n`;
+      writeFileSync(join(site.dir, site.mainScript), evil);
+      assertEqual(Buffer.byteLength(evil), Buffer.byteLength(built), "the changed script is as long as the one that was built");
+      await page.reload();
+      await page.waitForTimeout(2500);
+      assertEqual(await page.evaluate(() => window.__zim), undefined, "the app did not start: its script was not the one that was installed");
+      assertEqual(await page.evaluate(() => window.__tampered_ran), undefined, "and what the server sent instead did not run");
+      problems = problems.filter((p) => !/Failed to load resource|net::ERR_FAILED/.test(p));
+      // put right, it is fetched, checked and kept, and the app starts
+      writeFileSync(join(site.dir, site.mainScript), original);
+      await page.reload();
+      await ready(page);
+      assertDeepEqual(await page.evaluate(() => caches.keys()).then((k) => k.sort()), ["zim-web-state", `zim-web-v-${id}`], "the files were kept again");
+    } finally {
+      await context.close();
+      site.stop();
+    }
+  });
+
+  await scenario("an update asked for while an encrypted notebook is open saves what was typed, locks the notebooks, and starts the app on the new version", async () => {
+    const site = await siteCopy("pwa-update-vault");
+    const { context, ui } = await savedApp(site);
+    try {
+      const { page } = ui;
+      await newEncryptedNotebook(ui, "Kept through an update");
+      await ui.goto("Typed page");
+      const v2 = site.publish({ [site.mainScript]: `${await mainScriptText(page)}\n/* the version after */\n` }).id;
+      await page.evaluate(() => window.__zim.app.pwa.update());
+      await pwaOffers(page, v2);
+      // Saving takes a while, as it does when the disk is busy (two seconds: the page waits up to three). The page must
+      // wait for it before it starts again, or what was typed is lost.
+      await page.evaluate(() => {
+        const session = window.__zim.app.session;
+        const save = session.save.bind(session);
+        session.save = async (...args) => {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          return save(...args);
+        };
+      });
+      await ui.typeAtEnd("typed just before the update");
+      await page.locator(".update-banner").getByRole("button", { name: "Update…" }).click();
+      const asking = topDialog(page);
+      assert((await asking.innerText()).includes("locks the encrypted notebooks"), "the question says that the encrypted notebooks are locked");
+      await Promise.all([page.waitForEvent("load"), asking.getByRole("button", { name: "Update and start again" }).click()]);
+      await ready(page);
+      await pwaReady(page, v2);
+      assert(await page.locator(".lock-button").isHidden(), "the encrypted notebooks are locked");
+      await unlockFromMenu(ui);
+      assert((await ui.pageText("Typed page")).includes("typed just before the update"), "what was typed was saved first");
+      await page.locator(".lock-button").click();
+      await isOpenNotebook(page);
+    } finally {
+      await context.close();
+      site.stop();
+    }
+  });
+
+  await scenario("what the worker keeps is the app and nothing of an encrypted notebook: a scan of the cache, with a control that shows the scan reads it", async () => {
+    const site = await siteCopy("pwa-scan");
+    const { context, ui } = await savedApp(site);
+    try {
+      const { page } = ui;
+      const secrets = ["Cache Scan Notebook", "Cache scan page name", "cache scan secret sentence 9137"];
+      await newEncryptedNotebook(ui, secrets[0]);
+      await ui.goto(secrets[1]);
+      await ui.typeAtEnd(`${secrets[2]}\n`);
+      await ui.flush();
+      await page.locator(".lock-button").click();
+      await isOpenNotebook(page);
+      const places = await keptByTheBrowser(page);
+      const where = (needle) => Object.entries(places).filter(([, value]) => value.includes(needle)).map(([place]) => place);
+      const cached = Object.keys(places).filter((place) => place.startsWith("cache:"));
+      assert(cached.length >= site.version.files.length, `the scan reads what the worker keeps (${cached.length} files)`);
+      assert(where("Zim Notebook").some((p) => p.startsWith("cache:")), "and finds the app's own text in it (the control)");
+      for (const secret of secrets) assertDeepEqual(where(secret), [], `${JSON.stringify(secret)} is nowhere the browser keeps things`);
+    } finally {
+      await context.close();
+      site.stop();
+    }
+  });
+
+  await app("the browser's offer to install the app is taken up from the notebook menu", {}, async (ui) => {
+    const { page } = ui;
+    await ui.openMenu();
+    assertEqual(await ui.menu().getByRole("menuitem", { name: "Install the app…" }).count(), 0, "nothing is offered before the browser offers");
+    await page.keyboard.press("Escape");
+    // (a browser offers with an event; this one is made by hand)
+    await page.evaluate(() => {
+      const offer = new Event("beforeinstallprompt", { cancelable: true });
+      offer.prompt = async () => void (window.__prompted = true);
+      offer.userChoice = Promise.resolve({ outcome: "accepted" });
+      window.dispatchEvent(offer);
+    });
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Install the app…" }).click();
+    await page.waitForFunction(() => window.__prompted === true);
+    await ui.openMenu();
+    assertEqual(await ui.menu().getByRole("menuitem", { name: "Install the app…" }).count(), 0, "and it is offered once");
+    await page.keyboard.press("Escape");
+  });
+
+  await app("a copy of the app that is not saved on the device says so", {}, async (ui) => {
+    const { page } = ui;
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "About this version…" }).click();
+    const about = topDialog(page);
+    await about.waitFor();
+    assert((await about.innerText()).includes("could not be saved on this device"), `it says that the app is not saved (${await about.innerText()})`);
+    await about.getByRole("button", { name: "Close" }).click();
   });
 
   for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"} ${r.name}${r.ok ? ` (${r.ms} ms)` : `\n    ${r.error}`}`);
