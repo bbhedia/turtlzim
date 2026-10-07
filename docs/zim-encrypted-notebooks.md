@@ -77,6 +77,12 @@ arrive together or not at all.
   is made from the account's name, which is random.
   *Checked:* the known-answer test for this cost uses a key made by Python's `hashlib.scrypt`
   (OpenSSL), not libsodium, and runs natively and on wasm32 (`crypto::low::tests`).
+* **The passphrase is normalised first** (Unicode NFKC, in `Vault`, `normalizePassphrase`): an
+  accent can be typed as one character or as a letter and a combining mark, depending on the
+  keyboard and the system, and those are different bytes, so a vault made on one computer would
+  not open on another. After NFKC they are the same key. ASCII passphrases are unchanged, and
+  nothing is trimmed (a space at the end is part of what was typed). It can never change while
+  vaults exist: it is part of how every key is made.
 * **What the key protects.** The account's private part (its keypair and settings) is encrypted with
   the key; the key encrypts the **keychain**, which holds one random key per space (notebook); each
   note has a random key of its own, kept in the note, encrypted with its space's key. Titles, texts,

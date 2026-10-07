@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CoreClient, CoreError } from "../src/vault/core-client";
 import type { CoreTransport } from "../src/vault/core-client";
-import { NoVaultError, Vault, VaultBusyError, VaultExistsError, VaultUnavailableError, WrongPassphraseError, checkPassphrase } from "../src/vault/vault";
+import { NoVaultError, Vault, VaultBusyError, VaultExistsError, VaultUnavailableError, WrongPassphraseError, checkPassphrase, normalizePassphrase } from "../src/vault/vault";
 import { DirectTransport } from "./helpers/direct-core";
 
 // unlocking costs what it is meant to cost an attacker (scrypt with 128 MiB), a second or two each
@@ -176,6 +176,20 @@ async function whoIsLoggedIn(): Promise<string> {
   }
 }
 
+describe("the passphrase as it becomes a key", () => {
+  it("is the same however an accent was typed, and for fullwidth letters, and unchanged for ASCII", () => {
+    const composed = "caf\u00e9 cr\u00e8me br\u00fbl\u00e9e";
+    const decomposed = "cafe\u0301 cre\u0300me bru\u0302le\u0301e";
+    expect(composed).not.toBe(decomposed);
+    expect(normalizePassphrase(decomposed)).toBe(normalizePassphrase(composed));
+    expect(normalizePassphrase("\uff21\uff22\uff23 passphrase")).toBe("ABC passphrase");
+    // the passphrases that were typed before this existed (ASCII, and any that were already in NFC) are the same keys
+    for (const same of ["pale river stone lantern", "  spaces  kept ", "tab\tand\nnewline", composed, "日本語のパスフレーズです", "😀😁😂🤣😃😄😅😆😉😊"]) expect(normalizePassphrase(same)).toBe(same);
+    // and nothing is trimmed: a space at the end is part of what was typed
+    expect(normalizePassphrase("ends with a space ")).toBe("ends with a space ");
+  });
+});
+
 describe("the vault", () => {
   it("is made with a passphrase, and then it is unlocked", async () => {
     const vault = newVault();
@@ -217,6 +231,36 @@ describe("the vault", () => {
     expect(await whoIsLoggedIn(), "locking logs the core out, so what it decrypted and its keys are dropped").toBe("");
     await vault.lock(); // locking what is locked is nothing
   }, SLOW);
+
+  it("opens with an accented passphrase typed either way, and not with another", async () => {
+    const sent: string[] = [];
+    // an engine that records the passphrase it is given (a vault with no account yet, then one that has it)
+    const spy = (): CoreTransport => {
+      const transport: CoreTransport = {
+        onMessage: null,
+        onLost: null,
+        async boot() {},
+        send(message: string) {
+          const [id, command, ...args] = JSON.parse(message) as string[];
+          if (command === "user:join" || command === "user:login") sent.push(String(args[1]));
+          setTimeout(() => transport.onMessage?.("any", JSON.stringify({ id, e: 0, d: command === "user:local-accounts" ? (sent.length > 0 ? ["named"] : []) : {} })), 0);
+          if (command === "user:logout") setTimeout(() => transport.onMessage?.("any", JSON.stringify({ e: "user:logout", d: null })), 0);
+        },
+        async close() {},
+      };
+      return transport;
+    };
+    const composed = "caf\u00e9 cr\u00e8me br\u00fbl\u00e9e";
+    const decomposed = "cafe\u0301 cre\u0300me bru\u0302le\u0301e";
+    const vault = new Vault({ persistence: null, connect: spy });
+    // made as one computer types it, opened as another does, and as the first does again: one key
+    await vault.create(decomposed);
+    await vault.lock();
+    await vault.unlock(composed);
+    await vault.lock();
+    await vault.unlock(decomposed);
+    expect(sent).toEqual([composed, composed, composed]);
+  });
 
   it("is made once: a second vault is refused, here or from another Vault object", async () => {
     const first = await existingVault();

@@ -78,6 +78,18 @@ export function checkPassphrase(passphrase: string): string | null {
   return null;
 }
 
+/**
+ * The passphrase as it is made into a key. A passphrase with an accent in it can be typed in more than
+ * one way that looks the same (é as one character, or as e and a combining accent: keyboards and systems
+ * differ), and each way is different bytes, so a vault made on one computer would not open on another.
+ * Unicode's compatibility normalisation (NFKC, which password managers also use) makes them the same.
+ * It is the same for ASCII, so it changes nothing for most passphrases, and it has to be the same for as
+ * long as there are vaults: changing it would change every key.
+ */
+export function normalizePassphrase(passphrase: string): string {
+  return passphrase.normalize("NFKC");
+}
+
 function hex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -162,7 +174,7 @@ export class Vault {
         if ((await client.request<string[]>("user:local-accounts")).length > 0) throw new VaultExistsError();
         // a name of its own, which is part of what the passphrase is made into a key with: nobody else's key is made the same way
         const name = hex(crypto.getRandomValues(new Uint8Array(16)));
-        await client.request("user:join", name, passphrase);
+        await client.request("user:join", name, normalizePassphrase(passphrase));
       } catch (error) {
         await client.close();
         throw error;
@@ -182,7 +194,7 @@ export class Vault {
         const name = accounts[0];
         if (name === undefined) throw new NoVaultError();
         try {
-          await client.request("user:login", name, passphrase);
+          await client.request("user:login", name, normalizePassphrase(passphrase));
         } catch (error) {
           if (error instanceof CoreError && error.kind === "api" && error.subtype === "Unauthorized") throw new WrongPassphraseError();
           throw error;
