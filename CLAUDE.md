@@ -132,6 +132,7 @@ npm run test:browser                # the built app in a real browser (ZIM_GOLDE
 npm run test:vault                  # the encrypted-notebook vault in a real browser: Worker, OPFS, reload, crash mid-write (five moments), one tab at a time, the Worker's network cut-off, heartbeat and silent death
 npm run screenshots <dir>           # twelve pictures of the app to look at (light, dark, phone, dialogs, pictures)
 scripts/serve.sh start --host :: --port 8080   # serve web/dist in the background (see docs/zim-editor-plan.md: trying it from another machine)
+scripts/serve.sh start --host :: --port 8443 --tls --name ADDRESS   # https for encrypted notebooks from another machine (docs/zim-pwa.md: trusting its certificate)
 
 # Desktop (Tauri)
 npm run tauri dev

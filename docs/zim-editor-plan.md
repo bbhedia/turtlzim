@@ -152,12 +152,15 @@ It listens on 127.0.0.1 unless told otherwise. Ways to reach it, easiest first:
    `sudo ufw allow 8080/tcp`, or only from your address:
    `sudo ufw allow from YOUR.IP to any port 8080 proto tcp` (undo: `sudo ufw delete allow 8080/tcp`).
    Behind a router (a private 192.168.x.x address) the router must also forward the port.
-   **Encrypted notebooks need a secure page**, which `http://192.168.x.x` is not: add `--tls` and the
-   server makes a self-signed certificate for this machine's addresses (needs `openssl`; kept in
-   `~/.local/state/zim-web/tls`, made again if the addresses change). The browser warns once
-   (Advanced, then Proceed), and from then on the page is a secure one: OPFS, and so the vault, work.
-   The warning is only that nobody the browser trusts signed the certificate; for something you
-   keep, use a real one (`--cert FILE --key FILE`) or the tunnel.
+   **Encrypted notebooks need a secure page**, which `http://192.168.x.x` is not: add `--tls` (and
+   `--name ADDRESS` for each address or host name that visitors type, a router's public address
+   included) and the server makes a certificate for those names (needs `openssl`; kept in
+   `~/.local/state/zim-web/tls`, made again if the names change). The browser warns once (Advanced, then
+   Proceed), and the page is then a secure one: OPFS, and so the vault, work. The warning is that nobody
+   the browser trusts signed the certificate; the app is then not saved for offline use (a browser refuses
+   a service worker for such a page). To have no warning and the saved app, ask each computer to trust the
+   authority file the server gives (`/ca.pem`): how, and why that is safe, is in `docs/zim-pwa.md`. Or use
+   a real certificate (`--cert FILE --key FILE`), or the tunnel.
 3. **Copy `web/dist` to a web server you already have** (`rsync -av web/dist/ host:/var/www/zim/`).
    The build uses relative URLs, so it works from any folder; make sure `.wasm` is served as
    `application/wasm`.
@@ -175,8 +178,9 @@ The built app saves itself on a visitor's device with a service worker (`dist/sw
 the first visit it starts without the server, and a new build put on the server is **offered** to visitors,
 who approve it (the page shows its id and the files that differ). Serve `sw.js` with `Cache-Control:
 no-cache` (`scripts/serve.mjs` does) and `manifest.webmanifest` as `application/manifest+json`. A worker
-needs a certificate the browser trusts: with `serve.sh --tls` (self-signed) the app and the encrypted
-notebooks work, but the app is not saved for offline use. Details and limits: `docs/zim-pwa.md`.
+needs a certificate the browser trusts: with `serve.sh --tls` alone the app and the encrypted notebooks
+work after the warning, but the app is not saved for offline use; trusting the server's authority fixes that
+(`docs/zim-pwa.md`).
 
 ## Running it
 

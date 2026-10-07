@@ -116,13 +116,75 @@ id twice on the machine this was built on; across machines it was not tried (the
   sends `no-cache` for everything outside `assets/`, and a static host should be set the same.
   `manifest.webmanifest` is served as `application/manifest+json` (a type `serve.mjs` knows).
 * **A secure origin**: `https://`, or `localhost` (the SSH tunnel of `docs/zim-editor-plan.md` is one).
-  Chromium does not allow a worker for a page whose certificate it does not trust, even after the person
-  clicked through the warning: over a LAN with `serve.sh --tls` (a self-signed certificate) the app and the
-  encrypted notebooks work, but the app is not saved for offline use, and *About this version* says what the
-  browser answered. A certificate the browser trusts (mkcert, a real domain) fixes that.
+  Chromium does not allow a worker for a page whose certificate it does not trust, **even after the person
+  clicked through the warning**. That was seen twice: in a real Chromium that was made to proceed past the
+  certificate error as the warning's button does (the page was secure, an encrypted notebook was made, and
+  the worker was refused with "An SSL certificate error occurred when fetching the script"), and in the log
+  of a server that a visitor reached that way (the worker's script was fetched, and nothing was installed
+  after it). So `serve.sh --tls` alone gives an app and encrypted notebooks that work after the warning,
+  and no saved app: *About this version* says what the browser answered. Two ways to a saved app: a
+  certificate that an authority the browser already knows signed (a domain name and Let's Encrypt, then
+  `serve.mjs --cert FILE --key FILE`), or the certificate this server makes, **once each computer has been
+  asked to trust it**, below.
 * The app can sit in a folder of a site: the worker's scope is the folder it is in.
+* A server on the Internet is found by scanners within hours (the log of a server on a public address has a
+  line from a stranger about every hour, and a few that try it as a proxy). It serves only the app's files, but a password is cheap
+  (`ZIM_WEB_AUTH=name:password`, which is safe over `--tls`), and the firewall can let in only your own
+  address (`sudo ufw allow from YOUR.IP to any port 8443 proto tcp`).
 * iOS: Safari may delete a site's script-writable storage after a week of not visiting it unless the app has
   been added to the home screen. (The saved copy and the notebooks are in that storage.)
+
+## Trusting the certificate that `--tls` makes
+
+```bash
+scripts/serve.sh restart --host :: --port 8443 --tls --name 130.180.221.123 --name 192.168.10.10
+#                                                      ^ every address or host name that visitors type
+```
+
+The certificate is for those names and `localhost`, and no other (without any `--name` it names every address
+of the machine, which is for a try-out: the machine's addresses change, and the public address of a router is
+not one of them). The server says when it starts which authority signed it, where that authority's file is
+(`~/.local/state/zim-web/tls/ca.pem`), and its SHA-256; the same file is served at `https://ADDRESS:PORT/ca.pem`.
+
+**Why it is safe to trust.** The certificate the server holds can sign nothing (`CA:FALSE`). The authority
+that signed it exists for this one certificate: it is limited to these names (name constraints), can sign no
+authority below it, and **its key was deleted as soon as it had signed**, so it cannot vouch for anything else
+for anybody, whatever happens to the server later. What a taken-over server could do is what any server's
+key does: be the server (for these names). A computer that trusts the authority is trusting that server, not
+a site-signing key. (The certificate the server made before this was itself an authority, with its key on the
+server; it was never meant to be imported, and is not made any more.) It is valid for a year, and a new one
+(a new authority, to trust again) is made when the names change or a year is nearly up.
+
+**On each computer that visits:**
+
+1. Get the authority's file: `https://ADDRESS:PORT/ca.pem` (it is sent as a certificate to install, and a
+   browser saves it as `zim-web-authority.crt`; it will warn once, which is why the next step is there) or
+   `scp you@server:.local/state/zim-web/tls/ca.pem .`.
+2. **Check that it is the right file**, by whatever way does not depend on the channel it came by: its SHA-256
+   (`openssl x509 -in ca.pem -noout -fingerprint -sha256`, or the certificate viewer of the system) must be the one
+   the server printed (`scripts/serve.sh status`, or `scripts/serve.sh log`).
+3. Import it as a trusted authority for identifying websites. The menus differ between versions of each
+   system, but this is the usual way:
+   * **Windows** (Chrome, Edge): double-click the `.crt` (a `.pem` has to be renamed `.crt` first), *Install Certificate*, *Current User*,
+     *Place all certificates in the following store*, *Trusted Root Certification Authorities*.
+   * **macOS** (Chrome, Safari): double-click it (Keychain Access opens), add it to the *login* keychain, open
+     it there, *Trust*, *When using this certificate: Always Trust*.
+   * **Linux, Chrome or Chromium**: Settings, Privacy and security, Security, Manage certificates, *Authorities*,
+     *Import*, tick *Trust this certificate for identifying websites*. **Firefox** (on any system): Settings,
+     Privacy & Security, *View Certificates*, *Authorities*, *Import*, tick *Trust this CA to identify websites*.
+   * **Android** (Chrome): Settings, Security, Encryption & credentials, *Install a certificate*, *CA certificate*.
+   * **iOS** (Safari): open the file, allow the profile, install it in Settings, then Settings, General, About,
+     *Certificate Trust Settings*, switch it on.
+4. Restart the browser and open the address again: there is no warning, and *About this version* says that the
+   app is saved on this device.
+
+Taking it back: remove the authority from the same list. When the names change a new authority is made;
+trust it, and remove the old one.
+
+The importing is what this document could not do for you on every system; what it checked is the part
+that decides whether it works: the certificate verifies for exactly its names and for no other (`openssl
+verify`), and a Chromium that knows the authority (here by its key, as an imported one is) saves the app and
+starts it with the server shut (a scenario of `web/test/browser.mjs`).
 
 ## Limits
 
@@ -145,6 +207,8 @@ id twice on the machine this was built on; across machines it was not tried (the
 | Mutations (hash not checked, a redirect accepted, every version approving itself, approved version thrown away, any version approvable, pages not told, offline replacing the approved version, ...): 22, each caught but one that is equivalent (the size check is also covered by the hash) | `mutate` runs, see the commit message |
 | The list is every file with its size and SHA-256 (as `sha256sum` says), its id changes with a byte, a name, a file, or the worker's code; the worker is written with it and checks out; a server can be checked from outside | `web/test/pwa-build.test.ts` |
 | The page registers next to itself, learns the version, offers a waiting one (also one that is active already), approves it by name, starts again once and only when the version changed under it, can be asked again after a postponed restart, says why the app isn't saved | `web/test/pwa-page.test.ts` (against a pretend service-worker container; 16 mutations, all caught) |
+| The certificate `--tls` makes: the names that are asked for, a server certificate that can sign nothing, an authority that is limited to those names and has no key left, a fingerprint to check, the file given out at `/ca.pem` and never a key | `web/test/serve.test.ts` (checked with `openssl verify`; 14 mutations, all caught) |
+| In Chromium, a certificate the browser does not know and the warning clicked through: the app and an encrypted notebook work, the worker is refused and the app says why; with the authority known: the app is saved and starts with the server shut | `web/test/browser.mjs`, "The certificate that `serve.sh --tls` makes" (2 scenarios) |
 | In Chromium: the app is saved, the manifest and icons are what the browser looks for (it is asked, with DevTools, whether anything is in the way of installing it), the page comes from the worker, the server is asked for nothing but `sw.js`; with the server shut it starts and an open and an encrypted notebook are made, written in, locked and unlocked | `web/test/browser.mjs`, "The app on the device" (10 scenarios) |
 | In Chromium: a new version waits (also after a reload, and with the new worker made active as the browser does when the last tab closes) and is approved from the banner; the other tabs, also one opened before the app was saved, start again; a new version whose file is as long as it should be but is not the file is refused; a cleared file is never run if it is not the listed one; an update saves what was typed (a slow save is waited for) and locks the encrypted notebooks | same (15 mutations in the real worker and the page, all caught) |
 | What the worker keeps is the app and nothing of an encrypted notebook | same: the scan of what the browser keeps reads the cache's files, and finds the app's own text in it (the control) and none of the notebook's |

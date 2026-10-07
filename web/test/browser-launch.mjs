@@ -33,10 +33,10 @@ function fontConfig() {
   return existsSync(file) ? { FONTCONFIG_FILE: file } : {};
 }
 
-export function launchBrowser() {
+export function launchBrowser(extraArguments = []) {
   return chromium.launch({
     executablePath: findChrome(),
-    args: ["--no-sandbox"],
+    args: ["--no-sandbox", ...extraArguments],
     env: { ...process.env, LD_LIBRARY_PATH: libraryPath(), ...fontConfig() },
   });
 }

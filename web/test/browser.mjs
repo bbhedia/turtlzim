@@ -15,6 +15,7 @@
 // failing scenario leaves a screenshot of the page in it); ONLY (run the scenarios whose name
 // contains this text). Needs python3 (its zipfile module reads and writes the zips this test checks).
 import { execFileSync } from "node:child_process";
+import { X509Certificate, createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { networkInterfaces, tmpdir } from "node:os";
 import { delimiter, dirname, join, relative, sep } from "node:path";
@@ -373,7 +374,8 @@ try {
       await ui.setText(sample);
       const at = sample.indexOf("A bullet") + "A bullet".length;
       await ui.caretTo(at);
-      await page.keyboard.type(" typed");
+      // (at the pace of a person: six keys sent in the same instant, as the page has just been drawn, can swap places)
+      await page.keyboard.type(" typed", { delay: 25 });
       assertEqual(await ui.text(), sample.slice(0, at) + " typed" + sample.slice(at), "the typed text is inserted in place");
       await page.keyboard.press("Control+z");
       assertEqual(await ui.text(), sample, "undo restores the page");
@@ -2615,6 +2617,8 @@ try {
       page.on("pageerror", (error) => problems.push(`[page error] ${error.message}`));
       await page.goto(`${origin}/`);
       await page.locator(".notebook-button").waitFor({ timeout: 30_000 });
+      // (the notebook is shown a moment after the buttons are: wait for its pages, then look)
+      await page.locator(".tree .row").first().waitFor({ timeout: 30_000 });
       assertEqual(await page.evaluate(() => typeof window.__zim), "undefined", "there is no way in, for a script on the page, to the notebook that is open (an unlocked encrypted one too)");
       assert((await page.locator(".tree .row").count()) > 0, "though the app is up, and shows its notebook");
     } finally {
@@ -3099,6 +3103,105 @@ try {
     await about.waitFor();
     assert((await about.innerText()).includes("could not be saved on this device"), `it says that the app is not saved (${await about.innerText()})`);
     await about.getByRole("button", { name: "Close" }).click();
+  });
+
+  // ==========================================================================================
+  // The certificate that `serve.sh --tls` makes: with the warning clicked through, and trusted
+  // ==========================================================================================
+
+  await scenario("a page reached by clicking through the certificate warning: the app and an encrypted notebook work, and the saved app is refused, with the reason", async () => {
+    const tls = selfSignedCertificate(join(work, "tls-clicked"));
+    const secure = createStaticServer({ dir: dist, tls });
+    await new Promise((resolve) => secure.listen(0, "127.0.0.1", resolve));
+    const address = `https://127.0.0.1:${secure.address().port}/`;
+    // (no `ignoreHTTPSErrors` and no flag: the browser does not know the authority, as with a person's browser)
+    const context = await browser.newContext({ serviceWorkers: "allow", viewport: { width: 1100, height: 900 } });
+    context.setDefaultTimeout(10_000);
+    await context.addInitScript(exposeApp);
+    try {
+      const stopped = await context.newPage();
+      const warned = await stopped.goto(address).then(() => "no warning", (error) => error.message);
+      assert(/ERR_CERT_AUTHORITY_INVALID/.test(warned), `the browser stops at the certificate (${warned})`);
+      await stopped.close();
+      // (a page of its own for what follows: a page that has just met an error page is changing what it shows)
+      const page = await context.newPage();
+      watch(page);
+      livePage = page;
+      // "Advanced > Proceed": the protocol's way of saying it, to each certificate error
+      const devtools = await context.newCDPSession(page);
+      await devtools.send("Security.enable");
+      await devtools.send("Security.setOverrideCertificateErrors", { override: true });
+      devtools.on("Security.certificateError", ({ eventId }) => devtools.send("Security.handleCertificateError", { eventId, action: "continue" }).catch(() => undefined));
+      await page.goto(address);
+      await ready(page);
+      assertEqual(await page.evaluate(() => isSecureContext), true, "the page is a secure one, so that encrypted notebooks can be made");
+      const ui = driver(page, context);
+      await newEncryptedNotebook(ui, "Reached over https");
+      await ui.goto("Secret page");
+      await ui.typeAtEnd("written on a page that the browser did not trust\\n");
+      await ui.flush();
+      assertEqual(await ui.saveState(), "Saved", "the vault saves");
+      await page.locator(".lock-button").click();
+      await isOpenNotebook(page);
+      await unlockFromMenu(ui);
+      assert((await ui.pageText("Secret page")).includes("did not trust"), "and gives it back after an unlock");
+      await page.locator(".lock-button").click();
+      await isOpenNotebook(page);
+      // but the browser will not run a service worker for a certificate it does not trust, and the app says so
+      await page.waitForFunction(() => window.__zim.app.pwa.state.phase === "failed");
+      const state = await page.evaluate(() => window.__zim.app.pwa.state);
+      assert(/SSL certificate error/.test(state.reason ?? ""), `the reason is the browser's (${state.reason})`);
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "About this version…" }).click();
+      const about = topDialog(page);
+      assert((await about.innerText()).includes("could not be saved on this device"), "the version dialog says that the app is not saved");
+      await about.getByRole("button", { name: "Close" }).click();
+      problems = problems.filter((p) => !/SSL certificate error/.test(p));
+    } finally {
+      await context.close();
+      secure.closeAllConnections?.();
+      secure.close();
+    }
+  });
+
+  await scenario("a page whose certificate the browser trusts (it knows the authority) saves the app, and starts with the server shut", async () => {
+    const tls = selfSignedCertificate(join(work, "tls-trusted"));
+    // what a computer does when the authority is imported: it knows the authority's key (here given to the browser by its hash)
+    const spki = createHash("sha256").update(new X509Certificate(tls.authority).publicKey.export({ type: "spki", format: "der" })).digest("base64");
+    const trusting = await launchBrowser([`--ignore-certificate-errors-spki-list=${spki}`]);
+    const secure = createStaticServer({ dir: dist, tls });
+    await new Promise((resolve) => secure.listen(0, "127.0.0.1", resolve));
+    const address = `https://127.0.0.1:${secure.address().port}/`;
+    const context = await trusting.newContext({ serviceWorkers: "allow", viewport: { width: 1100, height: 900 } });
+    context.setDefaultTimeout(10_000);
+    await context.addInitScript(exposeApp);
+    try {
+      const page = await context.newPage();
+      watch(page);
+      livePage = page;
+      await page.goto(address);
+      await ready(page);
+      await pwaReady(page);
+      const ui = driver(page, context);
+      await ui.reload();
+      await pwaReady(page);
+      assert((await ui.status()) !== undefined, "the app started");
+      secure.closeAllConnections?.();
+      secure.close();
+      await ui.reload();
+      assert((await ui.rows()).includes("Home"), "the app started from the worker alone, with the server shut");
+      await newEncryptedNotebook(ui, "Kept on a trusted page");
+      await ui.typeAtEnd("written with no server\\n");
+      await ui.flush();
+      assertEqual(await ui.saveState(), "Saved", "an encrypted notebook can be made and written in");
+      await page.locator(".lock-button").click();
+      await isOpenNotebook(page);
+    } finally {
+      await context.close();
+      await trusting.close();
+      secure.closeAllConnections?.();
+      secure.close();
+    }
   });
 
   for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"} ${r.name}${r.ok ? ` (${r.ms} ms)` : `\n    ${r.error}`}`);

@@ -24,10 +24,11 @@
 // over plain HTTP, so it keeps casual visitors out but is no secret on an untrusted network: use an
 // SSH tunnel (ssh -L 8080:127.0.0.1:8080 you@server) or put TLS in front for that.
 import { execFileSync } from "node:child_process";
-import { createHash, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { X509Certificate, createHash, timingSafeEqual } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import { isIP } from "node:net";
 import { homedir, networkInterfaces } from "node:os";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -113,9 +114,11 @@ function locate(rootReal, urlPath) {
  * @param {string} [options.auth] "user:password": require HTTP Basic authentication
  * @param {(line: string) => void} [options.log] gets one line per request
  * @param {{ key: Buffer | string, cert: Buffer | string }} [options.tls] serve over https with this key and certificate
+ * @param {Buffer | string} [options.authority] the certificate of the authority that signed `tls` (public: it is
+ *   given out at /ca.pem, for a computer to be asked to trust)
  * @returns {import("node:http").Server}
  */
-export function createStaticServer({ dir, auth, log = () => {}, tls }) {
+export function createStaticServer({ dir, auth, log = () => {}, tls, authority }) {
   const rootReal = realpathSync(resolve(dir));
   const expected = auth ? digest(`Basic ${Buffer.from(auth).toString("base64")}`) : null;
   const compressed = new Map(); // "file:mtime:size" -> gzip bytes; the app is a few files, so this stays small
@@ -138,6 +141,10 @@ export function createStaticServer({ dir, auth, log = () => {}, tls }) {
     // via `new URL`, which would read "//x" as a host and tidy ".." away instead of refusing it.)
     const target = req.url ?? "";
     if (!target.startsWith("/")) return reply(400, { "content-type": "text/plain" }, "Bad request\n");
+    if (authority !== undefined && target.split(/[?#]/, 1)[0] === "/ca.pem") {
+      // (as a certificate to install: a phone offers to install what is sent as this type, and a computer saves it as a .crt)
+      return reply(200, { "content-type": "application/x-x509-ca-cert", "content-disposition": 'attachment; filename="zim-web-authority.crt"', "cache-control": "no-cache" }, authority);
+    }
     const found = locate(rootReal, target.split(/[?#]/, 1)[0]);
     if (!found) return reply(404, { "content-type": "text/plain" }, "Not found\n");
 
@@ -192,38 +199,95 @@ export function urlsFor(host, port, scheme = "http") {
 /** Where a self-signed certificate is kept. */
 const defaultCertificateDirectory = () => join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "zim-web", "tls");
 
+const LOCAL_NAMES = ["DNS:localhost", "IP:127.0.0.1", "IP:::1"];
+
 /**
- * A self-signed certificate for this machine, made with `openssl` and kept in `directory` (private to
- * the user), made again when the machine's addresses have changed or it is nearly a year old. It
- * names localhost and every address the machine has, so the browser's only complaint is that nobody it
- * trusts signed it. Returns `{ key, cert }` for `createStaticServer`.
+ * `IP:...` or `DNS:...` for an address or a host name that may go in a certificate. Anything else throws:
+ * the name is written into openssl's settings, so it has to be nothing but a name.
  */
-export function selfSignedCertificate(directory = defaultCertificateDirectory()) {
-  const keyFile = join(directory, "key.pem");
-  const certFile = join(directory, "cert.pem");
-  const namesFile = join(directory, "names.txt");
-  const names = ["DNS:localhost", "IP:127.0.0.1", "IP:::1"];
-  for (const addresses of Object.values(networkInterfaces())) {
-    for (const a of addresses ?? []) if (!a.internal && !a.address.startsWith("fe80:")) names.push(`IP:${a.address}`);
+export function certificateName(name) {
+  const text = String(name).trim();
+  if (isIP(text) && !text.includes("%")) return `IP:${text.toLowerCase()}`;
+  const label = "[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?";
+  if (text.length <= 253 && new RegExp(`^${label}(\\.${label})*$`).test(text) && !/^[0-9.]+$/.test(text)) return `DNS:${text.toLowerCase()}`;
+  throw new Error(`${JSON.stringify(String(name))} is not an address or a host name`);
+}
+
+/** What a name constraint says for one name: exactly that address, or that host name and what is below it. */
+function permitted(name) {
+  if (!name.startsWith("IP:")) return `permitted;${name}`;
+  return `permitted;${name}/${name.slice(3).includes(":") ? Array(8).fill("ffff").join(":") : "255.255.255.255"}`;
+}
+
+/**
+ * A certificate for this server, made with `openssl` and kept in `directory` (private to the user), made
+ * again when the names change or it is nearly a year old.
+ *
+ * The names are localhost and `extraNames` (addresses or host names that visitors use), or, if there are
+ * none, localhost and every address this machine has. The server's certificate is not an authority (it can
+ * sign nothing), and it is signed by an authority that is made for it alone: that one may vouch for these
+ * names and no others (name constraints), can sign nothing below it, and its key is deleted as soon as it has
+ * signed. So `ca.pem` is safe to ask a computer to trust: it can't be used to vouch for anything else, by
+ * anyone, whatever happens to the server later. A browser that has it trusted shows no warning, and runs the
+ * app's service worker; one that has not warns once (and then refuses the service worker).
+ *
+ * Returns `{ key, cert, authority, authorityFile, fingerprint, names }`: `cert` is the server's certificate
+ * and the authority's, for `createStaticServer`; `fingerprint` is the authority's SHA-256.
+ */
+export function selfSignedCertificate(directory = defaultCertificateDirectory(), extraNames = []) {
+  const files = {
+    key: join(directory, "key.pem"),
+    cert: join(directory, "cert.pem"),
+    authority: join(directory, "ca.pem"),
+    names: join(directory, "names.txt"),
+    // (these are made and gone again, within one call)
+    authorityKey: join(directory, "ca-key.pem"),
+    request: join(directory, "request.csr"),
+    extensions: join(directory, "server.ext"),
+    serial: join(directory, "ca.srl"),
+  };
+  const names = [...LOCAL_NAMES, ...extraNames.map(certificateName)];
+  if (extraNames.length === 0) {
+    for (const addresses of Object.values(networkInterfaces())) {
+      for (const a of addresses ?? []) if (!a.internal && !a.address.startsWith("fe80:")) names.push(`IP:${a.address}`);
+    }
   }
-  const wanted = [...new Set(names)].sort().join(",");
+  const unique = [...new Set(names)].sort();
+  const wanted = unique.join(",");
   const current =
-    existsSync(certFile) && existsSync(keyFile) && existsSync(namesFile) && readFileSync(namesFile, "utf8") === wanted && Date.now() - statSync(certFile).mtimeMs < 300 * 24 * 3600 * 1000;
+    [files.key, files.cert, files.authority, files.names].every(existsSync) && readFileSync(files.names, "utf8") === wanted && Date.now() - statSync(files.cert).mtimeMs < 300 * 24 * 3600 * 1000;
   if (!current) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const openssl = (...args) => execFileSync("openssl", args, { stdio: "pipe" });
+    const curve = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"];
+    const first = unique.find((n) => !LOCAL_NAMES.includes(n));
+    const main = first ? first.slice(first.indexOf(":") + 1, first.indexOf(":") + 31) : "localhost";
     try {
-      execFileSync(
-        "openssl",
-        ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", keyFile, "-out", certFile, "-days", "365", "-subj", "/CN=zim-web (self-signed)", "-addext", `subjectAltName=${wanted}`],
-        { stdio: "pipe" },
-      );
+      openssl("req", "-x509", ...curve, "-keyout", files.authorityKey, "-out", files.authority, "-days", "365", "-subj", `/O=zim-web/CN=authority for ${main} (${new Date().toISOString().slice(0, 10)})`,
+        "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0", "-addext", "keyUsage=critical,keyCertSign", "-addext", `nameConstraints=critical,${unique.map(permitted).join(",")}`);
+      openssl("req", "-new", ...curve, "-keyout", files.key, "-out", files.request, "-subj", "/CN=zim-web server");
+      writeFileSync(files.extensions, `basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectAltName=${wanted}\n`);
+      openssl("x509", "-req", "-in", files.request, "-CA", files.authority, "-CAkey", files.authorityKey, "-CAcreateserial", "-out", files.cert, "-days", "365", "-sha256", "-extfile", files.extensions);
     } catch (error) {
-      throw new Error(`couldn't make a certificate (is openssl installed?): ${error.message.split("\n")[0]}`);
+      rmSync(files.cert, { force: true });
+      const said = String(error.stderr ?? "").trim().split("\n").filter(Boolean).pop() ?? error.message.split("\n")[0];
+      throw new Error(`couldn't make a certificate (is openssl installed?): ${said}`);
+    } finally {
+      // the authority's key is not kept: nobody, the server included, can have it vouch for anything else
+      for (const file of [files.authorityKey, files.request, files.extensions, files.serial]) rmSync(file, { force: true });
     }
-    chmodSync(keyFile, 0o600);
-    writeFileSync(namesFile, wanted);
+    chmodSync(files.key, 0o600);
+    writeFileSync(files.names, wanted);
   }
-  return { key: readFileSync(keyFile), cert: readFileSync(certFile) };
+  const authority = readFileSync(files.authority);
+  return {
+    key: readFileSync(files.key),
+    cert: Buffer.concat([readFileSync(files.cert), authority]),
+    authority,
+    authorityFile: files.authority,
+    fingerprint: new X509Certificate(authority).fingerprint256,
+    names: unique.map((n) => n.slice(n.indexOf(":") + 1)),
+  };
 }
 
 const USAGE = `Usage: node scripts/serve.mjs [options]
@@ -236,10 +300,14 @@ Serves the built editor (web/dist) and nothing else.
   --dir DIRECTORY    what to serve (default: the dist folder next to scripts/)
   --auth USER:PASS   ask visitors for this password (or set ZIM_WEB_AUTH, which
                      keeps it out of the process list). Sent in clear over HTTP.
-  --tls              serve https, with a self-signed certificate made for this machine
-                     (needs openssl; kept in ~/.local/state/zim-web/tls). The browser
-                     warns once: Advanced > Proceed. Encrypted notebooks need a secure
-                     page, which this is (or http://localhost, through an SSH tunnel).
+  --tls              serve https, with a certificate made here (needs openssl; kept in
+                     ~/.local/state/zim-web/tls). The browser warns once: Advanced >
+                     Proceed. Encrypted notebooks need a secure page, which this is (or
+                     http://localhost, through an SSH tunnel). To have no warning, and
+                     the offline app, trust tls/ca.pem on each computer that visits.
+  --name ADDRESS     with --tls: an address or host name that visitors use, in the
+                     certificate (repeat it for each). Without any, the certificate names
+                     localhost and every address of this machine.
   --cert FILE --key FILE
                      serve https with your own certificate instead
   --pid-file PATH    write the process id here while running
@@ -247,7 +315,7 @@ Serves the built editor (web/dist) and nothing else.
 `;
 
 function parseArguments(argv) {
-  const options = { host: "127.0.0.1", port: 8080, dir: fileURLToPath(new URL("../dist", import.meta.url)), auth: process.env.ZIM_WEB_AUTH, pidFile: undefined, tls: false, cert: undefined, key: undefined };
+  const options = { host: "127.0.0.1", port: 8080, dir: fileURLToPath(new URL("../dist", import.meta.url)), auth: process.env.ZIM_WEB_AUTH, pidFile: undefined, tls: false, cert: undefined, key: undefined, names: [] };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const value = () => {
@@ -259,6 +327,7 @@ function parseArguments(argv) {
     else if (flag === "--dir") options.dir = resolve(value());
     else if (flag === "--auth") options.auth = value();
     else if (flag === "--tls") options.tls = true;
+    else if (flag === "--name") options.names.push(value());
     else if (flag === "--cert") options.cert = resolve(value());
     else if (flag === "--key") options.key = resolve(value());
     else if (flag === "--pid-file") options.pidFile = resolve(value());
@@ -269,6 +338,8 @@ function parseArguments(argv) {
   if (options.auth !== undefined && !/^[^:]+:.+/.test(options.auth)) throw new Error("--auth must look like user:password");
   if ((options.cert === undefined) !== (options.key === undefined)) throw new Error("--cert and --key go together");
   if (options.tls && options.cert !== undefined) throw new Error("use --tls (a certificate made here) or --cert and --key (your own), not both");
+  if (options.names.length > 0 && !options.tls) throw new Error("--name goes with --tls");
+  for (const name of options.names) certificateName(name);
   return options;
 }
 
@@ -293,13 +364,13 @@ function main() {
 
   let tls;
   try {
-    if (options.tls) tls = selfSignedCertificate();
+    if (options.tls) tls = selfSignedCertificate(undefined, options.names);
     else if (options.cert !== undefined) tls = { cert: readFileSync(options.cert), key: readFileSync(options.key) };
   } catch (error) {
     console.error(`serve: ${error.message}`);
     process.exit(1);
   }
-  const server = createStaticServer({ dir: options.dir, auth: options.auth, tls, log: (line) => console.log(`${new Date().toISOString()} ${line}`) });
+  const server = createStaticServer({ dir: options.dir, auth: options.auth, tls: tls && { key: tls.key, cert: tls.cert }, authority: options.tls ? tls.authority : undefined, log: (line) => console.log(`${new Date().toISOString()} ${line}`) });
   server.on("error", (error) => {
     console.error(error.code === "EADDRINUSE" ? `serve: port ${options.port} is already in use on ${options.host}` : `serve: ${error.message}`);
     process.exit(1);
@@ -308,7 +379,11 @@ function main() {
     const port = server.address().port; // the real one when asked for 0
     console.log(`Serving ${options.dir}${options.auth ? " (password protected)" : ""}${tls ? " over https" : ""}`);
     for (const url of urlsFor(options.host, port, tls ? "https" : "http")) console.log(`  ${url}`);
-    if (options.tls) console.log("The certificate is self-signed: the browser warns once (Advanced > Proceed), and then the page is a secure one.");
+    if (options.tls) {
+      console.log(`The certificate is for ${tls.names.join(", ")}, signed by an authority that exists only for it: its key was destroyed when it had signed.`);
+      console.log("A browser that does not know that authority warns once (Advanced > Proceed): the page is then secure enough for encrypted notebooks, but the browser will not run the offline app for it.");
+      console.log(`To have no warning, and the offline app, trust the authority on each computer that visits: get ${tls.authorityFile} there (or open /ca.pem on this server) and import it as a trusted authority (docs/zim-pwa.md). Its SHA-256: ${tls.fingerprint}`);
+    }
     if (options.host === "127.0.0.1" || options.host === "::1") console.log("Listening on this machine only. For other machines: --host 0.0.0.0 (and the firewall must allow the port).");
     if (options.pidFile) writeFileSync(options.pidFile, `${process.pid}\n`);
   });
