@@ -707,7 +707,7 @@ async_test!(change_password_flow, change_password());
 async fn local_only() {
     let server = start_server().await;
     let mut turtl = test_turtl(&server);
-    turtl.local_only = true;
+    turtl.make_local_only();
 
     assert_eq!(ask(&turtl, json!(["l1", "user:local-accounts"])).await["d"], json!([]));
 
@@ -728,6 +728,10 @@ async fn local_only() {
         assert!(user_guard.logged_in);
         assert!(user_guard.pubkey.is_some() && user_guard.privkey.is_some());
     }
+    // the host is told who is logged in, and not the user's private key (which the core keeps to itself)
+    assert!(joined["d"].get("privkey").is_none() && joined["d"].get("pubkey").is_some(), "{}", joined);
+    let loaded = ask(&turtl, json!(["l4b", "profile:load"])).await;
+    assert!(loaded["d"]["user"].get("privkey").is_none() && loaded["d"]["user"]["username"] == json!("vault-one"), "{}", loaded);
     assert_eq!(turtl.user_id().unwrap(), user_id);
     assert_eq!(lockr!(turtl.profile).spaces.len(), 0);
     assert_eq!(ask(&turtl, json!(["l5", "user:local-accounts"])).await["d"], json!(["vault-one"]));
@@ -773,17 +777,21 @@ async fn local_only() {
     let waiting = sync_records(&turtl.db);
     assert!(waiting.is_empty(), "nothing is queued for a server, but {} records are", waiting.len());
 
-    // what only a server can do is refused
-    for (mid, args) in &[
-        ("l11", json!(["sync:start"])),
-        ("l12", json!(["user:login-from-token", "abc"])),
-        ("l13", json!(["user:change-password", "vault-one", "a passphrase to keep", "vault-one", "a new passphrase"])),
-        ("l14", json!(["user:delete-account"])),
-    ] {
-        let mut message = vec![json!(mid)];
-        message.extend(args.as_array().unwrap().iter().cloned());
-        let refused = ask(&turtl, Value::Array(message)).await;
-        assert_eq!(refused["e"], json!(1), "{} was not refused: {}", args[0], refused);
+    // what only a server can do is refused: every command the dispatcher has, but the few a core without a
+    // server answers, is turned away before it runs (so none can send anything, or hand out a secret)
+    let commands = dispatcher_commands();
+    assert!(commands.len() > 40 && commands.contains(&String::from("user:login")) && commands.contains(&String::from("feedback:send")), "{:?}", commands);
+    for allowed in dispatch::LOCAL_COMMANDS {
+        assert!(commands.iter().any(|c| c == allowed), "{} is allowed but is not a command", allowed);
+    }
+    for (i, command) in commands.iter().filter(|c| !dispatch::LOCAL_COMMANDS.contains(&c.as_str())).enumerate() {
+        let refused = ask(&turtl, json!([format!("r{}", i), command])).await;
+        assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("permission_denied")), "{} was not refused: {}", command, refused);
+    }
+    // and whatever got past that, the core's way to a server is shut: nothing is built, let alone sent
+    match turtl.api.get("/anything").map(|_| ()).unwrap_err().shed() {
+        TError::ConnectionRequired => {}
+        other => panic!("expected the api to refuse, got {:?}", other),
     }
 
     // logging in again needs the passphrase that was used, and an account that exists
@@ -817,7 +825,7 @@ async_test!(local_only_flow, local_only());
 async fn local_batches() {
     let server = start_server().await;
     let mut turtl = test_turtl(&server);
-    turtl.local_only = true;
+    turtl.make_local_only();
     let joined = ask(&turtl, json!(["b0", "user:join", "Batch-Vault", "a passphrase for batches"])).await;
     assert_eq!(joined["e"], json!(0), "{}", joined);
 
@@ -940,6 +948,175 @@ async fn local_batches() {
 }
 async_test!(local_batches_flow, local_batches());
 
+/// Every command the dispatcher has an arm for, once each, read from its own source so that a command added
+/// later can't be left out of what is checked.
+fn dispatcher_commands() -> Vec<String> {
+    let source = include_str!("dispatch.rs");
+    let commands = source.split("async fn dispatch_event").next().unwrap();
+    let mut found: Vec<String> = Vec::new();
+    for line in commands.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix('"') {
+            if let Some(end) = rest.find('"') {
+                if rest[end + 1..].trim_start().starts_with("=>") {
+                    found.push(String::from(&rest[..end]));
+                }
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// A message that can't be read is still answered when it says who sent it, and one that is not even
+/// shaped like a request is not a panic.
+async fn unreadable_messages() {
+    let server = start_server().await;
+    let turtl = test_turtl(&server);
+    // a lone surrogate in a JSON string is not something the parser takes (JavaScript's JSON.stringify can write one)
+    dispatch::process(&turtl, &String::from("[\"u1\",\"ping\",\"\\ud800\"]")).await.unwrap();
+    let mut answer = None;
+    while let Some(msg) = crate::recv_nb(None).unwrap() {
+        let res: Value = jedi::parse(&msg).unwrap();
+        if res["id"] == json!("u1") {
+            answer = Some(res);
+        }
+    }
+    let answer = answer.expect("the message that couldn't be read got no answer");
+    assert_eq!((&answer["e"], &answer["d"]["type"]), (&json!(1), &json!("json_error")), "{}", answer);
+    // not shaped like a request, or too short to be anything, or starting in the middle of a character
+    for junk in &["", "x", "[", "\u{e9}\u{e9}\u{e9}", "[1,2", "::ev", "\u{1F600}\u{1F600}"] {
+        let _ = dispatch::process(&turtl, &String::from(*junk)).await;
+    }
+}
+async_test!(unreadable_messages_flow, unreadable_messages());
+
+/// The files of notes that are deleted are deleted with them, one note's or a notebook's, and in a batch only
+/// when the batch is kept.
+async fn local_files_follow_their_notes() {
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.make_local_only();
+    let joined = ask(&turtl, json!(["f0", "user:join", "Files-Vault", "a passphrase for files"])).await;
+    assert_eq!(joined["e"], json!(0), "{}", joined);
+    let space = ask(&turtl, json!(["f1", "profile:sync:model", "add", "space", {"user_id": "0", "title": "Files", "color": "#408080"}])).await;
+    let space_id = String::from(space["d"]["id"].as_str().unwrap());
+    let mut counter = 0;
+    macro_rules! file_note { ($name:expr) => {{
+        counter += 1;
+        let made = ask(&turtl, json!([format!("f-add-{}", counter), "profile:sync:model", "add", "note", {
+            "space_id": space_id, "user_id": "0", "type": "zim-file", "title": $name,
+            "file": {"name": $name, "type": "application/octet-stream", "filedata": {"data": crypto::to_base64(&vec![1u8, 2, 3, counter as u8]).unwrap()}},
+        }])).await;
+        assert_eq!(made["e"], json!(0), "{}", made);
+        String::from(made["d"]["id"].as_str().unwrap())
+    }} }
+    let has_file = |turtl: &Turtl, note_id: &String| {
+        let mut db_guard = lock!(turtl.db);
+        crate::models::file::FileData::store_get(db_guard.as_mut().unwrap(), None, note_id).is_ok()
+    };
+
+    // a note deleted: its file is gone with it (the file had not been, since a deleted note doesn't know whose it was)
+    let one = file_note!("one.bin");
+    assert!(has_file(&turtl, &one));
+    let deleted = ask(&turtl, json!(["f2", "profile:sync:model", "delete", "note", {"id": one}])).await;
+    assert_eq!(deleted["e"], json!(0), "{}", deleted);
+    assert!(!has_file(&turtl, &one), "the file of a deleted note is still there");
+
+    // a notebook deleted: all of its notes' files
+    let (two, three) = (file_note!("two.bin"), file_note!("three.bin"));
+    let gone = ask(&turtl, json!(["f3", "profile:sync:model", "delete", "space", {"id": space_id}])).await;
+    assert_eq!(gone["e"], json!(0), "{}", gone);
+    assert!(!has_file(&turtl, &two) && !has_file(&turtl, &three), "the files of a deleted notebook are still there");
+}
+async_test!(local_files_follow_their_notes_flow, local_files_follow_their_notes());
+
+/// A file is a file on disk natively, which a rolled-back batch can't bring back: it goes when the batch that
+/// deleted its note is kept, and stays when it isn't.
+#[cfg(not(target_arch = "wasm32"))]
+async fn local_files_in_batches() {
+    let _folder = DiskFolder::new("local-files-in-batches");
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.make_local_only();
+    let joined = ask(&turtl, json!(["b0", "user:join", "Batch-Files", "a passphrase for batches"])).await;
+    assert_eq!(joined["e"], json!(0), "{}", joined);
+    let space = ask(&turtl, json!(["b1", "profile:sync:model", "add", "space", {"user_id": "0", "title": "Files", "color": "#408080"}])).await;
+    let space_id = String::from(space["d"]["id"].as_str().unwrap());
+    let make = |mid: &str| json!([mid, "profile:sync:model", "add", "note", {
+        "space_id": space_id, "user_id": "0", "type": "zim-file", "title": "a.bin",
+        "file": {"name": "a.bin", "type": "application/octet-stream", "filedata": {"data": crypto::to_base64(&vec![9u8, 8, 7]).unwrap()}},
+    }]);
+    let note = String::from(ask(&turtl, make("b2")).await["d"]["id"].as_str().unwrap());
+    let on_disk = || !crate::models::file::FileData::file_finder_all(None, Some(&note)).unwrap().is_empty();
+    assert!(on_disk());
+
+    // deleted in a batch that is undone: the note is back, and so is its file
+    assert_eq!(ask(&turtl, json!(["b3", "profile:batch:begin"])).await["e"], json!(0));
+    assert_eq!(ask(&turtl, json!(["b4", "profile:sync:model", "delete", "note", {"id": note}])).await["e"], json!(0));
+    assert!(on_disk(), "the file went before the batch was kept");
+    assert_eq!(ask(&turtl, json!(["b5", "profile:batch:rollback"])).await["e"], json!(0));
+    assert!(on_disk(), "a rolled-back delete took the file");
+    let read = ask(&turtl, json!(["b6", "profile:note:get-file", note])).await;
+    assert_eq!(crypto::from_base64(&String::from(read["d"].as_str().unwrap())).unwrap(), vec![9u8, 8, 7]);
+
+    // and in one that is kept: gone
+    assert_eq!(ask(&turtl, json!(["b7", "profile:batch:begin"])).await["e"], json!(0));
+    assert_eq!(ask(&turtl, json!(["b8", "profile:sync:model", "delete", "note", {"id": note}])).await["e"], json!(0));
+    assert!(on_disk());
+    assert_eq!(ask(&turtl, json!(["b9", "profile:batch:commit"])).await["e"], json!(0));
+    assert!(!on_disk(), "a kept delete left the file");
+}
+#[cfg(not(target_arch = "wasm32"))]
+async_test!(local_files_in_batches_flow, local_files_in_batches());
+
+/// A stored account that asks for more than a device can do to log in is refused without trying, and an
+/// account whose user record the key does not open is not left logged in.
+async fn local_account_tampered() {
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.make_local_only();
+    let joined = ask(&turtl, json!(["t0", "user:join", "Tamper-Vault", "a passphrase to tamper with"])).await;
+    assert_eq!(joined["e"], json!(0), "{}", joined);
+    turtl.logout().unwrap();
+    let key = "local-account:tamper-vault";
+    let stored = lockr!(turtl.kv).kv_get(key).unwrap().unwrap();
+    let record: Value = jedi::parse(&stored).unwrap();
+    let with_cost = |ops: i64, mem: i64| {
+        let mut changed = record.clone();
+        changed["kdf"] = json!({"ops": ops, "mem": mem});
+        changed
+    };
+    // (the mem and the ops of what a vault is made at, and more than the most a record may ask)
+    for (n, (ops, mem)) in [(1i64 << 40, 134217728i64), (4194304, 1i64 << 31), (1 << 26, 134217728), (4194304, (1i64 << 30) + 1)].iter().enumerate() {
+        lockr!(turtl.kv).kv_set(key, &jedi::stringify(&with_cost(*ops, *mem)).unwrap()).unwrap();
+        let started = crate::util::get_time();
+        let refused = ask(&turtl, json!([format!("t{}", n + 1), "user:login", "tamper-vault", "a passphrase to tamper with"])).await;
+        // (a cost that doesn't fit the machine's `usize`, 32 bits on wasm32, is refused already when the record is read)
+        let fits = (*ops as u64) <= usize::MAX as u64 && (*mem as u64) <= usize::MAX as u64;
+        let kind = if fits { "bad_value" } else { "json_error" };
+        assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!(kind)), "ops {} mem {}: {}", ops, mem, refused);
+        let took = (crate::util::get_time() - started).num_milliseconds();
+        assert!(took < 2000, "it should be refused without trying, not after {} ms", took);
+        assert!(!lockr!(turtl.user).logged_in);
+    }
+    // another account's user record under this account's key: the passphrase is right, the record is not what the key opens
+    lockr!(turtl.kv).kv_set(key, &jedi::stringify(&{
+        let mut changed = record.clone();
+        changed["data"]["body"] = json!("AAYBAAzWT6T3jTOu+I0DN7GKxgMocHTwkFPADW6pogRjUDo=");
+        changed
+    }).unwrap()).unwrap();
+    let broken = ask(&turtl, json!(["t9", "user:login", "tamper-vault", "a passphrase to tamper with"])).await;
+    assert_eq!(broken["e"], json!(1), "{}", broken);
+    assert!(!lockr!(turtl.user).logged_in, "a record that the key doesn't open was left logged in");
+    assert!(crate::models::protected::Protected::key(&*lockr!(turtl.user)).is_none(), "and the key was left in memory");
+    // put back, it logs in
+    lockr!(turtl.kv).kv_set(key, &stored).unwrap();
+    let back = ask(&turtl, json!(["t10", "user:login", "tamper-vault", "a passphrase to tamper with"])).await;
+    assert_eq!(back["e"], json!(0), "{}", back);
+}
+async_test!(local_account_tampered_flow, local_account_tampered());
+
 /// A folder for the databases of the test on this thread, kept as files for as long as this lives (and
 /// deleted when it goes). Without it the databases of a test are in memory.
 #[cfg(not(target_arch = "wasm32"))]
@@ -998,7 +1175,7 @@ async fn local_only_on_disk() {
 
     let (user_id, space_id, page_id, file_note_id) = {
         let mut turtl = test_turtl(&server);
-        turtl.local_only = true;
+        turtl.make_local_only();
         let joined = ask(&turtl, json!(["d1", "user:join", "Disk-Vault", passphrase])).await;
         assert_eq!(joined["e"], json!(0), "{}", joined);
         let user_id = String::from(joined["d"]["id"].as_str().unwrap());
@@ -1032,7 +1209,7 @@ async fn local_only_on_disk() {
 
     // the core is started again: a new Turtl over the same files, which knows nothing but them
     let mut turtl = test_turtl(&server);
-    turtl.local_only = true;
+    turtl.make_local_only();
     assert_eq!(ask(&turtl, json!(["d5", "user:local-accounts"])).await["d"], json!(["disk-vault"]));
     let wrong = ask(&turtl, json!(["d6", "user:login", "disk-vault", "correct horse battery staple 8214"])).await;
     assert_eq!((&wrong["e"], &wrong["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "{}", wrong);
@@ -1137,6 +1314,10 @@ mod host {
         let (channel, message) = wait_for(&inbox, |m| m.1.contains(r#""id":"h1""#)).await;
         assert_eq!(channel, "inproc://turtl-req-core-out");
         assert_eq!(message, r#"{"id":"h1","e":0,"d":"pong"}"#);
+
+        // an event is how the core tells itself things (some wipe data): a host sends commands, and is told so
+        let refused = wasm_host::send_message(r#"::ev{"e":"user:wipe-data","d":null}"#).unwrap_err();
+        assert!(refused.as_string().unwrap_or_default().contains("commands, not"), "{:?}", refused);
 
         // a command that goes through the whole stack (crypto, the API, storage), configured through
         // the config we gave initCore

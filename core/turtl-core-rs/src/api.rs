@@ -37,6 +37,8 @@ struct ApiConfig {
     auth: Option<String>,
     /// Overrides the `api.endpoint` config value when set (see `Api::set_endpoint`).
     endpoint: Option<String>,
+    /// Set for a core that runs without a server (see `Api::disable`).
+    disabled: bool,
 }
 
 impl ApiConfig {
@@ -45,6 +47,7 @@ impl ApiConfig {
         ApiConfig {
             auth: None,
             endpoint: None,
+            disabled: false,
         }
     }
 }
@@ -269,6 +272,20 @@ impl Api {
         config_guard.endpoint = endpoint;
     }
 
+    /// Never make a request again: every call is refused with `ConnectionRequired` before a request is
+    /// built, let alone sent, whatever asks and whatever the endpoint says. For a core that runs without a
+    /// server (`local_only`), which must not send anything anywhere.
+    pub fn disable(&self) {
+        let ref mut config_guard = lockw!(self.config);
+        config_guard.disabled = true;
+    }
+
+    /// Whether `disable()` was called.
+    pub fn is_disabled(&self) -> bool {
+        let ref guard = lockr!(self.config);
+        guard.disabled
+    }
+
     /// Set the API's authentication
     pub fn set_auth(&self, username: String, auth: String) -> TResult<()> {
         let auth_str = format!("{}:{}", username, auth);
@@ -323,6 +340,9 @@ impl Api {
 
     /// Given a method and a resource, return an ApiCaller to finish building and send
     pub fn req(&self, method: Method, resource: &str) -> TResult<ApiCaller> {
+        if self.is_disabled() {
+            return TErr!(TError::ConnectionRequired);
+        }
         debug!("api::req() -- begin: {} {}", method, resource);
         let url = self.build_url(resource)?;
         let caller = ApiCaller::new(method, Url::parse(url.as_str())?);

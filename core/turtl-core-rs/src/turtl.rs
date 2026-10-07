@@ -124,6 +124,9 @@ pub struct Turtl {
     /// logged into on this device alone, what is saved is not queued for syncing, and nothing talks to
     /// the API. The data is encrypted exactly as it is with a server; see `User::join_local`.
     pub local_only: bool,
+    /// The notes whose files are to be removed when the open batch is kept (natively a file is a file,
+    /// which a rolled-back batch can't bring back: see `Note::clear_files`).
+    pending_file_deletes: Mutex<Vec<String>>,
 }
 
 impl Turtl {
@@ -137,7 +140,12 @@ impl Turtl {
         #[cfg(target_arch = "wasm32")]
         let num_workers = 1;
 
+        let local_only = config::get::<bool>(&["local_only"]).unwrap_or(false);
         let api = Arc::new(Api::new());
+        if local_only {
+            // nothing can make this core ask a server for anything, whatever it is sent
+            api.disable();
+        }
         let kv = Arc::new(RwLock::new(Turtl::open_kv()?));
 
         // make sure we have a client id
@@ -158,9 +166,18 @@ impl Turtl {
             connected: RwLock::new(false),
             incoming_sync_lock: Mutex::new(()),
             incoming_sync_held: AtomicBool::new(false),
-            local_only: config::get::<bool>(&["local_only"]).unwrap_or(false),
+            local_only: local_only,
+            pending_file_deletes: Mutex::new(Vec::new()),
         };
         Ok(turtl)
+    }
+
+    /// Make this core one that runs without a server, as `local_only: true` in the config does. For
+    /// tests, which build a Turtl from the shared config and then say what kind it is.
+    #[cfg(test)]
+    pub fn make_local_only(&mut self) {
+        self.local_only = true;
+        self.api.disable();
     }
 
     /// Create/open a new KV store connection
@@ -851,7 +868,30 @@ impl Turtl {
 
     /// End the open batch, keeping what it changed.
     pub fn batch_commit(&self) -> TResult<()> {
-        self.with_user_db(|db| db.commit())
+        self.with_user_db(|db| db.commit())?;
+        // the files of the notes that were deleted in it go now that the deletes are kept
+        let gone = ::std::mem::replace(&mut *lock!(self.pending_file_deletes), Vec::new());
+        #[cfg(not(target_arch = "wasm32"))]
+        for note_id in gone {
+            for file in FileData::file_finder_all(None, Some(&note_id))? {
+                fs::remove_file(&file)?;
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = gone;
+        Ok(())
+    }
+
+    /// Whether a note's file(s) can only be removed once the batch that is open is kept, in which case
+    /// the note is remembered for `batch_commit()`. (Natively a file is a file, which a rolled-back batch
+    /// would not bring back; on wasm32 it is a row of the database, which is rolled back with the batch.)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn defer_file_delete(&self, note_id: &String) -> bool {
+        let in_batch = self.with_user_db(|db| Ok(db.in_batch())).unwrap_or(false);
+        if in_batch {
+            lock!(self.pending_file_deletes).push(note_id.clone());
+        }
+        in_batch
     }
 
     /// End the open batch, undoing everything it changed: in the database, and in what is held in memory
@@ -859,6 +899,8 @@ impl Turtl {
     /// says again.
     pub fn batch_rollback(&self) -> TResult<()> {
         self.with_user_db(|db| db.rollback())?;
+        // the notes are back, and so are their files
+        lock!(self.pending_file_deletes).clear();
         {
             let mut profile_guard = lockw!(self.profile);
             profile_guard.wipe();

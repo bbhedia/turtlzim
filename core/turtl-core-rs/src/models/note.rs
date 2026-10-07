@@ -88,10 +88,15 @@ impl Validate for Note {
 impl Note {
     /// Remove the files attached to this note, if any.
     #[cfg(not(target_arch = "wasm32"))]
-    fn clear_files(&self, _turtl: &Turtl) -> TResult<()> {
-        // delete all local file(s) associated with this note
+    fn clear_files(&self, turtl: &Turtl) -> TResult<()> {
+        // delete all local file(s) associated with this note (whichever user saved them: a note being
+        // deleted is built from its id alone, so it doesn't know its user)
         let note_id = self.id_or_else()?;
-        let files = FileData::file_finder_all(Some(&self.user_id), Some(&note_id))?;
+        // (in a batch they go when the batch is kept, since a rollback brings the note back)
+        if turtl.defer_file_delete(&note_id) {
+            return Ok(());
+        }
+        let files = FileData::file_finder_all(None, Some(&note_id))?;
         for file in files {
             fs::remove_file(&file)?;
         }
@@ -104,7 +109,8 @@ impl Note {
         let note_id = self.id_or_else()?;
         let mut db_guard = lock!(turtl.db);
         match db_guard.as_mut() {
-            Some(db) => FileData::store_delete(db, Some(&self.user_id), Some(&note_id)),
+            // (whichever user saved it: a note being deleted is built from its id alone, so it doesn't know its user)
+            Some(db) => FileData::store_delete(db, None, Some(&note_id)),
             None => Ok(()),
         }
     }

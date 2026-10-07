@@ -86,6 +86,11 @@ impl Default for Kdf {
     }
 }
 
+/// The most a stored cost may ask of a device (see `login_local`): eight times what a vault is made at, in
+/// memory (a gigabyte) and in work.
+const MAX_KDF_MEM: usize = 1 << 30;
+const MAX_KDF_OPS: usize = 1 << 25;
+
 impl Kdf {
     /// scrypt with N = 2^17, r = 8, p = 1: 128 MiB, eight times the work of the default, which is about
     /// as much memory as a wasm instance in a browser can be asked for without risk (libsodium's
@@ -367,9 +372,10 @@ impl User {
             }
         };
         // (the cost is read from storage, so it is held to what a device can do: a record that asks for
-        // more memory than there is would take the whole page down)
-        if record.kdf.mem > 1 << 30 {
-            return TErr!(TError::BadValue(format!("user::login_local() -- the account asks for {} bytes of memory to log in", record.kdf.mem)));
+        // more memory than there is would take the whole page down, and one that asks for more work than
+        // anyone would wait for would never finish. What a vault is made at (`Kdf::local()`) is far inside this.)
+        if record.kdf.mem > MAX_KDF_MEM || record.kdf.ops > MAX_KDF_OPS {
+            return TErr!(TError::BadValue(format!("user::login_local() -- the account asks for more to log in than this device allows (ops {}, memory {})", record.kdf.ops, record.kdf.mem)));
         }
         let (key, auth) = generate_auth_with(&username, &password, CURRENT_AUTH_VERSION, &record.kdf)?;
         if auth != record.auth {
@@ -379,7 +385,11 @@ impl User {
         user_guard_w.merge_fields(&record.data)?;
         user_guard_w.id = Some(record.id);
         user_guard_w.do_login(key, auth);
-        user_guard_w.deserialize()?;
+        if let Err(e) = user_guard_w.deserialize() {
+            // a user record that the key doesn't open is no login
+            user_guard_w.do_logout();
+            return Err(e);
+        }
         drop(user_guard_w);
         debug!("user::login_local() -- logged in, on this device only");
         Ok(())

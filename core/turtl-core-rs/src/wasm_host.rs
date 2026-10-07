@@ -238,12 +238,12 @@ pub async fn enable_persistence(directory: Option<String>) -> Result<(), JsValue
                 attempts += 1;
                 if attempts >= 30 {
                     return Err(JsValue::from_str(&format!(
-                        "the stored data is in use by another tab or worker (close it and try again): {:?}", e
+                        "[in-use] the stored data is in use by another tab or worker (close it and try again): {:?}", e
                     )));
                 }
                 exec::sleep(100).await;
             }
-            Err(e) => return Err(JsValue::from_str(&format!("couldn't set up persistent storage: {}", e))),
+            Err(e) => return Err(JsValue::from_str(&format!("[no-storage] couldn't set up persistent storage: {}", e))),
         }
     };
     POOL.with(|slot| *slot.borrow_mut() = Some(pool));
@@ -291,6 +291,10 @@ pub fn stop_core() {
 /// through the message handler (or `pollMessage`).
 #[wasm_bindgen(js_name = sendMessage)]
 pub fn send_message(message: &str) -> Result<(), JsValue> {
+    // `::ev...` is how the core tells itself of an event (some of which wipe data): a host sends commands
+    if message.starts_with("::ev") {
+        return Err(JsValue::from_str("a host sends commands, not the core's own events"));
+    }
     dispatch_inbound(String::from(message)).map_err(to_js)
 }
 

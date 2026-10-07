@@ -340,30 +340,38 @@ impl Dumpy {
 
     /// Get ALL objects in a table with the given IDs
     pub fn by_id(&self, conn: &Connection, table: &String, ids: &Vec<String>) -> DResult<Vec<Value>> {
-        let mut qry_parts: Vec<&str> = Vec::with_capacity(ids.len() + 2);
-        let mut qry_vals: Vec<SearchVal> = Vec::new();
-        qry_vals.push(SearchVal::String(table.clone()));
-        qry_parts.push("SELECT data FROM dumpy_objects WHERE table_name = ? AND id IN (");
-        for id in ids {
-            if id == &ids[ids.len() - 1] {
-                qry_parts.push("?");
-            } else {
-                qry_parts.push("?,");
+        // SQLite takes at most 32766 values in a statement, and a notebook can hold more notes than that:
+        // ask for the ids in groups (each id once, as one statement would have given it)
+        const GROUP: usize = 500;
+        let mut seen = ::std::collections::HashSet::new();
+        let unique: Vec<&String> = ids.iter().filter(|id| seen.insert(id.as_str())).collect();
+        let mut objects: Vec<Value> = Vec::with_capacity(unique.len());
+        for group in unique.chunks(GROUP) {
+            let mut qry_vals: Vec<SearchVal> = Vec::with_capacity(group.len() + 1);
+            qry_vals.push(SearchVal::String(table.clone()));
+            for id in group {
+                qry_vals.push(SearchVal::String((*id).clone()));
             }
-            qry_vals.push(SearchVal::String(id.clone()));
+            let final_query = format!(
+                "SELECT data FROM dumpy_objects WHERE table_name = ? AND id IN ({}) ORDER BY id ASC",
+                vec!["?"; group.len()].join(",")
+            );
+            let mut prepared_qry = conn.prepare(final_query.as_str())?;
+            let mut values: Vec<&dyn ToSql> = Vec::with_capacity(qry_vals.len());
+            for val in &qry_vals {
+                values.push(val as &dyn ToSql);
+            }
+            let rows = prepared_qry.query_map(values.as_slice(), |row| row.get("data"))?;
+            for data in rows {
+                objects.push(jedi::parse(&data?)?);
+            }
         }
-        qry_parts.push(") ORDER BY id ASC");
-        let final_query = qry_parts.as_slice().join("");
-        let mut prepared_qry = conn.prepare(final_query.as_str())?;
-        let mut values: Vec<&dyn ToSql> = Vec::with_capacity(qry_vals.len());
-        for val in &qry_vals {
-            //let ts: dyn ToSql = val;
-            values.push(val as &dyn ToSql);
-        }
-        let rows = prepared_qry.query_map(values.as_slice(), |row| row.get("data"))?;
-        let mut objects: Vec<Value> = Vec::new();
-        for data in rows {
-            objects.push(jedi::parse(&data?)?);
+        // (one id order for the whole, as one statement made it)
+        if unique.len() > GROUP {
+            objects.sort_by(|a, b| {
+                let key = |v: &Value| v.get("id").and_then(|id| id.as_str().map(String::from)).unwrap_or_default();
+                key(a).cmp(&key(b))
+            });
         }
         Ok(objects)
     }
@@ -636,6 +644,33 @@ mod tests {
         conn.execute_batch("COMMIT").unwrap();
         assert!(dumpy.get(&conn, &String::from("notes"), &String::from("n1")).unwrap().is_some());
         assert!(dumpy.get(&conn, &String::from("broken"), &String::from("n2")).unwrap().is_none());
+    }
+
+    #[test]
+    fn by_id_takes_more_ids_than_sqlite_takes_in_a_statement() {
+        let (conn, dumpy) = pre_test();
+        dumpy.init(&conn).unwrap();
+        // 33,000 objects: more than the 32,766 values SQLite allows in one statement
+        conn.execute_batch("BEGIN").unwrap();
+        let ids: Vec<String> = (0..33_000).map(|i| format!("id{:06}", i)).collect();
+        for id in &ids {
+            let obj = jedi::parse(&format!(r#"{{"id":"{}","user_id":"u","body":"b"}}"#, id)).unwrap();
+            dumpy.store(&conn, &String::from("notes"), &obj).unwrap();
+        }
+        conn.execute_batch("COMMIT").unwrap();
+        let found = dumpy.by_id(&conn, &String::from("notes"), &ids).unwrap();
+        assert_eq!(found.len(), 33_000);
+        // in the order of the ids, as one statement gave them
+        let got: Vec<String> = found.iter().map(|o| jedi::get::<String>(&["id"], o).unwrap()).collect();
+        assert_eq!(got, ids);
+        // an id twice (even at the far ends of the list) is one object, and what is not there is not there
+        let mut asked = vec![ids[5].clone(), String::from("nothing"), ids[7].clone(), ids[5].clone()];
+        asked.extend(ids.iter().rev().take(600).cloned());
+        asked.push(ids[5].clone());
+        let few = dumpy.by_id(&conn, &String::from("notes"), &asked).unwrap();
+        assert_eq!(few.len(), 2 + 600);
+        // and nothing at all is nothing
+        assert!(dumpy.by_id(&conn, &String::from("notes"), &vec![]).unwrap().is_empty());
     }
 
     #[test]

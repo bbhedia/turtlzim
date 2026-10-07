@@ -35,15 +35,53 @@ use crate::messaging::{self, Event};
 use ::migrate;
 use crate::crypto::{self, Key};
 
+/// The commands a core that runs without a server (`local_only`) answers. Every other is for a core with a
+/// server: it would talk to the server, or hand out something secret (the master key in a login token, the
+/// private key), or change what the core talks to. It is refused before it runs, whoever asks: a page's
+/// scripts can send the core any message they like, and the page's policy can't be counted on to keep what
+/// the core sends from going anywhere (it doesn't reach a Worker unless the host sends it there).
+pub(crate) const LOCAL_COMMANDS: &[&str] = &[
+    "ping",
+    "user:join",
+    "user:login",
+    "user:logout",
+    "user:local-accounts",
+    "profile:load",
+    "profile:batch:begin",
+    "profile:batch:commit",
+    "profile:batch:rollback",
+    "profile:sync:model",
+    "profile:get-notes",
+    "profile:find-notes",
+    "profile:find-tags",
+    "profile:note:get-file",
+    "app:shutdown",
+];
+
+/// The user, as the host is told of it. A core without a server tells its host nothing it can do without:
+/// not the user's private key (what the host needs is who is logged in, and that the passphrase was right).
+fn user_for_host(turtl: &Turtl, user: &User) -> TResult<Value> {
+    let mut data = jedi::to_val(user)?;
+    if turtl.local_only {
+        if let Value::Object(fields) = &mut data {
+            fields.remove("privkey");
+        }
+    }
+    Ok(data)
+}
+
 /// Does our actual message dispatching
 async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
+    if turtl.local_only && !LOCAL_COMMANDS.contains(&cmd.as_str()) {
+        return TErr!(TError::PermissionDenied(format!("`{}` is not a command of a core that runs without a server", cmd)));
+    }
     match cmd.as_ref() {
         "user:login" => {
             let username: String = jedi::get(&["2"], &data)?;
             let password: String = jedi::get(&["3"], &data)?;
             turtl.login(username, password).await?;
             let user_guard = lockr!(turtl.user);
-            user_guard.data()
+            user_for_host(turtl, &user_guard)
         }
         "user:login-from-token" => {
             let token: String = jedi::get(&["2"], &data)?;
@@ -64,7 +102,7 @@ async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             let password: String = jedi::get(&["3"], &data)?;
             turtl.join(username, password).await?;
             let user_guard = lockr!(turtl.user);
-            user_guard.data()
+            user_for_host(turtl, &user_guard)
         }
         #[cfg(not(target_arch = "wasm32"))]
         "user:can-migrate" => {
@@ -242,7 +280,7 @@ async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             let user_guard = lockr!(turtl.user);
             let profile_guard = lockr!(turtl.profile);
             let profile_data = json!({
-                "user": &user_guard.as_ref(),
+                "user": user_for_host(turtl, &user_guard)?,
                 "spaces": &profile_guard.spaces,
                 "boards": &profile_guard.boards,
                 "invites": &profile_guard.invites,
@@ -460,16 +498,38 @@ async fn dispatch_event(cmd: &String, turtl: &Turtl, data: Value) -> TResult<()>
     Ok(())
 }
 
+/// The id a message that can't be parsed was sent with: the first element of the array, as a plain string
+/// (`["<id>", ...`). Nothing cleverer: the message is not to be trusted to be JSON.
+fn request_id(msg: &str) -> Option<String> {
+    let rest = msg.trim_start().strip_prefix('[')?.trim_start().strip_prefix('"')?;
+    let id = &rest[..rest.find('"')?];
+    if id.is_empty() || id.contains('\\') { None } else { Some(String::from(id)) }
+}
+
 /// process a message from the messaging system. this is the main communication
 /// heart of turtl core.
 pub async fn process(turtl: &Turtl, msg: &String) -> TResult<()> {
-    if &msg[0..4] == "::ev" {
+    if msg.starts_with("::ev") {
         let event: Event = jedi::parse(&String::from(&msg[4..]))?;
         let Event {e, d} = event;
         return dispatch_event(&e, turtl, d).await;
     }
 
-    let data: Value = jedi::parse(msg)?;
+    let data: Value = match jedi::parse(msg) {
+        Ok(data) => data,
+        Err(e) => {
+            // a message that can't be read is still answered, if it says who is asking: without an answer the
+            // one that sent it waits for ever
+            if let Some(mid) = request_id(msg) {
+                let err: TError = From::from(e);
+                if let Err(send_err) = turtl.msg_error(&mid, &err) {
+                    error!("dispatch::process() -- problem sending (parse error) response (mid {}): {}", mid, send_err);
+                }
+                return Ok(());
+            }
+            return Err(From::from(e));
+        }
+    };
 
     // grab the request id from the data
     let mid: String = match jedi::get(&["0"], &data) {
