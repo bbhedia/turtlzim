@@ -34,6 +34,7 @@ use crate::messaging::{self, Event};
 #[cfg(not(target_arch = "wasm32"))]
 use ::migrate;
 use crate::crypto::{self, Key};
+use crate::vault_backup;
 
 /// The commands a core that runs without a server (`local_only`) answers. Every other is for a core with a
 /// server: it would talk to the server, or hand out something secret (the master key in a login token, the
@@ -46,6 +47,13 @@ pub(crate) const LOCAL_COMMANDS: &[&str] = &[
     "user:login",
     "user:logout",
     "user:local-accounts",
+    "user:change-passphrase",
+    "vault:backup:make",
+    "vault:backup:read",
+    "vault:backup:drop",
+    "vault:restore:write",
+    "vault:restore:commit",
+    "vault:restore:cancel",
     "profile:load",
     "profile:batch:begin",
     "profile:batch:commit",
@@ -57,6 +65,17 @@ pub(crate) const LOCAL_COMMANDS: &[&str] = &[
     "profile:note:get-file",
     "app:shutdown",
 ];
+
+/// The most a piece of a backup that the host asks for may be: a piece is a message, which is made into text.
+const MAX_BACKUP_PIECE: usize = 8 << 20;
+
+/// The commands for a vault are for a core without a server: another has no vault.
+fn local_only_or_refuse(turtl: &Turtl, cmd: &str) -> TResult<()> {
+    if turtl.local_only {
+        return Ok(());
+    }
+    TErr!(TError::PermissionDenied(format!("`{}` is a command of a core without a server", cmd)))
+}
 
 /// The user, as the host is told of it. A core without a server tells its host nothing it can do without:
 /// not the user's private key (what the host needs is who is logged in, and that the passphrase was right).
@@ -190,6 +209,80 @@ async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
         // the accounts made on this device by a core that runs without a server (`local_only`)
         "user:local-accounts" => {
             Ok(jedi::to_val(&User::local_accounts(turtl)?)?)
+        }
+        // the passphrase of the account such a core is logged into: [current, new]. Says how many of the
+        // things the user's key seals (the notebooks' keys, and the user's own record if it is kept in the
+        // database) it sealed with the new key, and how many it could not open (and so left as they were).
+        "user:change-passphrase" => {
+            let current: String = jedi::get(&["2"], &data)?;
+            let new: String = jedi::get(&["3"], &data)?;
+            let found = User::change_local_passphrase(turtl, current, new)?;
+            Ok(json!({"sealed": found.moved, "unreadable": found.unreadable}))
+        }
+        // a backup of the vault, which only a core without a server has (see `vault_backup`): `make` makes it and says how big it is,
+        // `read` hands out a piece of it ([offset, length], as base64) and `drop` lets go of it
+        "vault:backup:make" => {
+            local_only_or_refuse(turtl, cmd)?;
+            let backup = vault_backup::make(turtl)?;
+            let size = backup.len();
+            *lock!(turtl.backup) = Some(backup);
+            Ok(json!({"size": size}))
+        }
+        "vault:backup:read" => {
+            local_only_or_refuse(turtl, cmd)?;
+            let offset: usize = jedi::get(&["2"], &data)?;
+            let length: usize = jedi::get(&["3"], &data)?;
+            if length > MAX_BACKUP_PIECE {
+                return TErr!(TError::BadValue(format!("a piece of a backup is at most {} bytes", MAX_BACKUP_PIECE)));
+            }
+            let backup_guard = lock!(turtl.backup);
+            let backup = match backup_guard.as_ref() {
+                Some(backup) => backup,
+                None => return TErr!(TError::NotFound(String::from("there is no backup made"))),
+            };
+            if offset > backup.len() {
+                return TErr!(TError::BadValue(format!("a backup is {} bytes: there is nothing at {}", backup.len(), offset)));
+            }
+            let end = offset + ::std::cmp::min(length, backup.len() - offset);
+            Ok(Value::String(crypto::to_base64(&backup[offset..end])?))
+        }
+        "vault:backup:drop" | "vault:restore:cancel" => {
+            local_only_or_refuse(turtl, cmd)?;
+            *lock!(turtl.backup) = None;
+            Ok(json!({}))
+        }
+        // a backup is put back in pieces, one after the other ([offset, piece as base64]), and then `commit` restores it
+        "vault:restore:write" => {
+            local_only_or_refuse(turtl, cmd)?;
+            let offset: usize = jedi::get(&["2"], &data)?;
+            let piece: String = jedi::get(&["3"], &data)?;
+            let piece = crypto::from_base64(&piece)?;
+            let mut backup_guard = lock!(turtl.backup);
+            if offset == 0 {
+                *backup_guard = Some(Vec::new());
+            }
+            let backup = match backup_guard.as_mut() {
+                Some(backup) => backup,
+                None => return TErr!(TError::BadValue(String::from("a backup is sent from its start"))),
+            };
+            if backup.len() != offset {
+                return TErr!(TError::BadValue(format!("the pieces of a backup are sent in order: {} bytes are here, and this one is for {}", backup.len(), offset)));
+            }
+            if backup.len() + piece.len() > vault_backup::MAX_BACKUP_BYTES {
+                *backup_guard = None;
+                return TErr!(TError::BadValue(format!("a backup of more than {} MiB can't be restored", vault_backup::MAX_BACKUP_BYTES >> 20)));
+            }
+            backup.extend_from_slice(&piece);
+            Ok(json!({"size": backup.len()}))
+        }
+        "vault:restore:commit" => {
+            local_only_or_refuse(turtl, cmd)?;
+            // (it is taken: what was received is let go of whichever way this ends)
+            let backup = match lock!(turtl.backup).take() {
+                Some(backup) => backup,
+                None => return TErr!(TError::BadValue(String::from("no backup was sent"))),
+            };
+            vault_backup::restore(turtl, &backup)
         }
         "user:save-login" => {
             let key = User::save_login(turtl)?;

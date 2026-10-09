@@ -247,7 +247,12 @@ pub fn decrypt(key: &Key, ciphertext: Vec<u8>) -> CResult<Vec<u8>> {
     let nonce = &deserialized.nonce;
     let ciphertext = &deserialized.ciphertext;
     let auth: Vec<u8> = serialize_header(&deserialized)?;
-    let decrypted = match SYM_ALGORITHM[desc.algorithm as usize] {
+    // (the algorithm is a byte of the data being decrypted, which is whatever is in the file)
+    let algorithm = match SYM_ALGORITHM.get(desc.algorithm as usize) {
+        Some(algorithm) => *algorithm,
+        None => return Err(CryptoError::NotImplemented(format!("the algorithm in this payload was not found: {}", desc.algorithm))),
+    };
+    let decrypted = match algorithm {
         "chacha20poly1305" => {
             low::chacha20poly1305::decrypt(key.data().as_slice(), nonce.as_slice(), auth.as_slice(), ciphertext.as_slice())?
         },
@@ -409,6 +414,26 @@ mod tests {
         }
     }
 
+    /// What is decrypted is whatever the files hold, and a file can be damaged or made: every byte of the header
+    /// changed to every value, and every truncation of a good envelope, is an error and never a panic.
+    fn damaged_envelopes_are_errors_body() {
+        let key = Key::new(from_base64(&String::from("2gtrzmvEQkfK9Lq+0eGqLjDrmlKBabp7T212Zdv35T0=")).unwrap());
+        let good = encrypt(&key, Vec::from("a page that is kept".as_bytes()), CryptoOp::new("chacha20poly1305").unwrap()).unwrap();
+        assert_eq!(decrypt(&key, good.clone()).unwrap(), Vec::from("a page that is kept".as_bytes()));
+        let header = 2 + 1 + 1 + 1 + aead::noncelen();
+        for at in 0..header {
+            for value in 0..=255u8 {
+                if good[at] == value { continue; }
+                let mut damaged = good.clone();
+                damaged[at] = value;
+                assert!(decrypt(&key, damaged).is_err(), "byte {} of the header set to {} was not refused", at, value);
+            }
+        }
+        for len in 0..good.len() {
+            assert!(decrypt(&key, good[..len].to_vec()).is_err(), "an envelope cut to {} bytes was not refused", len);
+        }
+    }
+
     fn can_encrypt_latest_body() {
         let key = Key::new(from_base64(&String::from("2gtrzmvEQkfK9Lq+0eGqLjDrmlKBabp7T212Zdv35T0=")).unwrap());
         let nonce = Vec::from(&sha512(String::from("omg wtff").as_bytes()).unwrap()[0..aead::noncelen()]);
@@ -483,6 +508,7 @@ mod tests {
     crypto_test!(can_decrypt_latest, can_decrypt_latest_body);
     crypto_test!(catches_truncated_ciphertext, catches_truncated_ciphertext_body);
     crypto_test!(can_encrypt_latest, can_encrypt_latest_body);
+    crypto_test!(damaged_envelopes_are_errors, damaged_envelopes_are_errors_body);
     crypto_test!(can_gen_random_keys, can_gen_random_keys_body);
     crypto_test!(can_gen_random_nonce, can_gen_random_nonce_body);
     crypto_test!(can_gen_random_hash, can_gen_random_hash_body);

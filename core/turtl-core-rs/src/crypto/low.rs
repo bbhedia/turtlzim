@@ -107,7 +107,7 @@ pub fn from_hex(data: &String) -> CResult<Vec<u8>> {
 }
 
 /// Convert a u8 vector of binary data into a base64 string.
-pub fn to_base64(data: &Vec<u8>) -> CResult<String> {
+pub fn to_base64(data: &[u8]) -> CResult<String> {
     Ok(base64::encode(data))
 }
 

@@ -127,6 +127,9 @@ pub struct Turtl {
     /// The notes whose files are to be removed when the open batch is kept (natively a file is a file,
     /// which a rolled-back batch can't bring back: see `Note::clear_files`).
     pending_file_deletes: Mutex<Vec<String>>,
+    /// A backup of the vault being handed to the host in pieces (made by `vault:backup:make`) or being received from it
+    /// (by `vault:restore:write`): see `vault_backup`.
+    pub(crate) backup: Mutex<Option<Vec<u8>>>,
 }
 
 impl Turtl {
@@ -168,6 +171,7 @@ impl Turtl {
             incoming_sync_held: AtomicBool::new(false),
             local_only: local_only,
             pending_file_deletes: Mutex::new(Vec::new()),
+            backup: Mutex::new(None),
         };
         Ok(turtl)
     }
@@ -283,12 +287,16 @@ impl Turtl {
 
     /// Without a server there is no `sync_start()` to load the profile and index the notes once a user
     /// is in, so this does that part of it (and only that part: nothing is started).
-    fn local_start(&self) -> TResult<()> {
+    ///
+    /// Says whether a change of passphrase that was stopped half way was settled, and which way (see `User::settle_local_change`).
+    pub(crate) fn local_start(&self) -> TResult<Option<bool>> {
+        // a change of passphrase that was stopped half way is finished or undone before anything is read
+        let settled = User::settle_local_change(self)?;
         self.load_profile()?;
         messaging::ui_event("profile:loaded", &())?;
         self.index_notes()?;
         messaging::ui_event("profile:indexed", &())?;
-        Ok(())
+        Ok(settled)
     }
 
     /// Log a user in
@@ -296,7 +304,13 @@ impl Turtl {
         User::login(self, username, password, user::CURRENT_AUTH_VERSION).await?;
         self.post_login()?;
         if self.local_only {
-            self.local_start()?;
+            if let Err(e) = self.local_start() {
+                // (nobody is left logged in, with the key in memory, to a vault that could not be read)
+                if let Err(e2) = self.logout() {
+                    error!("turtl.login() -- could not log out after a login that failed: {}", e2);
+                }
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -321,7 +335,7 @@ impl Turtl {
         if self.local_only {
             // (no default spaces: whoever uses the core on its own makes the ones they want)
             messaging::ui_event("user:login", &Value::Null)?;
-            return self.local_start();
+            return self.local_start().map(|_| ());
         }
         User::post_join(self, migrate_data)?;
         messaging::ui_event("user:login", &Value::Null)?;
@@ -384,7 +398,7 @@ impl Turtl {
     /// Change the current user's username/password
     pub async fn change_user_password(&self, current_username: String, current_password: String, new_username: String, new_password: String) -> TResult<()> {
         if self.local_only {
-            return TErr!(TError::Msg(String::from("a core without a server can't change the passphrase yet")));
+            return TErr!(TError::Msg(String::from("a core without a server changes the passphrase with `user:change-passphrase`")));
         }
         self.assert_connected()?;
         User::change_password(self, current_username, current_password, new_username, new_password).await?;
@@ -844,7 +858,7 @@ impl Turtl {
     }
 
     /// Run `op` on the user's database.
-    fn with_user_db<T, F>(&self, op: F) -> TResult<T>
+    pub(crate) fn with_user_db<T, F>(&self, op: F) -> TResult<T>
         where F: FnOnce(&Storage) -> TResult<T>
     {
         let db_guard = lock!(self.db);

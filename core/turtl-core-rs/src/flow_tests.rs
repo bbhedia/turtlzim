@@ -331,6 +331,28 @@ async fn ask(turtl: &Turtl, args: Value) -> Value {
     panic!("no response to message {} (other responses: {:?})", mid, others);
 }
 
+/// Like `ask`, and the events that the core sent while it was answering too.
+async fn ask_and_events(turtl: &Turtl, args: Value) -> (Value, Vec<Value>) {
+    drain_events();
+    let res = ask(turtl, args).await;
+    (res, drain_events())
+}
+
+/// The events that the core has sent and nobody has taken (and none, afterwards).
+fn drain_events() -> Vec<Value> {
+    let mut events = Vec::new();
+    while let Some(msg) = crate::recv_event_nb().unwrap() {
+        events.push(jedi::parse(&msg).unwrap());
+    }
+    events
+}
+
+/// The `finished` of the `user:passphrase:settled` events among `events` that are of the account `account` (the tests run
+/// side by side, and the queue of events is the process's: another test's are in it too).
+fn settled_in(events: &[Value], account: &str) -> Vec<bool> {
+    events.iter().filter(|event| event["e"] == json!("user:passphrase:settled") && event["d"]["account"] == json!(account)).map(|event| event["d"]["finished"].as_bool().unwrap()).collect()
+}
+
 /// Messages go in through the dispatcher and answers come out on the response channel, whether the
 /// command is synchronous, talks to the API, or fails.
 async fn dispatcher() {
@@ -955,11 +977,12 @@ fn dispatcher_commands() -> Vec<String> {
     let commands = source.split("async fn dispatch_event").next().unwrap();
     let mut found: Vec<String> = Vec::new();
     for line in commands.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix('"') {
-            if let Some(end) = rest.find('"') {
-                if rest[end + 1..].trim_start().starts_with("=>") {
-                    found.push(String::from(&rest[..end]));
-                }
+        // an arm is `"command" =>`, or `"command" | "another" =>` for a few that are one
+        if let Some(arrow) = line.find("=>") {
+            let head = line[..arrow].trim();
+            let alternatives: Vec<&str> = head.split('|').map(|alternative| alternative.trim()).collect();
+            if head.starts_with('"') && alternatives.iter().all(|a| a.len() >= 2 && a.starts_with('"') && a.ends_with('"') && !a[1..a.len() - 1].contains('"')) {
+                found.extend(alternatives.iter().map(|a| String::from(&a[1..a.len() - 1])));
             }
         }
     }
@@ -1117,6 +1140,629 @@ async fn local_account_tampered() {
 }
 async_test!(local_account_tampered_flow, local_account_tampered());
 
+// ---------------------------------------------------------------------------------------------
+// the passphrase of an account on this device
+// ---------------------------------------------------------------------------------------------
+
+const PICTURE: [u8; 10] = [137, 80, 78, 71, 0, 255, 13, 10, 26, 10];
+
+/// The ids of what `vault_of_two` made: the two notebooks, and the note that holds the file.
+struct TwoNotebooks {
+    journal: String,
+    work: String,
+    file_note: String,
+}
+
+/// A vault of two notebooks, "Journal" (a page and a file) and "Work" (a page), made as the account `name` of
+/// `turtl` with the passphrase `passphrase`.
+async fn vault_of_two(turtl: &Turtl, name: &str, passphrase: &str) -> TwoNotebooks {
+    let joined = ask(turtl, json!(["m-join", "user:join", name, passphrase])).await;
+    assert_eq!(joined["e"], json!(0), "{}", joined);
+    let mut spaces = Vec::new();
+    for title in &["Journal", "Work"] {
+        let space = ask(turtl, json!(["m-space", "profile:sync:model", "add", "space", {"user_id": "0", "title": title, "color": "#408080"}])).await;
+        assert_eq!(space["e"], json!(0), "{}", space);
+        let id = String::from(space["d"]["id"].as_str().unwrap());
+        let page = ask(turtl, json!(["m-page", "profile:sync:model", "add", "note", {
+            "space_id": id, "user_id": "0", "type": "zim-page", "title": format!("{} page", title),
+            "text": format!("The {} door code is 7391.\n", title),
+        }])).await;
+        assert_eq!(page["e"], json!(0), "{}", page);
+        spaces.push(id);
+    }
+    let file_note = ask(turtl, json!(["m-file", "profile:sync:model", "add", "note", {
+        "space_id": spaces[0], "user_id": "0", "type": "zim-file", "title": "Journal page/picture.png",
+        "file": {"name": "picture.png", "type": "image/png", "filedata": {"data": crypto::to_base64(&PICTURE.to_vec()).unwrap()}},
+    }])).await;
+    assert_eq!(file_note["e"], json!(0), "{}", file_note);
+    TwoNotebooks {
+        journal: spaces[0].clone(),
+        work: spaces[1].clone(),
+        file_note: String::from(file_note["d"]["id"].as_str().unwrap()),
+    }
+}
+
+/// What `vault_of_two` made, read back through the core: every notebook there should be (the two, and the
+/// `others`), the pages and the search of the two, the file, and the private part of the user's record.
+async fn assert_vault_reads(turtl: &Turtl, vault: &TwoNotebooks, others: &[&str]) {
+    let profile = ask(turtl, json!(["r-profile", "profile:load"])).await;
+    assert_eq!(profile["e"], json!(0), "{}", profile);
+    let mut titles: Vec<String> = profile["d"]["spaces"].as_array().unwrap().iter().map(|space| String::from(space["title"].as_str().unwrap())).collect();
+    titles.sort();
+    let mut wanted: Vec<String> = vec!["Journal", "Work"].into_iter().chain(others.iter().cloned()).map(String::from).collect();
+    wanted.sort();
+    assert_eq!(titles, wanted);
+    for (space, title) in &[(&vault.journal, "Journal"), (&vault.work, "Work")] {
+        let found = ask(turtl, json!(["r-find", "profile:find-notes", {"space_id": space, "text": "door", "per_page": 100}])).await;
+        assert_eq!(found["e"], json!(0), "{}", found);
+        assert_eq!(found["d"]["total"], json!(1), "{}", found);
+        assert_eq!(found["d"]["notes"][0]["title"], json!(format!("{} page", title)));
+        assert_eq!(found["d"]["notes"][0]["text"], json!(format!("The {} door code is 7391.\n", title)));
+    }
+    let file = ask(turtl, json!(["r-file", "profile:note:get-file", vault.file_note])).await;
+    assert_eq!(file["e"], json!(0), "{}", file);
+    assert_eq!(crypto::from_base64(&String::from(file["d"].as_str().unwrap())).unwrap(), PICTURE.to_vec());
+    assert!(lockr!(turtl.user).privkey.is_some(), "the private part of the user's record did not come back");
+}
+
+/// The key the user in memory has.
+fn user_key(turtl: &Turtl) -> crypto::Key {
+    crate::models::protected::Protected::key_or_else(&*lockr!(turtl.user)).unwrap()
+}
+
+/// How many of the rows of a table of the user's database `key` opens, and how many there are.
+fn rows_opened_by<T>(turtl: &Turtl, key: &crypto::Key) -> (usize, usize)
+    where T: crate::models::protected::Protected + crate::models::storable::Storable
+{
+    use crate::models::protected::Protected;
+    let db_guard = lock!(turtl.db);
+    let rows: Vec<T> = db_guard.as_ref().unwrap().all(T::tablename()).unwrap();
+    let total = rows.len();
+    let opened = rows.iter().filter(|row| {
+        let mut copy = Protected::clone(*row).unwrap();
+        copy.set_key(Some(key.clone()));
+        Protected::deserialize(&mut copy).is_ok()
+    }).count();
+    (opened, total)
+}
+
+fn keys_opened_by(turtl: &Turtl, key: &crypto::Key) -> (usize, usize) {
+    rows_opened_by::<crate::models::keychain::KeychainEntry>(turtl, key)
+}
+
+/// What is kept of an account on the device, as the two files it is in have it: the record of the account (in
+/// the key-value store) and the keys of the notebooks (in the user's database). To put a vault back in a state
+/// it was in, as a crash would have left it.
+struct Kept {
+    record: String,
+    keys: Vec<crate::models::keychain::KeychainEntry>,
+}
+
+impl Kept {
+    /// Just the record, for when there is no database open to read the keys from.
+    fn of_the_record(turtl: &Turtl, name: &str) -> String {
+        lockr!(turtl.kv).kv_get(&format!("local-account:{}", name)).unwrap().unwrap()
+    }
+
+    fn of(turtl: &Turtl, name: &str) -> Kept {
+        let record = lockr!(turtl.kv).kv_get(&format!("local-account:{}", name)).unwrap().unwrap();
+        let db_guard = lock!(turtl.db);
+        Kept { record: record, keys: db_guard.as_ref().unwrap().all("keychain").unwrap() }
+    }
+
+    fn put_back(&self, turtl: &Turtl, name: &str) {
+        lockr!(turtl.kv).kv_set(&format!("local-account:{}", name), &self.record).unwrap();
+        let db_guard = lock!(turtl.db);
+        let db = db_guard.as_ref().unwrap();
+        let now: Vec<crate::models::keychain::KeychainEntry> = db.all("keychain").unwrap();
+        db.begin().unwrap();
+        for row in &now { db.delete(row).unwrap(); }
+        for row in &self.keys { db.save(row).unwrap(); }
+        db.commit().unwrap();
+    }
+
+    /// The rows as they are stored, by id.
+    fn rows(&self) -> Vec<Value> {
+        let mut rows: Vec<Value> = self.keys.iter().map(|row| crate::models::protected::Protected::data_for_storage(row).unwrap()).collect();
+        rows.sort_by_key(|row| row["id"].as_str().unwrap().to_owned());
+        rows
+    }
+
+    fn record(&self) -> Value {
+        jedi::parse(&self.record).unwrap()
+    }
+}
+
+/// Log in as `Turtl::login` does after it has opened the user's database, but on the database that is open: an
+/// in-memory one is gone as soon as it is closed (what survives a restart is for the tests that have files). Says
+/// whether a change of passphrase that was stopped half way was settled by it, and which way.
+async fn relogin(turtl: &Turtl, name: &str, passphrase: &str) -> crate::error::TResult<Option<bool>> {
+    User::logout(turtl)?;
+    *lockw!(turtl.profile) = crate::profile::Profile::new();
+    User::login(turtl, String::from(name), String::from(passphrase), crate::models::user::CURRENT_AUTH_VERSION).await?;
+    match turtl.local_start() {
+        Ok(settled) => Ok(settled),
+        Err(e) => {
+            User::logout(turtl)?;
+            Err(e)
+        }
+    }
+}
+
+fn assert_unauthorized<T: ::std::fmt::Debug>(result: crate::error::TResult<T>) {
+    match result.unwrap_err().shed() {
+        TError::Api(status, _) => assert_eq!(status, StatusCode::UNAUTHORIZED),
+        other => panic!("expected the login to be refused, got {:?}", other),
+    }
+}
+
+/// Changing the passphrase of an account on this device: what is wrong is refused and changes nothing, what is
+/// right seals the keys of the notebooks (and the private part of the user's record) with the key the new
+/// passphrase makes, the vault goes on working, and from then on only the new passphrase opens it.
+async fn local_passphrase_change() {
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.make_local_only();
+    let (first, second) = ("the first passphrase of this vault", "the second passphrase of this vault");
+    let name = "change-vault";
+    let vault = vault_of_two(&turtl, name, first).await;
+    let mut counter = 0;
+    macro_rules! mid { () => {{ counter += 1; format!("c{}", counter) }} }
+    macro_rules! ok { ($args:expr) => {{
+        let res = ask(&turtl, $args).await;
+        assert_eq!(res["e"], json!(0), "{}", res);
+        res["d"].clone()
+    }} }
+    // the user's own row too (what a host that saves the user's settings has): it is sealed with the user's key
+    ok!(json!([mid!(), "profile:sync:model", "edit", "user", {"settings": {"theme": "dark"}}]));
+
+    let old_key = user_key(&turtl);
+    let before = Kept::of(&turtl, name);
+    assert!(before.record().get("pending").is_none(), "{}", before.record);
+    assert_eq!(keys_opened_by(&turtl, &old_key), (2, 2));
+    assert_eq!(rows_opened_by::<User>(&turtl, &old_key), (1, 1));
+
+    // what is refused changes nothing: not the record, not the keys, and the vault goes on as it was
+    let still_as_it_was = |turtl: &Turtl, what: &str| {
+        let now = Kept::of(turtl, name);
+        assert_eq!(now.record, before.record, "{}: the record was changed", what);
+        assert_eq!(now.rows(), before.rows(), "{}: the keys were changed", what);
+        assert_eq!(user_key(turtl).data(), old_key.data(), "{}: the key in memory was changed", what);
+    };
+    let refused = ask(&turtl, json!([mid!(), "user:change-passphrase", "not the passphrase", second])).await;
+    assert_eq!((&refused["e"], &refused["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "{}", refused);
+    still_as_it_was(&turtl, "a wrong current passphrase");
+    for (new, kind) in &[("abc", "validation"), ("password", "validation"), (first, "bad_value")] {
+        let refused = ask(&turtl, json!([mid!(), "user:change-passphrase", first, new])).await;
+        assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!(kind)), "{}: {}", new, refused);
+        still_as_it_was(&turtl, new);
+    }
+    ok!(json!([mid!(), "profile:batch:begin"]));
+    let refused = ask(&turtl, json!([mid!(), "user:change-passphrase", first, second])).await;
+    assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", refused);
+    assert!(refused["d"]["message"].as_str().unwrap().contains("has to be kept or undone first"), "refused for another reason: {}", refused);
+    ok!(json!([mid!(), "profile:batch:rollback"]));
+    still_as_it_was(&turtl, "a batch that is open");
+    // a core that is not logged in has nothing to change, and a core with a server has its own way
+    let nobody = {
+        let mut other = test_turtl(&server);
+        other.make_local_only();
+        other
+    };
+    let refused = ask(&nobody, json!(["n1", "user:change-passphrase", first, second])).await;
+    assert_eq!(refused["e"], json!(1), "{}", refused);
+    let with_a_server = test_turtl(&server);
+    let refused = ask(&with_a_server, json!(["n2", "user:change-passphrase", first, second])).await;
+    assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("permission_denied")), "{}", refused);
+    assert!(requests(&server).await.is_empty());
+
+    // the change
+    let changed = ok!(json!([mid!(), "user:change-passphrase", first, second]));
+    // (the two notebooks' keys, and the user's own row)
+    assert_eq!(changed, json!({"sealed": 3, "unreadable": 0}));
+    let new_key = user_key(&turtl);
+    assert_ne!(new_key.data(), old_key.data());
+    let after = Kept::of(&turtl, name);
+    assert!(after.record().get("pending").is_none(), "{}", after.record);
+    for field in &["id", "kdf"] {
+        assert_eq!(after.record()[field], before.record()[field], "{}", field);
+    }
+    assert_ne!(after.record()["auth"], before.record()["auth"]);
+    assert_ne!(after.record()["data"]["body"], before.record()["data"]["body"]);
+    assert_eq!(after.record()["data"]["username"], before.record()["data"]["username"]);
+    assert_eq!(after.record()["data"]["pubkey"], before.record()["data"]["pubkey"]);
+    let fields = |record: &Value| -> Vec<String> { record["data"].as_object().unwrap().keys().cloned().collect() };
+    assert_eq!(fields(&after.record()), fields(&before.record()), "the user data has what it had");
+    // everything the user's key seals is sealed with the new one, and nothing with the old
+    assert_eq!(keys_opened_by(&turtl, &new_key), (2, 2));
+    assert_eq!(keys_opened_by(&turtl, &old_key), (0, 2));
+    assert_eq!(rows_opened_by::<User>(&turtl, &new_key), (1, 1));
+    assert_eq!(rows_opened_by::<User>(&turtl, &old_key), (0, 1));
+
+    // the vault goes on: what was there reads, and a notebook made now has its key sealed with the new key
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    let later = ok!(json!([mid!(), "profile:sync:model", "add", "space", {"user_id": "0", "title": "Later", "color": "#800000"}]));
+    let later_id = String::from(later["id"].as_str().unwrap());
+    ok!(json!([mid!(), "profile:sync:model", "add", "note", {"space_id": later_id, "user_id": "0", "type": "zim-page", "title": "Later page", "text": "written after the change\n"}]));
+    assert_eq!(keys_opened_by(&turtl, &new_key), (3, 3));
+    assert_eq!(keys_opened_by(&turtl, &old_key), (0, 3));
+
+    // the old passphrase opens nothing now, and the new one opens everything, as the passphrase of the account
+    assert_unauthorized(relogin(&turtl, name, first).await);
+    assert!(!lockr!(turtl.user).logged_in);
+    relogin(&turtl, name, second).await.unwrap();
+    assert_eq!(user_key(&turtl).data(), new_key.data());
+    assert_vault_reads(&turtl, &vault, &["Later"]).await;
+    let found = ok!(json!([mid!(), "profile:find-notes", {"space_id": later_id, "text": "change"}]));
+    assert_eq!(found["total"], json!(1), "{}", found);
+    // (and a vault can be changed again: what a change leaves is what a new account has)
+    let third = "the third passphrase of this vault";
+    let changed = ok!(json!([mid!(), "user:change-passphrase", second, third]));
+    assert_eq!(changed, json!({"sealed": 4, "unreadable": 0}));
+    assert_unauthorized(relogin(&turtl, name, second).await);
+    relogin(&turtl, name, third).await.unwrap();
+    assert_vault_reads(&turtl, &vault, &["Later"]).await;
+
+    // nothing was queued for a server, and none was asked for anything
+    assert!(sync_records(&turtl.db).is_empty());
+    assert_eq!(requests(&server).await, Vec::<String>::new());
+    {
+        let mut db_guard = lock!(turtl.db);
+        crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&vault.file_note)).unwrap();
+    }
+}
+async_test!(local_passphrase_change_flow, local_passphrase_change());
+
+/// A change that stops half way (the page is closed, the device loses power, the disk is full) leaves a vault
+/// that the passphrase typed next puts right: the new one finishes the change and the old one undoes it, from
+/// whichever state it was left in, and either way the keys are the ones that passphrase makes. And a vault that
+/// was left damaged on top of that is not lost.
+async fn local_passphrase_change_interrupted() {
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.make_local_only();
+    let (first, second) = ("the first passphrase of this vault", "the second passphrase of this vault");
+    let name = "stopped-vault";
+    let vault = vault_of_two(&turtl, name, first).await;
+    let before = Kept::of(&turtl, name);
+
+    // a change as far as each of its writes goes: the record has the two passphrases (and the keys are the old),
+    // then the keys are sealed with the new one too (and the record still has both)
+    let change = User::prepare_local_change(&turtl, &String::from(first), &String::from(second)).unwrap();
+    let (old_key, new_key) = (change.old_key.clone(), change.new_key.clone());
+    assert_eq!(Kept::of(&turtl, name).record, before.record, "working a change out writes nothing");
+    User::begin_local_change(&turtl, &change).unwrap();
+    let written = Kept::of(&turtl, name);
+    assert!(written.record().get("pending").is_some(), "{}", written.record);
+    assert_eq!(written.rows(), before.rows());
+    User::rekey_local_keys(&turtl, &change).unwrap();
+    let sealed = Kept::of(&turtl, name);
+    assert!(sealed.record().get("pending").is_some());
+    assert_ne!(sealed.rows(), before.rows());
+    assert_eq!(keys_opened_by(&turtl, &new_key), (2, 2));
+    drop(change);
+
+    // each state, with each passphrase
+    for (state, kept, sealed_with) in &[("written", &written, &old_key), ("sealed", &sealed, &new_key)] {
+        for (typed, other, typed_key, other_key) in &[(first, second, &old_key, &new_key), (second, first, &new_key, &old_key)] {
+            let what = format!("{}, then {:?}", state, typed);
+            kept.put_back(&turtl, name);
+            assert_eq!(keys_opened_by(&turtl, sealed_with), (2, 2), "{}: not the state it was meant to be", what);
+            let settled = relogin(&turtl, name, typed).await.unwrap_or_else(|e| panic!("{}: {}", what, e));
+            // (which way it went is told: the passphrase typed is the one the vault has, and the person may not have expected that)
+            assert_eq!(settled, Some(*typed == second), "{}", what);
+            assert_eq!(user_key(&turtl).data(), typed_key.data(), "{}", what);
+            let settled = Kept::of(&turtl, name);
+            assert!(settled.record().get("pending").is_none(), "{}: {}", what, settled.record);
+            assert_eq!(keys_opened_by(&turtl, typed_key), (2, 2), "{}", what);
+            assert_eq!(keys_opened_by(&turtl, other_key), (0, 2), "{}", what);
+            if *typed == first {
+                // undone: the account is what it was, to the byte
+                assert_eq!(settled.record, before.record, "{}", what);
+            } else {
+                assert_eq!(settled.record()["auth"], written.record()["pending"]["auth"], "{}", what);
+                assert_eq!(settled.record()["data"], written.record()["pending"]["data"], "{}", what);
+            }
+            assert_vault_reads(&turtl, &vault, &[]).await;
+            // the other passphrase is not the account's any more, and the one typed goes on being: logging in is
+            // what it always is, and settles nothing a second time
+            assert_unauthorized(relogin(&turtl, name, other).await);
+            assert_eq!(relogin(&turtl, name, typed).await.unwrap(), None, "{}: there was nothing to settle the second time", what);
+            assert_eq!(Kept::of(&turtl, name).record, settled.record, "{}", what);
+            assert_eq!(Kept::of(&turtl, name).rows().len(), 2);
+        }
+    }
+
+    // a change can't be begun on top of one that is not finished
+    written.put_back(&turtl, name);
+    let refused = ask(&turtl, json!(["s1", "user:change-passphrase", first, "the third passphrase of this vault"])).await;
+    assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", refused);
+    assert!(refused["d"]["message"].as_str().unwrap().contains("not finished"), "refused for another reason: {}", refused);
+    assert_eq!(Kept::of(&turtl, name).record, written.record);
+
+    // damage: a sealed key that can't be opened. What can be done is done, and what can't is refused, whole,
+    // so that the other passphrase still can.
+    let spoil = |kept: &Kept, field: &str, with: &str| -> Kept {
+        let mut record = kept.record();
+        let other = record["pending"][with].clone();
+        record["pending"][field] = other;
+        Kept { record: jedi::stringify(&record).unwrap(), keys: kept.keys.iter().map(|row| crate::models::protected::Protected::clone(row).unwrap()).collect() }
+    };
+    // (the keys are under the old key: the old passphrase doesn't need the other key to put them right)
+    let damaged = spoil(&written, "new_under_old", "old_under_new");
+    damaged.put_back(&turtl, name);
+    relogin(&turtl, name, first).await.unwrap();
+    assert_eq!(Kept::of(&turtl, name).record, before.record);
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    // (the new passphrase would need it, to open the keys that are under the old key: nothing is written, and the old one still opens it)
+    let damaged = spoil(&written, "old_under_new", "new_under_old");
+    damaged.put_back(&turtl, name);
+    let refused = relogin(&turtl, name, second).await.unwrap_err();
+    assert!(refused.to_string().contains("left in the middle of a change of passphrase"), "{}", refused);
+    assert!(!lockr!(turtl.user).logged_in, "a vault that could not be put right was left logged in");
+    assert_eq!(Kept::of(&turtl, name).record, damaged.record, "nothing is written when it can't be put right");
+    assert_eq!(Kept::of(&turtl, name).rows(), damaged.rows());
+    relogin(&turtl, name, first).await.unwrap();
+    assert_eq!(Kept::of(&turtl, name).record, before.record);
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    // (and the other way round, with the keys under the new key)
+    let damaged = spoil(&sealed, "new_under_old", "old_under_new");
+    damaged.put_back(&turtl, name);
+    let refused = relogin(&turtl, name, first).await.unwrap_err();
+    assert!(refused.to_string().contains("left in the middle of a change of passphrase"), "{}", refused);
+    assert_eq!(Kept::of(&turtl, name).record, damaged.record);
+    assert_eq!(Kept::of(&turtl, name).rows(), damaged.rows());
+    relogin(&turtl, name, second).await.unwrap();
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    let damaged = spoil(&sealed, "old_under_new", "new_under_old");
+    damaged.put_back(&turtl, name);
+    relogin(&turtl, name, second).await.unwrap();
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    assert!(Kept::of(&turtl, name).record().get("pending").is_none());
+
+    assert_eq!(requests(&server).await, Vec::<String>::new());
+    {
+        let mut db_guard = lock!(turtl.db);
+        crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&vault.file_note)).unwrap();
+    }
+}
+async_test!(local_passphrase_change_interrupted_flow, local_passphrase_change_interrupted());
+
+/// An account made before its cost was kept with it (at what a Turtl server's accounts cost, 16 MiB) is moved to the
+/// cost a vault is made at when its passphrase is changed; and while a change of such an account is not finished
+/// the two passphrases, which make their keys at different costs, both open it.
+async fn local_passphrase_change_of_an_old_account() {
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.make_local_only();
+    let (first, second) = ("the first passphrase of this vault", "the second passphrase of this vault");
+    let name = "old-vault";
+    let vault = {
+        let _at_the_old_cost = crate::models::user::ServerCostAccounts::new();
+        vault_of_two(&turtl, name, first).await
+    };
+    // (what was kept then has no cost in its record)
+    {
+        let mut record = Kept::of(&turtl, name).record();
+        assert_eq!(record["kdf"], json!({"ops": 524288, "mem": 16777216}));
+        record.as_object_mut().unwrap().remove("kdf");
+        lockr!(turtl.kv).kv_set(&format!("local-account:{}", name), &jedi::stringify(&record).unwrap()).unwrap();
+    }
+    relogin(&turtl, name, first).await.unwrap();
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    let before = Kept::of(&turtl, name);
+
+    // stopped after the record was written: the new passphrase is made at the cost of a vault, the old at the old
+    let change = User::prepare_local_change(&turtl, &String::from(first), &String::from(second)).unwrap();
+    User::begin_local_change(&turtl, &change).unwrap();
+    let written = Kept::of(&turtl, name);
+    assert_eq!(written.record()["pending"]["kdf"], json!({"ops": 4194304, "mem": 134217728}));
+    relogin(&turtl, name, second).await.unwrap();
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    assert_eq!(Kept::of(&turtl, name).record()["kdf"], json!({"ops": 4194304, "mem": 134217728}), "finishing it moves the account to the new cost");
+    assert_unauthorized(relogin(&turtl, name, first).await);
+    written.put_back(&turtl, name);
+    relogin(&turtl, name, first).await.unwrap();
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    assert_eq!(Kept::of(&turtl, name).record()["kdf"], json!({"ops": 524288, "mem": 16777216}), "undoing it leaves the account at the cost it had");
+    assert!(Kept::of(&turtl, name).record().get("pending").is_none());
+
+    // and changed in one go
+    before.put_back(&turtl, name);
+    relogin(&turtl, name, first).await.unwrap();
+    let changed = ask(&turtl, json!(["o1", "user:change-passphrase", first, second])).await;
+    assert_eq!(changed["e"], json!(0), "{}", changed);
+    assert_eq!(Kept::of(&turtl, name).record()["kdf"], json!({"ops": 4194304, "mem": 134217728}));
+    assert_unauthorized(relogin(&turtl, name, first).await);
+    relogin(&turtl, name, second).await.unwrap();
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    {
+        let mut db_guard = lock!(turtl.db);
+        crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&vault.file_note)).unwrap();
+    }
+}
+async_test!(local_passphrase_change_of_an_old_account_flow, local_passphrase_change_of_an_old_account());
+
+/// A key that nothing opens (damage, or the key of a notebook that was lost) does not stop the passphrase from being
+/// changed: it is counted, and left as it was; every key that opens is sealed with the new key.
+async fn local_passphrase_change_with_a_dead_key() {
+    use crate::models::protected::Protected;
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.make_local_only();
+    let (first, second) = ("the first passphrase of this vault", "the second passphrase of this vault");
+    let name = "dead-key-vault";
+    let vault = vault_of_two(&turtl, name, first).await;
+    let dead_id = String::from("0000000000000000000000000000000000000000000000000000000000000000");
+    {
+        let db_guard = lock!(turtl.db);
+        let db = db_guard.as_ref().unwrap();
+        let rows: Vec<crate::models::keychain::KeychainEntry> = db.all("keychain").unwrap();
+        let mut dead = Protected::clone(&rows[0]).unwrap();
+        dead.set_id(dead_id.clone());
+        dead.set_body(crypto::to_base64(&vec![7u8; 60]).unwrap());
+        db.save(&dead).unwrap();
+    }
+    let with_dead = Kept::of(&turtl, name);
+    assert_eq!(with_dead.keys.len(), 3);
+    let old_key = user_key(&turtl);
+    assert_eq!(keys_opened_by(&turtl, &old_key), (2, 3));
+
+    let changed = ask(&turtl, json!(["k1", "user:change-passphrase", first, second])).await;
+    assert_eq!(changed["e"], json!(0), "{}", changed);
+    assert_eq!(changed["d"], json!({"sealed": 2, "unreadable": 1}));
+    let new_key = user_key(&turtl);
+    assert_eq!(keys_opened_by(&turtl, &new_key), (2, 3));
+    assert_eq!(keys_opened_by(&turtl, &old_key), (0, 3));
+    let now = Kept::of(&turtl, name);
+    let dead_row = |kept: &Kept| kept.rows().into_iter().find(|row| row["id"] == json!(dead_id)).unwrap();
+    assert_eq!(dead_row(&now), dead_row(&with_dead), "the key that nothing opens is as it was");
+    assert_unauthorized(relogin(&turtl, name, first).await);
+    relogin(&turtl, name, second).await.unwrap();
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    {
+        let mut db_guard = lock!(turtl.db);
+        crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&vault.file_note)).unwrap();
+    }
+}
+async_test!(local_passphrase_change_with_a_dead_key_flow, local_passphrase_change_with_a_dead_key());
+
+// ---------------------------------------------------------------------------------------------
+// a backup of the vault
+// ---------------------------------------------------------------------------------------------
+
+/// The pieces of a backup, as the host reads them (`vault:backup:read`), put together.
+async fn read_backup_in_pieces(turtl: &Turtl, piece: usize) -> Vec<u8> {
+    let made = ask(turtl, json!(["bk-make", "vault:backup:make"])).await;
+    assert_eq!(made["e"], json!(0), "{}", made);
+    let size = made["d"]["size"].as_u64().unwrap() as usize;
+    let mut bytes = Vec::new();
+    while bytes.len() < size {
+        let read = ask(turtl, json!(["bk-read", "vault:backup:read", bytes.len(), piece])).await;
+        assert_eq!(read["e"], json!(0), "{}", read);
+        let got = crypto::from_base64(&String::from(read["d"].as_str().unwrap())).unwrap();
+        assert!(!got.is_empty() && got.len() <= piece);
+        bytes.extend_from_slice(&got);
+    }
+    assert_eq!(bytes.len(), size);
+    bytes
+}
+
+/// A backup, as the host sends it (`vault:restore:write`, piece after piece), and then asks for it to be restored.
+async fn send_backup_in_pieces(turtl: &Turtl, bytes: &[u8], piece: usize) -> Value {
+    let mut sent = 0;
+    for part in bytes.chunks(piece) {
+        let wrote = ask(turtl, json!(["bk-write", "vault:restore:write", sent, crypto::to_base64(part).unwrap()])).await;
+        assert_eq!(wrote["e"], json!(0), "{}", wrote);
+        sent += part.len();
+        assert_eq!(wrote["d"]["size"], json!(sent));
+    }
+    ask(turtl, json!(["bk-commit", "vault:restore:commit"])).await
+}
+
+/// A backup is the vault as it is kept, in one file, that the host takes in pieces: nothing in it can be read, it
+/// restores in a core that has no vault with the same passphrase, and what is wrong with a file or a request is refused,
+/// whole.
+async fn vault_backup_in_pieces() {
+    let server = start_server().await;
+    let local = || { let mut turtl = test_turtl(&server); turtl.make_local_only(); turtl };
+    let name = "backed-up-vault";
+    let passphrase = "the passphrase of the backed up vault";
+    let a = local();
+
+    // there is nothing to back up before the vault is unlocked, and a core with a server has no vault
+    let refused = ask(&a, json!(["bk1", "vault:backup:make"])).await;
+    assert_eq!(refused["e"], json!(1), "{}", refused);
+    let with_a_server = test_turtl(&server);
+    for command in &["vault:backup:make", "vault:restore:commit", "vault:backup:drop"] {
+        let refused = ask(&with_a_server, json!(["bk2", command])).await;
+        assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("permission_denied")), "{}: {}", command, refused);
+    }
+
+    let vault = vault_of_two(&a, name, passphrase).await;
+    // (a batch that is open is not part of a backup, and is not to be cut in two by one)
+    assert_eq!(ask(&a, json!(["bk3", "profile:batch:begin"])).await["e"], json!(0));
+    let refused = ask(&a, json!(["bk4", "vault:backup:make"])).await;
+    assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", refused);
+    assert_eq!(ask(&a, json!(["bk5", "profile:batch:rollback"])).await["e"], json!(0));
+
+    // taken in pieces of 1,000 bytes and of 100,000: the same file
+    let bytes = read_backup_in_pieces(&a, 1000).await;
+    assert_eq!(read_backup_in_pieces(&a, 100_000).await, bytes);
+    // (and a piece can't be asked for from nowhere, or too big, and a backup is let go of)
+    let beyond = ask(&a, json!(["bk6", "vault:backup:read", bytes.len() + 1, 10])).await;
+    assert_eq!((&beyond["e"], &beyond["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", beyond);
+    let at_the_end = ask(&a, json!(["bk7", "vault:backup:read", bytes.len(), 10])).await;
+    assert_eq!(at_the_end["d"], json!(""), "{}", at_the_end);
+    let too_big = ask(&a, json!(["bk8", "vault:backup:read", 0, 9 << 20])).await;
+    assert_eq!((&too_big["e"], &too_big["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", too_big);
+    assert_eq!(ask(&a, json!(["bk9", "vault:backup:drop"])).await["e"], json!(0));
+    let gone = ask(&a, json!(["bk10", "vault:backup:read", 0, 10])).await;
+    assert_eq!((&gone["e"], &gone["d"]["type"]), (&json!(1), &json!("not_found")), "{}", gone);
+
+    // what it holds: the notebooks, their pages, and the file; and nothing that can be read
+    let read = crate::vault_backup::Backup::read(&bytes).unwrap();
+    assert_eq!(read.name, name);
+    assert_eq!(read.counts(), json!({"spaces": 2, "notes": 3, "files": 1}));
+    for secret in &["door code", "Journal", "Work page", "picture.png", "image/png", passphrase] {
+        assert!(!bytes_contain(&bytes, secret.as_bytes()), "{:?} can be read in a backup", secret);
+    }
+    assert!(bytes_contain(&bytes, vault.journal.as_bytes()), "(the ids are there: it is the right place to look)");
+
+    // restored in a core that has no vault
+    let b = local();
+    let restored = send_backup_in_pieces(&b, &bytes, 700).await;
+    assert_eq!(restored["e"], json!(0), "{}", restored);
+    assert_eq!(restored["d"], json!({"spaces": 2, "notes": 3, "files": 1}));
+    assert_eq!(ask(&b, json!(["bk11", "user:local-accounts"])).await["d"], json!([name]));
+    assert_eq!(lockr!(b.kv).kv_get(&format!("local-account:{}", name)).unwrap(), lockr!(a.kv).kv_get(&format!("local-account:{}", name)).unwrap(), "the account is as it was");
+    // the passphrase is the vault's, and only that
+    let wrong = ask(&b, json!(["bk12", "user:login", name, "another passphrase"])).await;
+    assert_eq!((&wrong["e"], &wrong["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "{}", wrong);
+    let login = ask(&b, json!(["bk13", "user:login", name, passphrase])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    assert!(lockr!(b.user).privkey.is_some());
+    // (a vault that is unlocked is not restored over; and where there is a vault, a backup is not restored)
+    let again = send_backup_in_pieces(&b, &bytes, 100_000).await;
+    assert_eq!((&again["e"], &again["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", again);
+    assert!(again["d"]["message"].as_str().unwrap().contains("unlocked"), "{}", again);
+    assert_eq!(ask(&b, json!(["bk14", "user:logout"])).await["e"], json!(0));
+    let again = send_backup_in_pieces(&b, &bytes, 100_000).await;
+    assert_eq!((&again["e"], &again["d"]["subtype"]), (&json!(1), &json!("Conflict")), "{}", again);
+
+    // what is wrong is refused, and leaves no vault behind: the pieces out of order, nothing sent, what is not a backup, one that is cut short
+    let c = local();
+    let refused = ask(&c, json!(["bk15", "vault:restore:commit"])).await;
+    assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", refused);
+    let refused = ask(&c, json!(["bk16", "vault:restore:write", 5, crypto::to_base64(b"x").unwrap()])).await;
+    assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", refused);
+    assert_eq!(ask(&c, json!(["bk17", "vault:restore:write", 0, crypto::to_base64(&bytes[..100]).unwrap()])).await["e"], json!(0));
+    let refused = ask(&c, json!(["bk18", "vault:restore:write", 200, crypto::to_base64(&bytes[200..300]).unwrap()])).await;
+    assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", refused);
+    assert!(refused["d"]["message"].as_str().unwrap().contains("in order"), "{}", refused);
+    let refused = ask(&c, json!(["bk19", "vault:restore:write", 0, "not base64 !"])).await;
+    assert_eq!(refused["e"], json!(1), "{}", refused);
+    assert_eq!(ask(&c, json!(["bk20", "vault:restore:cancel"])).await["e"], json!(0));
+    for (what, damaged) in &[
+        ("a file that is not a backup", b"%PDF-1.4 a different kind of file".to_vec()),
+        ("a backup cut short", bytes[..bytes.len() - 1].to_vec()),
+        ("a backup with a byte changed", { let mut changed = bytes.clone(); let middle = changed.len() / 2; changed[middle] ^= 1; changed }),
+    ] {
+        let refused = send_backup_in_pieces(&c, damaged, 100_000).await;
+        assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("bad_value")), "{}: {}", what, refused);
+        assert!(refused["d"]["message"].as_str().unwrap().contains("the backup can't be restored"), "{}: {}", what, refused);
+        assert_eq!(ask(&c, json!(["bk21", "user:local-accounts"])).await["d"], json!([]), "{}: a vault was left", what);
+    }
+    // (what was sent is not kept once it is restored, or refused: another commit has nothing to restore)
+    let refused = ask(&c, json!(["bk22", "vault:restore:commit"])).await;
+    assert_eq!(refused["e"], json!(1), "{}", refused);
+    {
+        let mut db_guard = lock!(a.db);
+        crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&vault.file_note)).unwrap();
+    }
+}
+async_test!(vault_backup_in_pieces_flow, vault_backup_in_pieces());
+
 /// A folder for the databases of the test on this thread, kept as files for as long as this lives (and
 /// deleted when it goes). Without it the databases of a test are in memory.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1155,7 +1801,6 @@ impl Drop for DiskFolder {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn bytes_contain(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
 }
@@ -1257,6 +1902,209 @@ async fn local_only_on_disk() {
 }
 #[cfg(not(target_arch = "wasm32"))]
 async_test!(local_only_on_disk_flow, local_only_on_disk());
+
+/// The passphrase of an account on this device, changed with the databases on disk and the core started again
+/// between (the way a host logs in: `user:login`): only the new passphrase opens the vault and everything is in
+/// it; a change that was stopped (the process is gone) is settled by the passphrase typed after the restart;
+/// and once it is done nothing of the old key's is left in the files: neither passphrase, neither sealed key, nor
+/// the old record.
+#[cfg(not(target_arch = "wasm32"))]
+async fn local_passphrase_change_on_disk() {
+    use crate::models::protected::Protected;
+    let folder = DiskFolder::new("local-passphrase");
+    let server = start_server().await;
+    let (first, second, third) = ("first passphrase 4417 of the vault", "second passphrase 5529 of the vault", "third passphrase 6642 of the vault");
+    let name = "disk-change-vault";
+    let started = || { let mut turtl = test_turtl(&server); turtl.make_local_only(); turtl };
+
+    let (vault, old_secrets) = {
+        let turtl = started();
+        let vault = vault_of_two(&turtl, name, first).await;
+        let before = Kept::of(&turtl, name);
+        // what the old key sealed, as the files have it: the keys of the notebooks, the user's record, the auth
+        let mut old_secrets: Vec<(String, String)> = before.keys.iter().map(|row| (String::from("a notebook's sealed key"), Protected::get_body(row).unwrap().clone())).collect();
+        old_secrets.push((String::from("the sealed user record"), String::from(before.record()["data"]["body"].as_str().unwrap())));
+        old_secrets.push((String::from("the old auth"), String::from(before.record()["auth"].as_str().unwrap())));
+        let changed = ask(&turtl, json!(["p1", "user:change-passphrase", first, second])).await;
+        assert_eq!(changed["e"], json!(0), "{}", changed);
+        assert_eq!(changed["d"]["unreadable"], json!(0));
+        turtl.logout().unwrap();
+        (vault, old_secrets)
+    };
+
+    // started again: the old passphrase opens nothing, the new one everything
+    let turtl = started();
+    let refused = ask(&turtl, json!(["p2", "user:login", name, first])).await;
+    assert_eq!((&refused["e"], &refused["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "{}", refused);
+    assert!(lockr!(turtl.profile).spaces.is_empty(), "a refused login shows nothing");
+    let login = ask(&turtl, json!(["p3", "user:login", name, second])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    assert_vault_reads(&turtl, &vault, &[]).await;
+
+    // a change that is stopped after the account's record was written: the process is gone, and the passphrase
+    // typed after the restart is the old one, which undoes it
+    {
+        let change = User::prepare_local_change(&turtl, &String::from(second), &String::from(third)).unwrap();
+        User::begin_local_change(&turtl, &change).unwrap();
+    }
+    drop(turtl);
+    let turtl = started();
+    let (login, events) = ask_and_events(&turtl, json!(["p4", "user:login", name, second])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    assert_eq!(settled_in(&events, name), vec![false], "the host is told that the change was undone");
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    assert!(Kept::of(&turtl, name).record().get("pending").is_none());
+    // and one that is stopped after the keys were sealed: the new one finishes it
+    {
+        let change = User::prepare_local_change(&turtl, &String::from(second), &String::from(third)).unwrap();
+        User::begin_local_change(&turtl, &change).unwrap();
+        User::rekey_local_keys(&turtl, &change).unwrap();
+    }
+    drop(turtl);
+    let turtl = started();
+    let (login, events) = ask_and_events(&turtl, json!(["p5", "user:login", name, third])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    assert_eq!(settled_in(&events, name), vec![true], "and that it was finished");
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    assert!(Kept::of(&turtl, name).record().get("pending").is_none());
+    turtl.logout().unwrap();
+    drop(turtl);
+
+    // a change that was stopped and then damaged (the sealed key that the new passphrase needs is spoiled): it is
+    // refused, whole, and nobody is left logged in, with the keys in memory, to a vault that could not be read; the
+    // old passphrase undoes the change
+    let turtl = started();
+    let login = ask(&turtl, json!(["p5a", "user:login", name, third])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    {
+        let change = User::prepare_local_change(&turtl, &String::from(third), &String::from(second)).unwrap();
+        User::begin_local_change(&turtl, &change).unwrap();
+    }
+    {
+        let mut record = Kept::of(&turtl, name).record();
+        let spoiled = record["pending"]["new_under_old"].clone();
+        record["pending"]["old_under_new"] = spoiled;
+        lockr!(turtl.kv).kv_set(&format!("local-account:{}", name), &jedi::stringify(&record).unwrap()).unwrap();
+    }
+    let spoiled = Kept::of(&turtl, name).record;
+    drop(turtl);
+    let turtl = started();
+    let refused = ask(&turtl, json!(["p5b", "user:login", name, second])).await;
+    assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", refused);
+    assert!(!lockr!(turtl.user).logged_in, "a vault that could not be put right was left logged in");
+    assert!(lock!(turtl.db).is_none(), "and its database was left open");
+    assert!(lockr!(turtl.profile).spaces.is_empty());
+    assert_eq!(Kept::of_the_record(&turtl, name), spoiled, "nothing is written when it can't be put right");
+    let login = ask(&turtl, json!(["p5c", "user:login", name, third])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    assert!(Kept::of(&turtl, name).record().get("pending").is_none());
+    turtl.logout().unwrap();
+    drop(turtl);
+
+    // and once more, the way it is lived: only the passphrase at the end opens it
+    let turtl = started();
+    for (n, passphrase) in [first, second].iter().enumerate() {
+        let refused = ask(&turtl, json!([format!("p6{}", n), "user:login", name, passphrase])).await;
+        assert_eq!((&refused["e"], &refused["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "{}", refused);
+    }
+    let login = ask(&turtl, json!(["p7", "user:login", name, third])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    {
+        let mut db_guard = lock!(turtl.db);
+        crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&vault.file_note)).unwrap();
+    }
+    turtl.logout().unwrap();
+    drop(turtl);
+
+    // what is in the files: no passphrase, and nothing that the old key sealed (the databases are written over in
+    // place, so a copy of an old row could be left in a page that was freed: it must not be)
+    let files = folder.files();
+    for passphrase in &[first, second, third] {
+        for (file, bytes) in &files {
+            assert!(!bytes_contain(bytes, passphrase.as_bytes()), "a passphrase is in {}", file);
+        }
+    }
+    for (what, sealed) in &old_secrets {
+        for (file, bytes) in &files {
+            assert!(!bytes_contain(bytes, sealed.as_bytes()), "{} is still in {}", what, file);
+        }
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+async_test!(local_passphrase_change_on_disk_flow, local_passphrase_change_on_disk());
+
+/// The vault moved to another computer: backed up on one (after its passphrase was changed), restored on another, whose
+/// files are its own, with the keys, the pages and the file all there, and nothing of the backup or of what it was
+/// restored into that can be read.
+#[cfg(not(target_arch = "wasm32"))]
+async fn vault_backup_moves_a_vault_to_another_computer() {
+    let server = start_server().await;
+    let (name, first, second) = ("moved-vault", "the first passphrase of the moved vault", "the second passphrase of the moved vault");
+    let started = || { let mut turtl = test_turtl(&server); turtl.make_local_only(); turtl };
+
+    let first_computer = DiskFolder::new("backup-first");
+    let (vault, bytes) = {
+        let a = started();
+        let vault = vault_of_two(&a, name, first).await;
+        // (the user's own row, as a host that keeps the user's settings has one)
+        let saved = ask(&a, json!(["mv0", "profile:sync:model", "edit", "user", {"settings": {"theme": "dark"}}])).await;
+        assert_eq!(saved["e"], json!(0), "{}", saved);
+        let changed = ask(&a, json!(["mv1", "user:change-passphrase", first, second])).await;
+        assert_eq!(changed["e"], json!(0), "{}", changed);
+        let bytes = read_backup_in_pieces(&a, 50_000).await;
+        // (the files of a vault are files, natively, in a folder that is not the databases': the other computer has none of them)
+        {
+            let mut db_guard = lock!(a.db);
+            crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&vault.file_note)).unwrap();
+        }
+        a.logout().unwrap();
+        (vault, bytes)
+    };
+    let first_files = first_computer.files();
+    drop(first_computer);
+
+    let second_computer = DiskFolder::new("backup-second");
+    let b = started();
+    assert_eq!(ask(&b, json!(["mv2", "user:local-accounts"])).await["d"], json!([]), "this computer has no vault");
+    let restored = send_backup_in_pieces(&b, &bytes, 30_000).await;
+    assert_eq!(restored["e"], json!(0), "{}", restored);
+    assert_eq!(restored["d"], json!({"spaces": 2, "notes": 3, "files": 1}));
+    assert!(crate::models::file::FileData::file_finder(None, Some(&vault.file_note)).is_ok(), "the file of the page is a file here again");
+    drop(b);
+
+    // the core is started again over these files: the passphrase the vault had when it was backed up opens it, with everything in it
+    let b = started();
+    let refused = ask(&b, json!(["mv3", "user:login", name, first])).await;
+    assert_eq!((&refused["e"], &refused["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "the passphrase from before the change is not the vault's: {}", refused);
+    let login = ask(&b, json!(["mv4", "user:login", name, second])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    assert_vault_reads(&b, &vault, &[]).await;
+    // everything that the user's key seals came with it, and opens with the key the passphrase makes
+    assert_eq!(keys_opened_by(&b, &user_key(&b)), (2, 2));
+    assert_eq!(rows_opened_by::<User>(&b, &user_key(&b)), (1, 1));
+    {
+        let mut db_guard = lock!(b.db);
+        crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&vault.file_note)).unwrap();
+    }
+    b.logout().unwrap();
+    drop(b);
+
+    // what this computer's files hold: the database of the vault, its account, and nothing that can be read
+    let files = second_computer.files();
+    assert!(files.iter().any(|(file, _)| file.starts_with("turtl-user-")), "the vault's database is there: {:?}", files.iter().map(|f| &f.0).collect::<Vec<_>>());
+    for secret in &["door code", "Journal", "Work page", "picture.png", first, second] {
+        for (file, contents) in files.iter().chain(first_files.iter()) {
+            assert!(!bytes_contain(contents, secret.as_bytes()), "{:?} is in {}", secret, file);
+        }
+    }
+    for secret in &["door code", "Journal", first, second] {
+        assert!(!bytes_contain(&bytes, secret.as_bytes()), "{:?} is in the backup", secret);
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+async_test!(vault_backup_moves_a_vault_to_another_computer_flow, vault_backup_moves_a_vault_to_another_computer());
 
 /// What a JS host sees of the core on wasm32 (wasm_host.rs): everything the core sends goes to the
 /// message handler, the same JSON as on native; without a handler it queues up for the poll

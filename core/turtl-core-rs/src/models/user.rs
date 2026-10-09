@@ -6,7 +6,10 @@ use crate::api::{ApiReq, StatusCode};
 use crate::models::model::{self, Model};
 use crate::models::space::Space;
 use crate::models::board::Board;
-use crate::models::protected::{Keyfinder, Protected};
+use crate::models::protected::{self, Keyfinder, Protected};
+use crate::models::keychain::KeychainEntry;
+use crate::models::storable::Storable;
+use crate::storage::Storage;
 use crate::models::sync_record::{SyncType, SyncAction, SyncRecord};
 use crate::models::validate::{self, Validate};
 use crate::turtl::Turtl;
@@ -75,9 +78,9 @@ protected! {
 /// device alone has no server to slow guesses down, and is within reach of whoever gets at the browser's
 /// storage, so it is made with `Kdf::local()` and keeps the cost it was made with.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-struct Kdf {
-    ops: usize,
-    mem: usize,
+pub(crate) struct Kdf {
+    pub(crate) ops: usize,
+    pub(crate) mem: usize,
 }
 
 impl Default for Kdf {
@@ -88,8 +91,8 @@ impl Default for Kdf {
 
 /// The most a stored cost may ask of a device (see `login_local`): eight times what a vault is made at, in
 /// memory (a gigabyte) and in work.
-const MAX_KDF_MEM: usize = 1 << 30;
-const MAX_KDF_OPS: usize = 1 << 25;
+pub(crate) const MAX_KDF_MEM: usize = 1 << 30;
+pub(crate) const MAX_KDF_OPS: usize = 1 << 25;
 
 impl Kdf {
     /// scrypt with N = 2^17, r = 8, p = 1: 128 MiB, eight times the work of the default, which is about
@@ -100,20 +103,81 @@ impl Kdf {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What the test on this thread makes new accounts of a core without a server at (`None`: `Kdf::local()`), for
+    /// the tests of accounts that were made at another cost.
+    static TEST_LOCAL_KDF: ::std::cell::RefCell<Option<Kdf>> = ::std::cell::RefCell::new(None);
+}
+
+/// What an account of a core without a server is made at.
+fn local_kdf() -> Kdf {
+    #[cfg(test)]
+    {
+        if let Some(kdf) = TEST_LOCAL_KDF.with(|kdf| kdf.borrow().clone()) {
+            return kdf;
+        }
+    }
+    Kdf::local()
+}
+
+/// While this lives, the accounts a core without a server makes on this thread are made at the cost an
+/// account of a Turtl server has (an account kept before the cost was kept with it looks like one).
+#[cfg(test)]
+pub(crate) struct ServerCostAccounts;
+
+#[cfg(test)]
+impl ServerCostAccounts {
+    pub(crate) fn new() -> ServerCostAccounts {
+        TEST_LOCAL_KDF.with(|kdf| *kdf.borrow_mut() = Some(Kdf::default()));
+        ServerCostAccounts
+    }
+}
+
+#[cfg(test)]
+impl Drop for ServerCostAccounts {
+    fn drop(&mut self) {
+        TEST_LOCAL_KDF.with(|kdf| *kdf.borrow_mut() = None);
+    }
+}
+
 /// What a core without a server keeps of an account (in the key-value store, under
 /// `local-account:<username>`): what the server would keep, which is the auth to check a passphrase
 /// against and the user's data (its private part is encrypted with the key the passphrase makes), and
 /// the cost the passphrase was made into a key at.
 #[derive(Serialize, Deserialize)]
-struct LocalAccount {
-    id: String,
-    auth: String,
+pub(crate) struct LocalAccount {
+    pub(crate) id: String,
+    pub(crate) auth: String,
     #[serde(default)]
-    kdf: Kdf,
-    data: Value,
+    pub(crate) kdf: Kdf,
+    pub(crate) data: Value,
+    /// A change of passphrase that was started and not finished (see `PendingChange`). Not there when there
+    /// is none, so an account's record is what it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending: Option<PendingChange>,
 }
 
-fn local_account_key(username: &str) -> String {
+/// What a change of passphrase leaves in the account's record for as long as it takes (see
+/// `User::change_local_passphrase`): what the new passphrase makes (the auth to check it against, the cost it
+/// is made at, the user data sealed with its key) and each of the two keys, the one the old passphrase makes and
+/// the one the new passphrase makes, sealed with the other. The keys of the notebooks are sealed with the
+/// user's key, and they are re-sealed in the user's database, which is a file of its own: no write can reach
+/// both at once. So whichever passphrase is typed next can open the vault, and put right whatever a crash
+/// left half done (`User::settle_local_change`). Anybody who knows either passphrase has both keys while this
+/// is there, which is no more than knowing the old one gave before.
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct PendingChange {
+    auth: String,
+    pub(crate) kdf: Kdf,
+    data: Value,
+    /// The new key, sealed with the old one (base64).
+    new_under_old: String,
+    /// The old key, sealed with the new one (base64).
+    old_under_new: String,
+}
+
+pub(crate) fn local_account_key(username: &str) -> String {
     format!("local-account:{}", username)
 }
 
@@ -126,6 +190,106 @@ fn random_local_user_id() -> TResult<String> {
         Ok(id) => Ok(id.max(1).to_string()),
         Err(e) => TErr!(TError::Msg(format!("user::random_local_user_id() -- {}", e))),
     }
+}
+
+/// The record of the account `username` of a core without a server, if there is one.
+fn read_local_account(turtl: &Turtl, username: &str) -> TResult<Option<LocalAccount>> {
+    let kv_guard = lockr!(turtl.kv);
+    match kv_guard.kv_get(&local_account_key(username))? {
+        Some(stored) => Ok(Some(jedi::parse(&stored)?)),
+        None => Ok(None),
+    }
+}
+
+/// Change the record of an account and keep it. (The key-value store is locked from reading to writing,
+/// so that nothing comes between.)
+fn update_local_account<F>(turtl: &Turtl, username: &str, change: F) -> TResult<()>
+    where F: FnOnce(&mut LocalAccount) -> TResult<()>
+{
+    let kv_key = local_account_key(username);
+    let kv_guard = lockw!(turtl.kv);
+    let mut record: LocalAccount = match kv_guard.kv_get(&kv_key)? {
+        Some(stored) => jedi::parse(&stored)?,
+        None => return TErr!(TError::NotFound(String::from("the account of this vault is not on this device"))),
+    };
+    change(&mut record)?;
+    kv_guard.kv_set(&kv_key, &jedi::stringify(&record)?)
+}
+
+/// A change of passphrase that is worked out and not yet written (see `User::change_local_passphrase`).
+pub(crate) struct LocalChange {
+    username: String,
+    pub(crate) old_key: Key,
+    pub(crate) new_key: Key,
+    new_auth: String,
+    pending: PendingChange,
+}
+
+/// What a pass over the keys that the user's key seals found.
+#[derive(Debug, Default, PartialEq)]
+pub struct Rekeyed {
+    /// Keys that were sealed with the other key and are sealed with the new one now.
+    pub moved: usize,
+    /// Keys that were sealed with the new one already.
+    pub kept: usize,
+    /// Keys that neither key opens: they are left as they are.
+    pub unreadable: usize,
+}
+
+/// The rows of one table of the user's database, sealed with `to` or else with `from`, that are not sealed with
+/// `to`: opened, and sealed again with it (not saved).
+fn resealed_rows<T>(db: &Storage, from: Option<&Key>, to: &Key, found: &mut Rekeyed) -> TResult<Vec<T>>
+    where T: Protected + Storable
+{
+    // a copy of the row, opened with `key` if that is the key that seals it
+    fn opened<T: Protected>(row: &T, key: &Key) -> Option<T> {
+        let mut copy = row.clone().ok()?;
+        copy.set_key(Some(key.clone()));
+        Protected::deserialize(&mut copy).ok().map(|_| copy)
+    }
+    let mut again = Vec::new();
+    for row in db.all::<T>(T::tablename())? {
+        if opened(&row, to).is_some() {
+            found.kept += 1;
+        } else if let Some(mut was) = from.and_then(|key| opened(&row, key)) {
+            was.set_key(Some(to.clone()));
+            Protected::serialize(&mut was)?;
+            again.push(was);
+            found.moved += 1;
+        } else {
+            found.unreadable += 1;
+        }
+    }
+    Ok(again)
+}
+
+/// Seal every row of the user's database that the user's key seals (the keychain's entries, which hold the keys
+/// of the notebooks, and the user's own row if it has one) with `to`. A row is read with `to` or else with
+/// `from`, since a change that was stopped leaves some under one and some under the other; one that neither
+/// opens is left as it is. What is to be written is written in one transaction: all of it or none.
+fn rekey_rows(turtl: &Turtl, from: Option<&Key>, to: &Key) -> TResult<Rekeyed> {
+    let mut found = Rekeyed::default();
+    turtl.with_user_db(|db| {
+        let keys: Vec<KeychainEntry> = resealed_rows(db, from, to, &mut found)?;
+        let users: Vec<User> = resealed_rows(db, from, to, &mut found)?;
+        if keys.is_empty() && users.is_empty() {
+            return Ok(());
+        }
+        db.begin()?;
+        let written = (|| -> TResult<()> {
+            for row in &keys { db.save(row)?; }
+            for row in &users { db.save(row)?; }
+            Ok(())
+        })();
+        match written {
+            Ok(()) => db.commit().map_err(|e| { let _ = db.rollback(); e }),
+            Err(e) => {
+                let _ = db.rollback();
+                Err(e)
+            }
+        }
+    })?;
+    Ok(found)
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -343,7 +507,7 @@ impl User {
             return TErr!(TError::Api(StatusCode::CONFLICT, json!({"error": "that account already exists on this device"})));
         }
         let id = random_local_user_id()?;
-        let record = LocalAccount { id: id.clone(), auth: auth.clone(), kdf, data: userdata.clone() };
+        let record = LocalAccount { id: id.clone(), auth: auth.clone(), kdf, data: userdata.clone(), pending: None };
 
         let mut user_guard_w = lockw!(turtl.user);
         user_guard_w.merge_fields(&userdata)?;
@@ -374,16 +538,33 @@ impl User {
         // (the cost is read from storage, so it is held to what a device can do: a record that asks for
         // more memory than there is would take the whole page down, and one that asks for more work than
         // anyone would wait for would never finish. What a vault is made at (`Kdf::local()`) is far inside this.)
-        if record.kdf.mem > MAX_KDF_MEM || record.kdf.ops > MAX_KDF_OPS {
-            return TErr!(TError::BadValue(format!("user::login_local() -- the account asks for more to log in than this device allows (ops {}, memory {})", record.kdf.ops, record.kdf.mem)));
+        let too_dear = |kdf: &Kdf| -> TResult<()> {
+            if kdf.mem > MAX_KDF_MEM || kdf.ops > MAX_KDF_OPS {
+                return TErr!(TError::BadValue(format!("user::login_local() -- the account asks for more to log in than this device allows (ops {}, memory {})", kdf.ops, kdf.mem)));
+            }
+            Ok(())
+        };
+        too_dear(&record.kdf)?;
+        if let Some(pending) = &record.pending {
+            too_dear(&pending.kdf)?;
         }
         let (key, auth) = generate_auth_with(&username, &password, CURRENT_AUTH_VERSION, &record.kdf)?;
-        if auth != record.auth {
+        // (while a change of passphrase is not finished both passphrases open the vault: see `PendingChange`)
+        let (key, auth, data) = if auth == record.auth {
+            (key, auth, &record.data)
+        } else if let Some(pending) = &record.pending {
+            // (the same cost makes the same key: it is not made twice)
+            let (key, auth) = if pending.kdf == record.kdf { (key, auth) } else { generate_auth_with(&username, &password, CURRENT_AUTH_VERSION, &pending.kdf)? };
+            if auth != pending.auth {
+                return bad_login();
+            }
+            (key, auth, &pending.data)
+        } else {
             return bad_login();
-        }
+        };
         let mut user_guard_w = lockw!(turtl.user);
-        user_guard_w.merge_fields(&record.data)?;
-        user_guard_w.id = Some(record.id);
+        user_guard_w.merge_fields(data)?;
+        user_guard_w.id = Some(record.id.clone());
         user_guard_w.do_login(key, auth);
         if let Err(e) = user_guard_w.deserialize() {
             // a user record that the key doesn't open is no login
@@ -402,10 +583,191 @@ impl User {
             .map(|keys| keys.into_iter().map(|k| k["local-account:".len()..].to_string()).collect())
     }
 
+    /// Change the passphrase of the account a core without a server is logged into.
+    ///
+    /// What the passphrase makes is the user's key, and the keys of the notebooks are sealed with it (the
+    /// keychain's entries in the user's database), as is the private part of the user's own record (in the
+    /// account's record in the key-value store). Those are what is made new: a new key from the new passphrase,
+    /// and everything that was sealed with the old one sealed with it. The notebooks' own keys, and so
+    /// the notes and the files, are not touched, which is why this takes as long as it takes to try a passphrase
+    /// (twice) and no longer, however much there is. (What it can't do follows from that: whoever has a copy
+    /// of the files from before the change, and knows the old passphrase, has the notebooks' keys, and
+    /// the keys don't change.)
+    ///
+    /// The two places can't be written at once, so it goes in steps that a crash can stop between, and
+    /// whichever passphrase is typed next finishes it or undoes it (see `PendingChange`, `settle_local_change`):
+    ///   1. work out the new key, the new auth and user record, and the keys sealed with each other; nothing is written
+    ///   2. write them in the account's record, next to what is there (`pending`): either passphrase opens it now
+    ///   3. seal the keys of the database with the new key, in one transaction: all of them or none
+    ///   4. the new auth and user record become the account's, and `pending` goes
+    /// The core is not asked anything while this runs, so no other command comes between the steps.
+    pub fn change_local_passphrase(turtl: &Turtl, current: String, new: String) -> TResult<Rekeyed> {
+        let change = User::prepare_local_change(turtl, &current, &new)?;
+        User::begin_local_change(turtl, &change)?;
+        let found = match User::rekey_local_keys(turtl, &change) {
+            Ok(found) => found,
+            Err(e) => {
+                // the transaction was undone: the keys are as they were, and so the change is dropped
+                if let Err(e2) = update_local_account(turtl, &change.username, |record| { record.pending = None; Ok(()) }) {
+                    error!("user::change_local_passphrase() -- could not drop the change that did not happen: {}", e2);
+                }
+                return Err(e);
+            }
+        };
+        User::finish_local_change(turtl, change)?;
+        Ok(found)
+    }
+
+    /// Step 1 of `change_local_passphrase`: check what is asked and work out what is to be written.
+    pub(crate) fn prepare_local_change(turtl: &Turtl, current: &String, new: &String) -> TResult<LocalChange> {
+        if !turtl.local_only {
+            return TErr!(TError::PermissionDenied(String::from("only a core without a server changes its passphrase this way: the other has `user:change-password`")));
+        }
+        turtl.user_id()?;
+        let (username, old_key, old_auth, user) = {
+            let user_guard = lockr!(turtl.user);
+            (user_guard.username.clone(), user_guard.key_or_else()?, user_guard.auth.clone(), user_guard.clone()?)
+        };
+        // the same rules as for the passphrase of a new account, and a passphrase that is another one
+        validate_user(&username, new)?;
+        if new == current {
+            return TErr!(TError::BadValue(String::from("the new passphrase is the one it is now")));
+        }
+        let record = match read_local_account(turtl, &username)? {
+            Some(record) => record,
+            None => return TErr!(TError::NotFound(String::from("the account of this vault is not on this device"))),
+        };
+        if record.pending.is_some() {
+            // (the vault has to be locked and unlocked to settle it: a second change on top would seal the
+            // keys of the first with the keys of the second, and the first passphrase could not open it)
+            return TErr!(TError::BadValue(String::from("an earlier change of passphrase is not finished: lock the vault and unlock it again first")));
+        }
+        if turtl.with_user_db(|db| Ok(db.in_batch()))? {
+            return TErr!(TError::BadValue(String::from("a batch of changes is open: it has to be kept or undone first")));
+        }
+        // whoever asks has to know the passphrase that unlocked the vault, not just be at an unlocked one
+        let (_, auth) = generate_auth_with(&username, current, CURRENT_AUTH_VERSION, &record.kdf)?;
+        if old_auth.as_ref() != Some(&auth) {
+            return TErr!(TError::Api(StatusCode::UNAUTHORIZED, json!({"error": "bad login"})));
+        }
+
+        // (the cost of a passphrase is what a vault is made at: an account that was made at another cost is moved to it)
+        let kdf = local_kdf();
+        let (new_key, new_auth) = generate_auth_with(&username, new, CURRENT_AUTH_VERSION, &kdf)?;
+        let data = {
+            let mut next = user;
+            // (the account's data has never held its id: the record has it)
+            next.id = None;
+            next.set_key(Some(new_key.clone()));
+            Protected::serialize(&mut next)?
+        };
+        let pending = PendingChange {
+            auth: new_auth.clone(),
+            kdf: kdf,
+            data: data,
+            new_under_old: protected::encrypt_key(&old_key, new_key.clone())?,
+            old_under_new: protected::encrypt_key(&new_key, old_key.clone())?,
+        };
+        Ok(LocalChange { username: username, old_key: old_key, new_key: new_key, new_auth: new_auth, pending: pending })
+    }
+
+    /// Step 2: write the change next to what the account is. From here either passphrase opens the vault.
+    pub(crate) fn begin_local_change(turtl: &Turtl, change: &LocalChange) -> TResult<()> {
+        update_local_account(turtl, &change.username, |record| {
+            record.pending = Some(change.pending.clone());
+            Ok(())
+        })
+    }
+
+    /// Step 3: seal the keys in the user's database with the new key.
+    pub(crate) fn rekey_local_keys(turtl: &Turtl, change: &LocalChange) -> TResult<Rekeyed> {
+        rekey_rows(turtl, Some(&change.old_key), &change.new_key)
+    }
+
+    /// Step 4: the new passphrase is the account's, and the user in memory has its key from now on.
+    pub(crate) fn finish_local_change(turtl: &Turtl, change: LocalChange) -> TResult<()> {
+        // (the keys in the database are under the new key whatever happens to the record, so this session
+        // goes on with the new key: it saves a notebook's key under the key that opens the others)
+        {
+            let mut user_guard = lockw!(turtl.user);
+            user_guard.do_login(change.new_key.clone(), change.new_auth.clone());
+        }
+        update_local_account(turtl, &change.username, |record| {
+            match record.pending.take() {
+                Some(pending) => {
+                    record.auth = pending.auth;
+                    record.kdf = pending.kdf;
+                    record.data = pending.data;
+                    Ok(())
+                }
+                None => TErr!(TError::MissingField(String::from("the change of passphrase that was being made"))),
+            }
+        }).map_err(|e| toterr!(TError::Msg(format!("the keys were sealed with the new passphrase but the account could not be given it ({}): unlock the vault again, with the passphrase that is to be kept", e))))
+    }
+
+    /// Called when a user has been logged into a core without a server and the user's database is open,
+    /// before the profile is read: if a change of passphrase was left unfinished (the page was closed, the
+    /// device lost power, the disk was full), the passphrase that was just typed settles it. The new one finishes
+    /// it and the old one undoes it, so the passphrase that opened the vault is the one that is the vault's,
+    /// and the keys in the database are the ones it makes. Done in any state a change can be left in (nothing
+    /// sealed with the new key yet, all of it, or, should it ever happen, some), and again if it is stopped
+    /// in the middle of this.
+    ///
+    /// Says whether it settled one, and which way: `Some(true)` when it finished one, `Some(false)` when it undid one.
+    pub(crate) fn settle_local_change(turtl: &Turtl) -> TResult<Option<bool>> {
+        let (username, key, auth) = {
+            let user_guard = lockr!(turtl.user);
+            (user_guard.username.clone(), user_guard.key_or_else()?, user_guard.auth.clone())
+        };
+        let record = match read_local_account(turtl, &username)? {
+            Some(record) => record,
+            None => return Ok(None),
+        };
+        let pending = match &record.pending {
+            Some(pending) => pending.clone(),
+            None => return Ok(None),
+        };
+        let typed_old = auth.as_ref() == Some(&record.auth);
+        let typed_new = !typed_old && auth.as_ref() == Some(&pending.auth);
+        if !typed_old && !typed_new {
+            return TErr!(TError::BadValue(String::from("user::settle_local_change() -- the passphrase that was typed is neither of the two the account has")));
+        }
+        // the other passphrase's key, which the one typed opens
+        let other = protected::decrypt_key(&key, if typed_old { &pending.new_under_old } else { &pending.old_under_new });
+        let other = match other {
+            Ok(other) => Some(other),
+            Err(e) => {
+                warn!("user::settle_local_change() -- the other key of an unfinished change of passphrase can't be had: {}", e);
+                None
+            }
+        };
+        let found = rekey_rows(turtl, other.as_ref(), &key)?;
+        if other.is_none() && found.unreadable > 0 {
+            // some of the keys are not under this key, and the one they may be under can't be had: nothing is
+            // written, so the other passphrase can still be tried
+            return TErr!(TError::BadValue(String::from("this vault was left in the middle of a change of passphrase and it can't be put right with this passphrase: try the other one")));
+        }
+        info!("user::settle_local_change() -- an unfinished change of passphrase was {} ({} keys put under the passphrase that opened the vault, {} already were, {} can't be opened)",
+              if typed_new { "finished" } else { "undone" }, found.moved, found.kept, found.unreadable);
+        update_local_account(turtl, &username, |record| {
+            if let Some(pending) = record.pending.take() {
+                if typed_new {
+                    record.auth = pending.auth;
+                    record.kdf = pending.kdf;
+                    record.data = pending.data;
+                }
+            }
+            Ok(())
+        })?;
+        // (the host tells the person: the passphrase they typed is not necessarily the one they thought they were typing)
+        messaging::ui_event("user:passphrase:settled", &json!({"finished": typed_new, "account": username}))?;
+        Ok(Some(typed_new))
+    }
+
     pub async fn join(turtl: &Turtl, username: String, password: String) -> TResult<()> {
         validate_user(&username, &password)?;
         let username = username.to_lowercase();
-        let kdf = if turtl.local_only { Kdf::local() } else { Kdf::default() };
+        let kdf = if turtl.local_only { local_kdf() } else { Kdf::default() };
         let (key, auth) = generate_auth_with(&username, &password, CURRENT_AUTH_VERSION, &kdf)?;
         let (pk, sk) = crypto::asym::keygen()?;
         let userdata = {

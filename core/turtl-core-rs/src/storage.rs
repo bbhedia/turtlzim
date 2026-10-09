@@ -128,6 +128,11 @@ impl Storage {
         } else {
             Connection::open_with_flags(location, flags)
         }?;
+        // What is replaced or deleted is written over with zeros, not just let go of: a record or a key that was replaced
+        // (a new one that is bigger or smaller does not go where the old was) would otherwise be there in the file as it
+        // was, for whoever reads the file, as long as nothing was written over it. A passphrase that is changed is a
+        // key and a record that are replaced, and it is the old ones that must be gone.
+        conn.execute_batch("PRAGMA secure_delete = ON")?;
 
         // set up dumpy
         let dumpy = Dumpy::new(schema);
@@ -235,6 +240,16 @@ impl Storage {
         where T: Protected + Storable
     {
         Ok(jedi::from_val(Value::Array(self.dumpy.by_id(&self.conn, &String::from(table), &ids)?))?)
+    }
+
+    /// Every row of a table as it is stored, ordered by id (a backup is made of them).
+    pub fn all_values(&self, table: &str) -> TResult<Vec<Value>> {
+        Ok(self.dumpy.all_limit(&self.conn, &String::from(table), None)?)
+    }
+
+    /// Store a row as it is, as `all_values()` gave it (a backup is put back with this).
+    pub fn store_value(&self, table: &str, row: &Value) -> TResult<()> {
+        Ok(self.dumpy.store(&self.conn, &String::from(table), row)?)
     }
 
     /// Grab a value from our dumpy k/v store
@@ -496,6 +511,59 @@ mod tests {
         // and the connection is as good as new: a batch can be had again
         storage.begin().unwrap();
         storage.rollback().unwrap();
+    }
+
+    /// What is replaced or deleted is not left in the file as it was.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn what_is_replaced_or_deleted_is_not_left_in_the_file() {
+        fn contains(haystack: &[u8], needle: &str) -> bool {
+            haystack.windows(needle.len()).any(|window| window == needle.as_bytes())
+        }
+        let nanos = ::std::time::SystemTime::now().duration_since(::std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let folder = ::std::env::temp_dir().join(format!("turtl-test-overwrite-{}-{}", ::std::process::id(), nanos));
+        ::std::fs::create_dir_all(&folder).unwrap();
+        let path = String::from(folder.join("overwrite.sqlite").to_str().unwrap());
+        let marker = |n: u32| format!("A-RECORD-THAT-WAS-{:04}-{}", n, "x".repeat(60));
+        model::set_client_id(String::from("c0f4c762af6c42e4079cced2dfe16b4d010b190ad75ade9d83ff8cee0e96586d")).unwrap();
+        {
+            let storage = Storage::new(&path, json!({})).unwrap();
+            // a value, replaced by a bigger one, and then by a smaller one (neither goes where the one before was)
+            storage.kv_set("account", &marker(1)).unwrap();
+            storage.kv_set("account", &format!("{}{}", marker(2), "y".repeat(900))).unwrap();
+            storage.kv_set("account", &marker(3)).unwrap();
+            // one that is deleted
+            storage.kv_set("other", &marker(4)).unwrap();
+            storage.kv_delete("other").unwrap();
+            // objects (the colour is the part of one that is kept as it is), some kept, one deleted, one replaced twice
+            for n in 5..9 {
+                let mut kept = shiba("kept");
+                kept.color = Some(marker(n));
+                storage.save(&kept).unwrap();
+            }
+            let mut doomed = shiba("doomed");
+            doomed.color = Some(marker(9));
+            storage.save(&doomed).unwrap();
+            storage.delete(&doomed).unwrap();
+            let mut replaced = shiba("replaced");
+            replaced.color = Some(marker(10));
+            storage.save(&replaced).unwrap();
+            replaced.color = Some(format!("{}{}", marker(11), "z".repeat(1500)));
+            storage.save(&replaced).unwrap();
+            replaced.color = Some(marker(12));
+            storage.save(&replaced).unwrap();
+        }
+        let bytes = ::std::fs::read(&path).unwrap();
+        ::std::fs::remove_dir_all(&folder).unwrap();
+        // (what is kept is there: the scan reads the file)
+        assert!(contains(&bytes, &marker(3)), "the value that is kept is not in the file: the scan reads nothing");
+        assert!(contains(&bytes, &marker(12)), "the object that is kept is not in the file");
+        for kept in &[5u32, 6, 7, 8] {
+            assert!(contains(&bytes, &marker(*kept)), "an object that is kept is not in the file");
+        }
+        for gone in &[1u32, 2, 4, 9, 10, 11] {
+            assert!(!contains(&bytes, &marker(*gone)), "{} was replaced or deleted, and is still in the file", marker(*gone));
+        }
     }
 
     crypto_test!(saves_retrieves_models, saves_retrieves_models_body);
