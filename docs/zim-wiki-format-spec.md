@@ -135,7 +135,8 @@ Store the exact dash count so it round-trips byte-identical; don't normalize it.
 ### 2.6 Out of scope for v1 (must still round-trip losslessly)
 
 - **Tables** (`Table_Editor`-style `|...|` grid with an alignment separator row) — a plugin
-  feature, not in the base Wiki_Syntax page.
+  feature, not in the base Wiki_Syntax page. (Still one opaque block here; §2.7 says how one is
+  *read* as a table without parsing ever changing it.)
 - **Object blocks** (`{{{objecttype: params\n...\n}}}`, e.g. code blocks with syntax
   highlighting, equations) — plugin-provided.
 
@@ -144,6 +145,33 @@ their outer shape well enough to treat them as a single **opaque block**: captur
 raw text span (from the block's start line to its end line, inclusive) and re-emit it
 unchanged. Do not let an unrecognized block corrupt surrounding block boundaries (blank-line
 separation before/after must still be tracked normally).
+
+### 2.7 Tables, read as a grid (`core/zim-format/src/table.rs`)
+
+A run of lines that all start and end with `|` is one opaque block (§2.6): **parsing never changes
+it** (`parse(text).serialize() == text`, golden-tested). `table::parse(block)` *reads* such a block as a
+table, to draw it as a grid and to edit it, from the syntax Zim writes and reads:
+
+```text
+| Name  | Count | Note     |      the first line is the header row
+|:------|------:|:--------:|      optional: `:---` left, `---:` right, `:---:` centred, `---` as it comes
+| apple |     3 | a\|b     |      one line for each row; `\|` is a bar in a cell, `\n` a line break in one
+| pear  |    12 |          |
+```
+
+* The **alignment row**, if there is one, is the second line and has nothing but `|`, `-`, `:` and
+  spaces, with at least one `-`; it is not a row. A table has at least one row below its header: a
+  block with a header and nothing else is not a table, and stays lines of text.
+* A line is split into cells at every `|` that is not written `\|`; a cell is what is between two bars,
+  without the spaces round it. In a cell `\n`, `\t`, `\\` and `\|` stand for a line break, a tab, a
+  backslash and a bar; any other backslash is itself. A line with fewer cells than the widest has empty
+  ones after its last.
+* A header cell that ends with `<` marks a column whose cells wrap.
+* **Editing** (`Table::add_row`, `delete_row`, `add_column`, `delete_column`, `set_align`, `render`)
+  writes the whole table again: every column as wide as its widest cell (at least three characters),
+  text kept as written (escapes included), the alignment row only if the table had one or a column is
+  aligned. Nothing but an edit does this: reading, drawing and moving a caret in a table leave its
+  bytes alone. The header can't be deleted, nor the only row below it, nor the only column.
 
 ---
 
@@ -203,6 +231,12 @@ triggers link parsing.
 `@word` anywhere in body text (not inside headings — Zim's own known limitation, which we
 preserve for compatibility) is a tag. Name is `[A-Za-z0-9_]+` immediately after `@`,
 case-insensitive for matching purposes but store the original casing for round-trip.
+
+As implemented (`highlight.rs`, and the index in `core/zim-notebook/src/tags.rs`): the `@` must not
+follow a letter, digit or `_` (so `user@example.org` has no tag), and a tag is not found in a heading,
+a code block or span, a table or object block, or the header. Two spellings that differ only in case
+are one tag (`tag_key`); a notebook's list shows the spelling of the first page, in name order,
+that has it.
 
 ### 3.5 Images / embeds
 

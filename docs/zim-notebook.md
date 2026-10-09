@@ -112,6 +112,41 @@ links that led nowhere are left exactly as written; only link *targets* are edit
 only existed because of the pages that moved away is gone, and a link to it names a missing page.
 A rename that can't be done (nothing there, onto a page that exists, below itself) changes nothing.
 
+## Tags (`tags.rs`)
+
+Every page keeps the `@tags` it writes, found once when its text is set (`tags_in`, which is the format
+crate's own spans: a tag is wherever the parser says one is, see the spec §3.4). `Notebook::tags()` lists every
+tag with its pages (by name, case ignored: `@Garden` and `@garden` are one tag, spelled as the first page that
+has it, in name order, spells it), `pages_with_tag(tag)` and `tags_of(page)` answer for one tag and one page,
+and **`search` takes `@tag` words**: `@garden beans` is the pages that write exactly `@garden` (not
+`@gardening`: a part of a tag is no tag) and have the word `beans`; a tag found scores above a word, and its
+snippet is cut where the tag is. A bare `@` is an ordinary word.
+
+## The journal (`journal.rs`)
+
+A day of the journal is the page `Journal:YYYY:MM:DD` (four, two and two digits, zero-filled, a day that exists,
+`Journal` in any case: `Journal:2026:1:9` and `Journal:2026:02:30` are pages, not days, and so is anything below a
+day: `Journal:2026:10:09:Notes`). `Day::new` checks the date (leap years by the Gregorian rule), `Day::page()` names it,
+`Day::of_page(name)` is its inverse, `Day::weekday()` (Monday is 0) and `Day::title()` (`Friday 09 October 2026`, in
+English) say which day it is, and `Day::page_text(created)` is the text a page of that day starts with: the header
+and the title as its heading. `Notebook::journal_days(year, month)` lists the days of a month that have a page with
+text (a section only holds pages: `Journal:2026:10:05:Child` does not make the 5th a day). The calendar in the web app
+only draws this; its grid of weeks uses the browser's own dates and a test checks the two agree on every day from
+1900 to 2100.
+
+## Completing a link (`complete.rs`)
+
+`Notebook::complete_link(from, typed, limit)`: the pages (and sections: a link to one is a link) that the link
+`[[typed` written on page `from` can be completed to, best first. Ranked by how the typed text (case ignored) meets
+the name: it is the last part of the name, the name's last part starts with it, the whole name does, a part of it does,
+it is somewhere in it; ties go to the page nearer the top of the notebook, then to the name. `+typed` looks only below
+`from` (named from there), `:typed` only for names that start with it, and a bracket in the text gets nothing (it can't be
+written in a link's target; a `#` or `|` is in no page's name, so it finds nothing by itself). A page is not offered a
+link to itself. Each answer comes with **the text to write**:
+`link_to(from, page)`, the shortest link that leads there from `from`, checked and not guessed (`+Garden`, `Garden`,
+`Projects:Garden`, `:Full:Name`), so what is inserted always leads to the page that was chosen: a property test
+resolves every suggestion over random notebooks from random pages.
+
 ## What verifies it
 
 * Tests: hand-written cases, including the manual's own worked example of relative links, search
@@ -130,6 +165,8 @@ A rename that can't be done (nothing there, onto a page that exists, below itsel
 * **Zim's own manual notebook** (81 pages): all 301 page links resolve to existing pages. Weakening
   the lookup to "beside the page only" breaks 79 of them, and dropping underscore-as-space breaks
   161, so the test does discriminate.
+* Tags, journal days and link completion have tests of their own (`tests/tags.rs`, `tests/journal.rs` (every day from
+  1900 to 2100 follows the one before, checked without the code's own calendar), `tests/complete.rs`).
 * Property tests on random notebooks of colliding names (`a:b:c`, `a:c`, ...): `link_to` always
   leads to the page asked for (20,000 cases); after a random rename every link still leads to the
   same (renamed) page, pages change in nothing but link targets, refused renames change nothing
@@ -145,6 +182,7 @@ A rename that can't be done (nothing there, onto a page that exists, below itsel
 Unicode normalization (macOS file systems return decomposed names), Windows reserved names (`CON`),
 a folder that holds only attachments as a section of the tree (the files are kept and moved with
 their section; the folder is not a page), the `href` of an image when its page is renamed, the
-journal sections, tags, and full-text search beyond word matching (the core's SQLite FTS covers
+tag hierarchies and pages for tags, a journal of weeks or months (only days), titles of days in other
+languages than English, and full-text search beyond word matching (the core's SQLite FTS covers
 encrypted notebooks). The notebook's `home` page is the web app's business (`zim-web-app.md`): it
 comes from `notebook.zim` and follows the page when it is renamed.

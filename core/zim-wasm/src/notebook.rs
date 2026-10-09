@@ -101,6 +101,31 @@ pub fn new_page_text(page: &str, created: &str) -> Result<String, JsError> {
     Ok(nb::new_page_text(&name(page)?, created))
 }
 
+/// The page of a day, `Journal:2026:10:09`, or nothing if there is no such day.
+#[wasm_bindgen(js_name = journalPage)]
+pub fn journal_page(year: u32, month: u32, day: u32) -> Option<String> {
+    nb::Day::new(year, month, day).map(|d| d.page().to_string())
+}
+
+/// The day a page is the page of, as `[year, month, day]`, or nothing if it is not one.
+#[wasm_bindgen(js_name = journalDayOf)]
+pub fn journal_day_of(page: &str) -> Option<Vec<u32>> {
+    let name = nb::PageName::parse(page).ok()?;
+    nb::Day::of_page(&name).map(|d| vec![d.year, d.month, d.day])
+}
+
+/// What a day is called at the top of its page (`Friday 09 October 2026`), or nothing if there is no such day.
+#[wasm_bindgen(js_name = journalTitle)]
+pub fn journal_title(year: u32, month: u32, day: u32) -> Option<String> {
+    nb::Day::new(year, month, day).map(|d| d.title())
+}
+
+/// The text a new page of a day starts with (see `newPageText`), or nothing if there is no such day.
+#[wasm_bindgen(js_name = journalPageText)]
+pub fn journal_page_text(year: u32, month: u32, day: u32, created: &str) -> Option<String> {
+    nb::Day::new(year, month, day).map(|d| d.page_text(created))
+}
+
 /// The `[[links]]` in a text, as JSON `[{start, end, targetStart, targetEnd, target, display}]`
 /// with offsets in UTF-16 units (positions in a JavaScript string).
 #[wasm_bindgen(js_name = linksIn)]
@@ -336,8 +361,63 @@ impl Notebook {
         .render()
     }
 
-    /// Pages whose name or text contains every word of `query`, best first, as JSON
-    /// `[{page, snippet, inName}]`.
+    /// The days of a month that have a journal page (with text), as day numbers in order.
+    #[wasm_bindgen(js_name = journalDays)]
+    pub fn journal_days(&self, year: u32, month: u32) -> Vec<u32> {
+        self.inner.journal_days(year, month)
+    }
+
+    /// Every `@tag` written in the notebook with the pages that write it, as JSON `[{name, pages}]`,
+    /// by the tag's name (case ignored; `name` is spelled as the first page that has it spells it).
+    pub fn tags(&self) -> String {
+        J::Arr(
+            self.inner
+                .tags()
+                .into_iter()
+                .map(|t| {
+                    J::Obj(vec![
+                        ("name", s(t.name)),
+                        ("pages", J::Arr(t.pages.iter().map(|p| s(p.as_str())).collect())),
+                    ])
+                })
+                .collect(),
+        )
+        .render()
+    }
+
+    /// The pages that write the tag (with or without its `@`, in any case), in name order.
+    #[wasm_bindgen(js_name = pagesWithTag)]
+    pub fn pages_with_tag(&self, tag: &str) -> Vec<String> {
+        self.inner.pages_with_tag(tag).iter().map(|p| p.to_string()).collect()
+    }
+
+    /// The tags a page writes, each once, in the order they first appear, as written there.
+    #[wasm_bindgen(js_name = tagsOf)]
+    pub fn tags_of(&self, page: &str) -> Vec<String> {
+        match nb::PageName::parse(page) {
+            Ok(n) => self.inner.tags_of(&n),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// The pages that the link being typed on page `from`, `[[typed`, can be completed to, best first, at most
+    /// `limit`, as JSON `[{page, link, exists}]`: `link` is what to write between the brackets to lead there from
+    /// `from`, `exists` whether the page has text of its own (a section only holds other pages).
+    #[wasm_bindgen(js_name = completeLink)]
+    pub fn complete_link(&self, from: &str, typed: &str, limit: usize) -> Result<String, JsError> {
+        let from = name(from)?;
+        Ok(J::Arr(
+            self.inner
+                .complete_link(&from, typed, limit)
+                .into_iter()
+                .map(|c| J::Obj(vec![("page", s(c.page.as_str())), ("link", s(c.link)), ("exists", J::Bool(c.has_page))]))
+                .collect(),
+        )
+        .render())
+    }
+
+    /// Pages whose name or text contains every word of `query`, and that write every `@tag` in it,
+    /// best first, as JSON `[{page, snippet, inName}]`.
     pub fn search(&self, query: &str, limit: usize) -> String {
         J::Arr(
             self.inner
@@ -543,6 +623,12 @@ mod tests {
             nb.link_to("Start", "Help:Links").ok().expect("ok"),
             "Help:Links"
         );
+        assert_eq!(
+            nb.complete_link("Start", "lin", 5).ok().expect("ok"),
+            r#"[{"page":"Help:Links","link":"Help:Links","exists":true}]"#
+        );
+        assert_eq!(nb.complete_link("Help", "+", 5).ok().expect("ok"), r#"[{"page":"Help:Links","link":"+Links","exists":true}]"#);
+        assert_eq!(nb.complete_link("Start", "nothing like it", 5).ok().expect("ok"), "[]");
         assert_eq!(
             nb.backlinks("Help"),
             r#"[{"from":"Help:Links","count":1,"context":"back to Help and Start and nowhere and https://example.org"}]"#

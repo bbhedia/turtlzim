@@ -16,6 +16,7 @@ use crate::files::{
 };
 use crate::link::{classify, link_to, links_in, resolve, Link, LinkKind, LinkRef, PageSet};
 use crate::name::PageName;
+use crate::tags::{tag_key, tags_in, TagRef};
 
 struct Entry {
     name: PageName,
@@ -24,6 +25,9 @@ struct Entry {
     links: Vec<LinkRef>,
     /// The `{{images}}` in `text`.
     images: Vec<ImageRef>,
+    /// The `@tags` in `text`, and the keys of them (see `tag_key`).
+    tags: Vec<TagRef>,
+    tag_keys: HashSet<String>,
     /// What the page reads as with its markup tidied away (see `zim_format::plain_text`), and that in
     /// lower case: what a search looks through.
     plain: String,
@@ -32,7 +36,7 @@ struct Entry {
 
 impl Entry {
     fn new(name: PageName, text: String) -> Entry {
-        let mut entry = Entry { name, text: String::new(), links: Vec::new(), images: Vec::new(), plain: String::new(), plain_lower: String::new() };
+        let mut entry = Entry { name, text: String::new(), links: Vec::new(), images: Vec::new(), tags: Vec::new(), tag_keys: HashSet::new(), plain: String::new(), plain_lower: String::new() };
         entry.set_text(text);
         entry
     }
@@ -40,6 +44,8 @@ impl Entry {
     fn set_text(&mut self, text: String) {
         self.links = links_in(&text);
         self.images = images_in(&text);
+        self.tags = tags_in(&text);
+        self.tag_keys = self.tags.iter().map(|t| tag_key(&t.name)).collect();
         self.plain = plain_text(&text);
         self.plain_lower = self.plain.to_lowercase();
         self.text = text;
@@ -88,6 +94,15 @@ pub struct TreeNode {
     pub has_page: bool,
     /// How many pages and sections lie directly below it.
     pub children: usize,
+}
+
+/// A tag, and the pages that have it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagInfo {
+    /// The tag as the first page that has it (in name order) spells it, without the `@`.
+    pub name: String,
+    /// The pages that write it, in name order.
+    pub pages: Vec<PageName>,
 }
 
 /// A page that links to another.
@@ -157,8 +172,13 @@ pub struct RenameReport {
 /// The text of a new page, as Zim starts one: its header and a title heading.
 /// `created` is a time such as `2026-10-06T09:41:03+02:00`.
 pub fn new_page_text(name: &PageName, created: &str) -> String {
+    page_text_titled(name.last(), created)
+}
+
+/// The text of a new page whose title is `title` (see `new_page_text`).
+pub(crate) fn page_text_titled(title: &str, created: &str) -> String {
     let created: String = created.chars().filter(|c| !c.is_control()).collect();
-    format!("Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\nCreation-Date: {created}\n\n====== {} ======\n", name.last())
+    format!("Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\nCreation-Date: {created}\n\n====== {title} ======\n")
 }
 
 impl Notebook {
@@ -223,6 +243,36 @@ impl Notebook {
     /// The `[[links]]` of a page, as found in its text.
     pub fn links(&self, name: &PageName) -> &[LinkRef] {
         self.pages.get(&name.key()).map_or(&[], |e| &e.links)
+    }
+
+    // ---- tags
+
+    /// Every tag in the notebook with the pages that have it, in the order of the tags' names (case
+    /// ignored).
+    pub fn tags(&self) -> Vec<TagInfo> {
+        let mut found: BTreeMap<String, TagInfo> = BTreeMap::new();
+        for entry in self.pages.values() {
+            for key in &entry.tag_keys {
+                let spelled = entry.tags.iter().find(|t| &tag_key(&t.name) == key).map_or(key.as_str(), |t| t.name.as_str());
+                found.entry(key.clone()).or_insert_with(|| TagInfo { name: spelled.to_string(), pages: Vec::new() }).pages.push(entry.name.clone());
+            }
+        }
+        found.into_values().collect()
+    }
+
+    /// The pages that write the tag `tag` (with or without its `@`, in any case), in name order.
+    pub fn pages_with_tag(&self, tag: &str) -> Vec<PageName> {
+        let key = tag_key(tag);
+        self.pages.values().filter(|e| e.tag_keys.contains(&key)).map(|e| e.name.clone()).collect()
+    }
+
+    /// The tags a page writes, each once, in the order they first appear, as written there.
+    pub fn tags_of(&self, name: &PageName) -> Vec<String> {
+        let mut seen = HashSet::new();
+        match self.pages.get(&name.key()) {
+            Some(entry) => entry.tags.iter().filter(|t| seen.insert(tag_key(&t.name))).map(|t| t.name.clone()).collect(),
+            None => Vec::new(),
+        }
     }
 
     /// Where the link `target`, written on page `from`, leads in this notebook.
@@ -462,11 +512,20 @@ impl Notebook {
         found
     }
 
-    /// Pages whose name or text contains every word of `query` (ignoring case), best first: those
-    /// matching in the name, then by how often the words occur. At most `limit` of them.
+    /// Pages whose name or text contains every word of `query` (ignoring case) and that have every
+    /// `@tag` in it, best first: those matching in the name, then by how often the words and tags
+    /// occur. A word that starts with `@` (and has more after it) is a tag: the page has to write that
+    /// tag, exactly (`@mail` is not `@mailing`). At most `limit` of them.
     pub fn search(&self, query: &str, limit: usize) -> Vec<Hit> {
-        let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
-        if words.is_empty() {
+        let mut words: Vec<String> = Vec::new();
+        let mut wanted_tags: Vec<String> = Vec::new();
+        for word in query.split_whitespace() {
+            match word.strip_prefix('@') {
+                Some(tag) if !tag.is_empty() => wanted_tags.push(tag.to_lowercase()),
+                _ => words.push(word.to_lowercase()),
+            }
+        }
+        if words.is_empty() && wanted_tags.is_empty() {
             return Vec::new();
         }
         let mut scored: Vec<(u32, &Entry, bool, usize)> = Vec::new();
@@ -487,6 +546,19 @@ impl Notebook {
                 score += if name_hit { 100 } else { 0 } + occurrences.min(50) as u32;
                 if let Some(at) = lower.find(word.as_str()) {
                     first_at = Some(first_at.map_or(at, |f| f.min(at)));
+                }
+            }
+            if matches_all {
+                for tag in &wanted_tags {
+                    if !entry.tag_keys.contains(tag) {
+                        matches_all = false;
+                        break;
+                    }
+                    let written = entry.tags.iter().filter(|t| &tag_key(&t.name) == tag).count();
+                    score += 100 + written.min(50) as u32;
+                    if let Some(at) = find_tag(lower, tag) {
+                        first_at = Some(first_at.map_or(at, |f| f.min(at)));
+                    }
                 }
             }
             if matches_all {
@@ -785,6 +857,18 @@ fn line_around(text: &str, at: usize) -> String {
     let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
     let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
     text[start..end].trim().to_string()
+}
+
+/// Where the tag `@key` is written in `lower` (a page's plain text in lower case): the first `@key`
+/// that is a whole tag, not the start of a longer one nor the end of a word.
+fn find_tag(lower: &str, key: &str) -> Option<usize> {
+    let wanted = format!("@{key}");
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    lower.match_indices(wanted.as_str()).map(|(at, _)| at).find(|&at| {
+        let before_ok = !lower[..at].chars().next_back().map_or(false, word);
+        let after_ok = !lower[at + wanted.len()..].chars().next().map_or(false, word);
+        before_ok && after_ok
+    })
 }
 
 /// About 160 characters of `text` around byte `at`, on one line. A window that would leave out only

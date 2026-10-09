@@ -14,8 +14,10 @@
 
 mod json;
 mod notebook;
+mod table;
 
 pub use notebook::*;
+pub use table::*;
 
 use wasm_bindgen::prelude::*;
 use zim_format::highlight::{list_marker, opaque, VERBATIM_UNTERMINATED};

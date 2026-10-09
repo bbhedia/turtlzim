@@ -21,6 +21,7 @@ pub mod header;
 pub mod highlight;
 pub mod inline;
 pub mod plain;
+pub mod table;
 
 pub use block::{
     Block, CheckboxState, Heading, HorizontalRule, ListBlock, ListItem, ListMarker, NumberStyle,

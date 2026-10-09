@@ -9,12 +9,18 @@
 //! files (never their bytes), so the same rules serve every shell. Page text is parsed with
 //! `zim-format`.
 
+pub mod complete;
 pub mod files;
+pub mod journal;
 pub mod link;
 pub mod name;
 pub mod notebook;
+pub mod tags;
 
+pub use complete::LinkSuggestion;
 pub use files::{check_file_path, images_in, relative_file_text, resolve_file, safe_file_name, unique_file_name, FileError, FileSet, FileTarget, ImageRef};
 pub use link::{anchors_in, classify, heading_id, link_to, links_in, resolve, AnchorRef, Link, LinkKind, LinkRef, PageSet};
+pub use journal::{days_in_month, is_leap_year, Day, JOURNAL};
 pub use name::{NameError, PageName, FORBIDDEN};
-pub use notebook::{new_page_text, Backlink, Hit, Notebook, RenameError, RenameReport, TreeNode};
+pub use notebook::{new_page_text, Backlink, Hit, Notebook, RenameError, RenameReport, TagInfo, TreeNode};
+pub use tags::{tag_key, tags_in, TagRef};

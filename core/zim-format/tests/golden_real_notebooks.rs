@@ -414,3 +414,47 @@ fn real_notebooks_survive_the_file_layer() {
     );
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
+
+/// The tables in real pages (the manual has one that Zim itself wrote): each is read as a table, every cell is where the text
+/// says it is, and written out again it is read as the same table. (Reading is all that is asked of the pages: nothing here
+/// changes one.)
+#[test]
+#[ignore = "needs a corpus of real Zim pages: set ZIM_GOLDEN_DIR (see the module docs)"]
+fn real_tables_are_read_and_laid_out_again_as_the_same_table() {
+    use zim_format::highlight::opaque;
+    use zim_format::table::parse;
+    let mut found = 0usize;
+    let mut problems = Vec::new();
+    for path in corpus() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for span in zim_format::highlight(&text) {
+            if span.kind != zim_format::SpanKind::Opaque || span.detail != opaque::TABLE {
+                continue;
+            }
+            let block = &text[span.start..span.end];
+            found += 1;
+            let Some(layout) = parse(block) else {
+                problems.push(format!("{}: {block:?} is not read as a table", path.display()));
+                continue;
+            };
+            for row in &layout.rows {
+                for cell in &row.cells {
+                    if block[cell.start..cell.end].trim() != cell.raw {
+                        problems.push(format!("{}: a cell is not where the text says: {block:?}", path.display()));
+                    }
+                }
+            }
+            let table = layout.table();
+            let written = table.render(layout.align_line.is_some());
+            match parse(&written) {
+                Some(again) if again.table().rows == table.rows && again.aligns == layout.aligns && again.wraps == layout.wraps => {}
+                other => problems.push(format!("{}: written out again {written:?} it is {other:?}, not the same table as {block:?}", path.display())),
+            }
+        }
+    }
+    println!("\n{found} tables in the real pages");
+    assert!(found > 0, "no tables in the corpus: the manual has one");
+    assert!(problems.is_empty(), "{} tables are not read as they are written:\n{}", problems.len(), problems.join("\n"));
+}
