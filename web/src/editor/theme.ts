@@ -26,6 +26,21 @@ export const zimTheme = EditorView.theme({
   },
   ".cm-specialChar": { color: "var(--zim-muted, #8c959f)" },
 
+  // what the editor opens beside the text (the pages a link can be completed to)
+  ".cm-tooltip": {
+    backgroundColor: "var(--zim-bg, #ffffff)",
+    color: "var(--zim-fg, #1f2328)",
+    border: "1px solid var(--zim-border, #d0d7de)",
+    borderRadius: "8px",
+    boxShadow: "var(--shadow, 0 8px 24px rgba(31, 35, 40, .18))",
+    overflow: "hidden",
+  },
+  ".cm-tooltip.cm-tooltip-autocomplete > ul": { fontFamily: "var(--zim-font, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif)", fontSize: ".95em", maxHeight: "16em" },
+  ".cm-tooltip.cm-tooltip-autocomplete > ul > li": { padding: ".3em .8em" },
+  ".cm-tooltip-autocomplete ul li[aria-selected]": { backgroundColor: "var(--zim-selection, #b4d5ff)", color: "var(--zim-fg, #1f2328)" },
+  ".cm-completionDetail": { color: "var(--zim-muted, #6e7781)", marginLeft: ".8em", fontStyle: "normal" },
+  ".cm-completionMatchedText": { textDecoration: "none", fontWeight: "700" },
+
   // headings
   ".cm-zim-heading": { fontWeight: "700", lineHeight: "1.3" },
   ".cm-zim-h1": { fontSize: "1.9em", paddingTop: ".5em" },
@@ -53,6 +68,7 @@ export const zimTheme = EditorView.theme({
     backgroundColor: "var(--zim-tag-bg, rgba(154, 103, 0, .1))",
     borderRadius: "4px",
     padding: "0 .2em",
+    cursor: "pointer",
   },
 
   // links
@@ -113,6 +129,43 @@ export const zimTheme = EditorView.theme({
   ".cm-zim-code-last": { borderBottomLeftRadius: "6px", borderBottomRightRadius: "6px", marginBottom: ".4em" },
   ".cm-zim-code-open": { boxShadow: "inset 3px 0 0 var(--zim-warn, #bf8700)" },
   ".cm-zim-opaque": { color: "var(--zim-muted, #57606a)", boxShadow: "inset 3px 0 0 var(--zim-border, #d0d7de)" },
+  // a table: a grid while the caret is elsewhere (its cells show their text formatted); the text it is written as, with a toolbar, while it is edited
+  ".cm-zim-grid-wrap": { overflowX: "auto", margin: ".35em 0", padding: "0 .125rem", cursor: "text" },
+  ".cm-zim-grid": { borderCollapse: "collapse", fontSize: ".95em", lineHeight: "1.45" },
+  ".cm-zim-grid th, .cm-zim-grid td": {
+    border: "1px solid var(--zim-border, #d0d7de)",
+    padding: ".25em .7em",
+    verticalAlign: "top",
+    whiteSpace: "pre",
+    textAlign: "left",
+  },
+  ".cm-zim-grid th": { backgroundColor: "var(--zim-code-bg, #f0f1f3)", fontWeight: "650" },
+  ".cm-zim-grid .cm-zim-wrap": { whiteSpace: "pre-wrap", minWidth: "10em" },
+  ".cm-zim-grid .cm-zim-align-right": { textAlign: "right" },
+  ".cm-zim-grid .cm-zim-align-center": { textAlign: "center" },
+  ".cm-zim-grid td:empty::after, .cm-zim-grid th:empty::after": { content: '"\\00a0"' },
+  ".cm-zim-table-toolbar": {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: ".25rem",
+    padding: ".3rem .125rem .2rem",
+    fontFamily: "var(--zim-font, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif)",
+    fontSize: ".8rem",
+    lineHeight: "1.2",
+  },
+  ".cm-zim-table-toolbar button": {
+    padding: ".15rem .55rem",
+    border: "1px solid var(--zim-border, #d0d7de)",
+    borderRadius: "5px",
+    backgroundColor: "var(--zim-bg, #ffffff)",
+    color: "var(--zim-fg, #1f2328)",
+    font: "inherit",
+    cursor: "pointer",
+  },
+  ".cm-zim-table-toolbar button:hover:not(:disabled)": { borderColor: "var(--zim-muted, #6e7781)" },
+  ".cm-zim-table-toolbar button:disabled": { opacity: ".45", cursor: "default" },
+  ".cm-zim-table-toolbar button[aria-pressed=true]": { backgroundColor: "var(--zim-selection, #b4d5ff)" },
+  ".cm-zim-table-toolbar button:focus-visible": { outline: "2px solid var(--zim-link, #0b57d0)", outlineOffset: "1px" },
   ".cm-zim-rule": {
     display: "inline-block",
     width: "100%",

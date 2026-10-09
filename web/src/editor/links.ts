@@ -37,6 +37,12 @@ function imageInfo(state: EditorState, from: number, to: number): LinkInfo | nul
   return { kind: "image", target: image.path, label: image.alt || image.path, from, to, ...(href ? { href } : {}) };
 }
 
+/** A link to follow, made from its target as it is written somewhere that is not the page's own text (a cell of a table, drawn as a grid): `from` and `to` say where that is. */
+export function linkToFollow(target: string, from: number, to: number): LinkInfo {
+  const kind = classifyLink(target);
+  return { kind, target: withMailto(kind, target), label: target, from, to };
+}
+
 /** The image that starts at `pos` (where a picture drawn in its place sits). */
 export function imageAt(state: EditorState, pos: number): LinkInfo | null {
   const spans = spansOf(state);
@@ -71,6 +77,22 @@ export function linkAt(state: EditorState, pos: number): LinkInfo | null {
       const linkKind = classifyLink(target);
       return { kind: linkKind, target: withMailto(linkKind, target), label, from, to };
     }
+  }
+  return null;
+}
+
+/** A tag in the text: its name (without the `@`) and where it is written. */
+export interface TagAt {
+  name: string;
+  from: number;
+  to: number;
+}
+
+/** The tag whose source contains `pos` (both edges count as inside, like a caret touching it). */
+export function tagAt(state: EditorState, pos: number): TagAt | null {
+  const spans = spansOf(state);
+  for (let i = 0; i < spans.length && spans.start(i) <= pos; i++) {
+    if (spans.kind(i) === Kind.Tag && spans.end(i) >= pos) return { name: state.sliceDoc(spans.start(i) + 1, spans.end(i)), from: spans.start(i), to: spans.end(i) };
   }
   return null;
 }

@@ -167,7 +167,10 @@ mark { background: rgba(255, 213, 0, 0.35); color: inherit; border-radius: 2px; 
 
 /* ---- the page tree ------------------------------------------------------------------------ */
 
-.sidebar { grid-area: side; overflow: auto; border-right: 1px solid var(--zim-border); background: var(--bar-bg); }
+.sidebar { grid-area: side; display: flex; flex-direction: column; min-height: 0; overflow: hidden; border-right: 1px solid var(--zim-border); background: var(--bar-bg); }
+/* the tree scrolls by itself, and the lists below it (contents, calendar, tags) stay in reach */
+.side-main { flex: 1 1 14rem; min-height: 5rem; overflow: auto; }
+.side-panels { flex: 0 1 auto; max-height: 62%; overflow: auto; border-top: 1px solid var(--zim-border); }
 .sidebar-tools { display: flex; gap: 0.4rem; padding: 0.5rem 0.6rem; }
 .sidebar-tools button { font-size: 0.8rem; padding: 0.15rem 0.5rem; }
 .tree { padding: 0 0.4rem 1rem; }
@@ -187,6 +190,34 @@ mark { background: rgba(255, 213, 0, 0.35); color: inherit; border-radius: 2px; 
 .chevron.spacer { cursor: default; }
 .caret { border: 4px solid transparent; border-top-color: var(--zim-muted); margin-top: 4px; }
 .caret.folded { border-top-color: transparent; border-left-color: var(--zim-muted); margin: 0 0 0 4px; }
+
+/* ---- the sidebar's lists: contents, calendar, tags ---------------------------------------- */
+
+.panel { padding: 0.4rem 0.7rem 0.55rem; border-bottom: 1px solid var(--zim-border); }
+.panel:last-child { border-bottom: 0; }
+.panel > summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; }
+.panel-list { list-style: none; margin: 0.35rem 0 0; padding: 0; font-size: 0.88rem; }
+.panel-list .none { color: var(--zim-muted); }
+.panel-list .link-button { display: block; max-width: 100%; padding: 0.1rem 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.contents-list li { padding-left: calc(var(--level, 0) * 0.85rem); }
+.tags-list { display: flex; flex-wrap: wrap; gap: 0.1rem 0.8rem; }
+.tags-list .link-button { display: inline; }
+.tag-name { color: var(--zim-tag); }
+
+.calendar-head { display: flex; align-items: center; justify-content: space-between; margin-top: 0.3rem; }
+.calendar-title { font-weight: 600; font-size: 0.88rem; }
+.calendar-step { padding: 0 0.55rem; border: 0; background: none; font-size: 1.15rem; line-height: 1.4; }
+.calendar-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.calendar-weekday { text-align: center; font-size: 0.72rem; color: var(--zim-muted); padding: 0.2rem 0; }
+.calendar-day { position: relative; width: 100%; padding: 0.22rem 0; border: 1px solid transparent; border-radius: 5px; background: none; font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+.calendar-day:hover:not(:disabled) { background: var(--row-hover); border-color: transparent; }
+/* a day with a page: bold, and a dot (two signs, so that it is not told by one of them alone) */
+.calendar-day.has-page { font-weight: 700; }
+.calendar-day.has-page::after { content: ""; position: absolute; left: 50%; bottom: 1px; width: 4px; height: 4px; margin-left: -2px; border-radius: 50%; background: var(--zim-link); }
+.calendar-day.today { border-color: var(--zim-muted); }
+.calendar-day.selected { background: var(--zim-selection); }
+.calendar-foot { display: flex; justify-content: center; margin-top: 0.3rem; }
+.calendar-today { font-size: 0.8rem; padding: 0.1rem 0.7rem; }
 
 /* ---- the page ---------------------------------------------------------------------------- */
 

@@ -9,6 +9,10 @@ import {
   classifyLink as wasmClassifyLink,
   headingId as wasmHeadingId,
   imagesIn as wasmImagesIn,
+  journalDayOf as wasmJournalDayOf,
+  journalPage as wasmJournalPage,
+  journalPageText as wasmJournalPageText,
+  journalTitle as wasmJournalTitle,
   linksIn as wasmLinksIn,
   newPageText as wasmNewPageText,
   pageKey as wasmPageKey,
@@ -48,6 +52,23 @@ export interface Backlink {
   count: number;
   /** The line holding the first of the links. */
   context: string;
+}
+
+/** A tag (`@name`) and the pages that write it. */
+export interface TagInfo {
+  /** The name without the `@`, as the first page (in name order) that writes it spells it. */
+  name: string;
+  /** In name order. */
+  pages: string[];
+}
+
+/** A page that a link being typed can lead to. */
+export interface LinkSuggestion {
+  page: string;
+  /** What to write between the brackets, on the page it was asked from, to lead there. */
+  link: string;
+  /** Whether the page has text of its own (a section only holds other pages). */
+  exists: boolean;
 }
 
 export interface SearchHit {
@@ -160,6 +181,48 @@ export function pathToPage(path: string): string {
 export function newPageText(page: string, created: string): string {
   assertZimReady();
   return wasmNewPageText(page, created);
+}
+
+/** A day of the journal: the pages of days are called `Journal:2026:10:09`. */
+export interface JournalDay {
+  year: number;
+  /** 1 to 12. */
+  month: number;
+  day: number;
+}
+
+/** The page of a day, or undefined if there is no such day (the notebook's rules: years 1 to 9999, months and days that exist). */
+export function journalPage(day: JournalDay): string | undefined {
+  assertZimReady();
+  return wasmJournalPage(day.year, day.month, day.day) ?? undefined;
+}
+
+/** The day a page is the page of (written the way the journal writes it), or undefined if it is not one. */
+export function journalDayOf(page: string): JournalDay | undefined {
+  assertZimReady();
+  const found = wasmJournalDayOf(page);
+  return found ? { year: found[0]!, month: found[1]!, day: found[2]! } : undefined;
+}
+
+/** What a day is called at the top of its page: `Friday 09 October 2026`. */
+export function journalTitle(day: JournalDay): string | undefined {
+  assertZimReady();
+  return wasmJournalTitle(day.year, day.month, day.day) ?? undefined;
+}
+
+/** The text a new page of a day starts with (see `newPageText`). */
+export function journalPageText(day: JournalDay, created: string): string | undefined {
+  assertZimReady();
+  return wasmJournalPageText(day.year, day.month, day.day, created) ?? undefined;
+}
+
+/**
+ * What a page that doesn't exist yet starts with: the header and a title. The page of a day of the journal
+ * has the day as its title, `Friday 09 October 2026`; any other has the last part of its name.
+ */
+export function startingText(page: string, created: string): string {
+  const day = journalDayOf(page);
+  return (day && journalPageText(day, created)) || newPageText(page, created);
 }
 
 /** The `[[links]]` of a text. */
@@ -290,8 +353,34 @@ export class NotebookModel {
     return JSON.parse(this.inner.backlinks(page)) as Backlink[];
   }
 
+  /** The days of a month that have a journal page with text, as day numbers in order. */
+  journalDays(year: number, month: number): number[] {
+    return [...this.inner.journalDays(year, month)];
+  }
+
+  /** Every `@tag` of the notebook with its pages, by name (case ignored). */
+  tags(): TagInfo[] {
+    return JSON.parse(this.inner.tags()) as TagInfo[];
+  }
+
+  /** The pages that write a tag (named with or without the `@`, in any case), in name order. */
+  pagesWithTag(tag: string): string[] {
+    return this.inner.pagesWithTag(tag);
+  }
+
+  /** The tags a page writes, each once, in the order they first appear. */
+  tagsOf(page: string): string[] {
+    return this.inner.tagsOf(page);
+  }
+
+  /** Pages with every word of the query in their name or text, and every `@tag` in it written (see core/zim-notebook). */
   search(query: string, limit = 50): SearchHit[] {
     return JSON.parse(this.inner.search(query, limit)) as SearchHit[];
+  }
+
+  /** The pages the link `[[typed` written on page `from` can be completed to, best first (see `Notebook::complete_link`). */
+  completeLink(from: string, typed: string, limit = 20): LinkSuggestion[] {
+    return JSON.parse(this.inner.completeLink(from, typed, limit)) as LinkSuggestion[];
   }
 
   // ---- files (attachments): paths only; the bytes are for a store

@@ -149,6 +149,12 @@ function driver(page, context) {
         window.__zim.editor.setText(t);
         document.querySelector(".page").scrollTop = 0;
       }, text),
+    /** Replace the whole page as a change, as pasting over it would: unlike `setText` (what opening a page does) it is noticed, and saved. */
+    replaceText: (text) =>
+      page.evaluate((t) => {
+        const { view } = window.__zim.editor;
+        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: t } });
+      }, text),
     // Put the caret there, in view, and let the editor finish scrolling and drawing before anything
     // is typed: keys sent with no pause (as a program does) while the editor scrolls the caret into
     // view can land in the middle of it, which no person typing can.
@@ -182,6 +188,8 @@ function driver(page, context) {
       await page.keyboard.type(text);
     },
     inEditor: () => page.evaluate(() => document.activeElement?.closest(".cm-editor") != null),
+    /** The focus is in the text of the page itself (a button drawn inside the editor, a table's toolbar, is in the editor but not in the text). */
+    inText: () => page.evaluate(() => document.activeElement?.classList.contains("cm-content") ?? false),
     // the app
     current: () => page.evaluate(() => window.__zim.app.current?.name ?? null),
     waitCurrent: (name) => page.waitForFunction((n) => window.__zim.app.current?.name === n, name),
@@ -552,18 +560,20 @@ try {
     assertEqual(await ui.focusedRow(), "Ideas", "Down moves to the next row");
     await page.keyboard.press("ArrowDown");
     assertEqual(await ui.focusedRow(), "Journal", "Down again");
+    await page.keyboard.press("ArrowDown");
+    assertEqual(await ui.focusedRow(), "Projects", "and again");
     await page.keyboard.press("ArrowRight");
-    assert((await ui.rows()).includes("Journal:2026-10-06"), "Right unfolds a section");
-    assertEqual(await ui.focusedRow(), "Journal", "and stays on it");
+    assert((await ui.rows()).includes("Projects:Garden"), "Right unfolds a section");
+    assertEqual(await ui.focusedRow(), "Projects", "and stays on it");
     await page.keyboard.press("ArrowRight");
-    assertEqual(await ui.focusedRow(), "Journal:2026-10-06", "Right on an unfolded section goes into it");
+    assertEqual(await ui.focusedRow(), "Projects:Garden", "Right on an unfolded section goes into it");
     await page.keyboard.press("Enter");
-    await ui.waitCurrent("Journal:2026-10-06");
-    assertEqual(await ui.focusedRow(), "Journal:2026-10-06", "the page opened, and the focus is still in the tree");
+    await ui.waitCurrent("Projects:Garden");
+    assertEqual(await ui.focusedRow(), "Projects:Garden", "the page opened, and the focus is still in the tree");
     await page.keyboard.press("ArrowLeft");
-    assertEqual(await ui.focusedRow(), "Journal", "Left goes to the section above");
+    assertEqual(await ui.focusedRow(), "Projects", "Left goes to the section above");
     await page.keyboard.press("ArrowLeft");
-    assert(!(await ui.rows()).includes("Journal:2026-10-06"), "Left on an unfolded section folds it");
+    assert(!(await ui.rows()).includes("Projects:Garden"), "Left on an unfolded section folds it");
     await page.keyboard.press("End");
     assertEqual(await ui.focusedRow(), "Projects", "End goes to the last row");
     await page.keyboard.press("Home");
@@ -580,8 +590,8 @@ try {
     assertEqual(await page.locator(".cm-zim-h1").first().innerText(), "The editor", "the page it leads to is shown");
     assert(await ui.inEditor(), "and the cursor is in it, ready to write");
     await ui.goto("Home");
-    await page.locator(".cm-zim-link", { hasText: "Today's journal" }).click({ modifiers: ["Control"] });
-    await ui.waitCurrent("Journal:2026-10-06");
+    await page.locator(".cm-zim-link", { hasText: "A day of the journal" }).click({ modifiers: ["Control"] });
+    await ui.waitCurrent("Journal:2026:10:06");
     // a link to a place on the page it is on moves there instead
     await ui.goto("Help:Links");
     await page.locator(".cm-zim-link", { hasText: "A link to a heading on this page" }).click({ modifiers: ["Control"] });
@@ -626,16 +636,18 @@ try {
     const { page } = ui;
     await ui.goto("Projects:Garden");
     const names = await ui.backlinks();
-    for (const expected of ["Home", "Journal:2026-10-06", "Projects", "Projects:Garden:Plan", "Help:Links"]) {
+    for (const expected of ["Home", "Journal:2026:10:06", "Projects", "Projects:Garden:Plan", "Help:Links"]) {
       assert(names.includes(expected), `${expected} links to the garden (saw ${JSON.stringify(names)})`);
     }
     for (const unexpected of ["Ideas", "Help:Editor", "Projects:Garden"]) assert(!names.includes(unexpected), `${unexpected} does not link to the garden`);
     assertEqual(await page.locator(".backlinks summary .count").innerText(), `(${names.length})`, "the count agrees with the list");
-    const journal = page.locator(".backlink-list li", { hasText: "Journal:2026-10-06" });
+    // (the page of the day is the one whose button says so: the help pages about the journal and tags say its name in their lines too)
+    const journal = page.locator(".backlink-list li").filter({ has: page.getByRole("button", { name: "Journal:2026:10:06", exact: true }) });
     assertEqual(await journal.locator(".context").innerText(), "Morning: cleared the beds (Projects:Garden). Wrote down some thoughts in Ideas.", "the line is plain prose, without markup");
     await journal.locator(".link-button").click();
-    await ui.waitCurrent("Journal:2026-10-06");
-    assertEqual(await page.locator(".backlinks summary .count").innerText(), "(2)", "a page's own links count too: Home and the garden link to the journal");
+    await ui.waitCurrent("Journal:2026:10:06");
+    assertDeepEqual(await ui.backlinks(), ["Help:Journal", "Help:Tags", "Home", "Projects:Garden"], "the pages that link to the day: two help pages, Home and the garden");
+    assertEqual(await page.locator(".backlinks summary .count").innerText(), "(4)", "and they are counted");
     // a page that nothing links to
     await page.getByRole("button", { name: "New page", exact: true }).click();
     await ui.confirmDialog("Create", { "Page name": "Journal:Lonely" });
@@ -711,7 +723,7 @@ try {
     const after = await ui.allPages();
     assertDeepEqual(Object.keys(after).sort(), Object.keys(before).map((n) => n.replace(/^Projects:Garden/, "Projects:Allotment")).sort(), "the page and its sub-page moved, and no other page came or went");
     assertEqual(after.Home, before.Home.replace("[[Projects:Garden]]", "[[Projects:Allotment]]"), "Home's link follows the page, and nothing else on Home changed");
-    assertEqual(after["Journal:2026-10-06"], before["Journal:2026-10-06"].replace("[[Projects:Garden]]", "[[Projects:Allotment]]"), "so does the journal's");
+    assertEqual(after["Journal:2026:10:06"], before["Journal:2026:10:06"].replace("[[Projects:Garden]]", "[[Projects:Allotment]]"), "so does the journal's");
     for (const name of ["Ideas", "Help:Editor", "Projects:Reading List"]) assertEqual(after[name], before[name], `${name} didn't link to it and wasn't touched`);
     assertDeepEqual((await ui.backlinks()).sort(), linkingBefore.map((n) => n.replace(/^Projects:Garden/, "Projects:Allotment")).sort(), "the same pages link to it as did before (the sub-page having moved too)");
     assertEqual(await page.locator(".cm-zim-link-missing").count(), 0, "and none of the links on this page leads nowhere");
@@ -831,6 +843,451 @@ try {
     await page.keyboard.press("Escape");
     assertEqual(await search.inputValue(), "", "Escape empties the box");
     assert(await page.locator("#search-results").isHidden(), "and closes the results");
+  });
+
+  // ==========================================================================================
+  // What Zim has beside the page itself: its contents, the journal and its calendar, tags,
+  // completing a link, and tables
+  // ==========================================================================================
+
+  await app("the contents list shows the headings of the page, goes to one when it is clicked, follows what is typed, and is remembered open or closed", {}, async (ui) => {
+    const { page } = ui;
+    const items = () => page.locator(".contents-list li .link-button").allInnerTexts();
+    await ui.goto("Help:Editor");
+    assertDeepEqual(await items(), ["The editor", "Lists", "Finding your way", "Code"], "the headings of the page, in order, as text (no markup)");
+    assertEqual(await page.locator("details.contents summary .count").innerText(), "(4)", "and how many there are");
+    assertDeepEqual(await page.locator(".contents-list li").evaluateAll((li) => li.map((el) => el.style.getPropertyValue("--level"))), ["0", "1", "1", "1"], "the biggest heading is the top and the others are below it");
+    // a click goes there: the caret is on the heading, in view, and the page can be written in
+    await page.locator(".contents-list .link-button", { hasText: "Code" }).click();
+    const line = await page.evaluate(() => {
+      const { state } = window.__zim.editor.view;
+      return state.doc.lineAt(state.selection.main.head).text;
+    });
+    assertEqual(line, "===== Code =====", "the caret is on the heading");
+    assert(await ui.inEditor(), "and the editor has the focus");
+    const heading = await page.locator(".cm-zim-h2", { hasText: "Code" }).boundingBox();
+    assert(heading && heading.y >= 0 && heading.y < 900, `the heading is in view (at ${heading?.y})`);
+    // what is typed shows in it, a moment later
+    await ui.typeAtEnd("\n===== Added later =====\n");
+    await page.waitForFunction(() => [...document.querySelectorAll(".contents-list .link-button")].some((b) => b.textContent === "Added later"));
+    assertDeepEqual(await items(), ["The editor", "Lists", "Finding your way", "Code", "Added later"], "a heading that was typed is in it");
+    // markup in a heading is not part of what it says
+    await ui.replaceText("====== A **bold** and [[Home|linked]] title ======\n\ntext\n");
+    await page.waitForFunction(() => document.querySelector(".contents-list .link-button")?.textContent === "A bold and linked title");
+    // a page with no headings says so
+    await ui.replaceText("just text\n");
+    await page.locator(".contents-list .none").waitFor();
+    assertEqual(await page.locator(".contents-list .none").innerText(), "This page has no headings.", "...");
+    // open or closed is remembered, as a setting of the app
+    assert(await page.locator("details.contents").evaluate((el) => el.open), "it starts open");
+    await page.locator("details.contents summary").click();
+    await ui.reload();
+    assert(!(await page.locator("details.contents").evaluate((el) => el.open)), "and closed stays closed after a reload");
+  });
+
+  await app("the calendar marks the days that have a page, opens a day's page, and starts a day's page with the day as its title", { fixedTime: new Date("2026-10-09T10:00:00") }, async (ui) => {
+    const { page } = ui;
+    const day = (n) => page.locator(`.calendar-day[data-date="2026-10-${String(n).padStart(2, "0")}"]`);
+    const title = () => page.locator(".calendar-title").innerText();
+    assertEqual(await title(), "October 2026", "it starts on this month");
+    assertDeepEqual(await page.locator(".calendar-weekday").allInnerTexts(), ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"], "weeks start on Monday");
+    assertEqual(await page.locator(".calendar-day").count(), 31, "every day of October is there");
+    const firstWeek = await page.locator(".calendar-week").nth(1).locator("[role=gridcell]").evaluateAll((cells) => cells.map((c) => c.querySelector("button")?.textContent ?? ""));
+    assertDeepEqual(firstWeek, ["", "", "", "1", "2", "3", "4"], "October 2026 starts on a Thursday");
+    assert((await day(9).getAttribute("class")).includes("today"), "today is marked");
+    assertEqual(await day(9).getAttribute("aria-label"), "9 October 2026, today", "and said to those who can't see it");
+    assertEqual(await day(6).getAttribute("aria-label"), "6 October 2026, has a page", "as is a day with a page");
+    assertDeepEqual(await page.locator(".calendar-day.has-page").evaluateAll((days) => days.map((d) => d.textContent)), ["6"], "the sample's one journal page is the only day marked");
+    // a day with a page opens it
+    await day(6).click();
+    await ui.waitCurrent("Journal:2026:10:06");
+    assertEqual(await day(6).getAttribute("aria-pressed"), "true", "the day of the page that is open is marked");
+    assert((await day(6).getAttribute("class")).includes("selected"), "...");
+    // a day with none is shown as a new page: it starts with the day, and is made when something is written
+    await day(9).click();
+    await ui.waitCurrent("Journal:2026:10:09");
+    assert((await ui.text()).endsWith("====== Friday 09 October 2026 ======\n"), "it starts with the day as its title");
+    assert(!(await ui.names()).includes("Journal:2026:10:09"), "looking at it does not make it");
+    assert(await ui.inEditor(), "and the caret is in it, to write");
+    assertEqual(await day(6).getAttribute("aria-pressed"), "false", "the day before is not the open page's any more");
+    await page.keyboard.type("Planted the beans.");
+    await ui.flush();
+    assert((await ui.names()).includes("Journal:2026:10:09"), "typing made the page");
+    assert((await day(9).getAttribute("class")).includes("has-page"), "and its day is marked");
+    // other months
+    await page.getByRole("button", { name: "Next month" }).click();
+    assertEqual(await title(), "November 2026", "the next month");
+    assertEqual(await page.locator(".calendar-day").count(), 30, "of thirty days");
+    assertEqual(await page.locator(".calendar-day.has-page").count(), 0, "with no page in it");
+    await page.getByRole("button", { name: "Previous month" }).click();
+    await page.getByRole("button", { name: "Previous month" }).click();
+    assertEqual(await title(), "September 2026", "and two months back");
+    assertEqual(await page.locator(".calendar-day").count(), 30, "...");
+    // Today comes back, and opens today's page
+    await ui.goto("Home");
+    assertEqual(await page.locator(".calendar-day.selected").count(), 0, "a page that is no day is no day's");
+    assertEqual(await title(), "September 2026", "(and the month stays where it was)");
+    await page.locator(".calendar-today").click();
+    await ui.waitCurrent("Journal:2026:10:09");
+    assertEqual(await title(), "October 2026", "Today goes to this month");
+    // so does the menu
+    await ui.goto("Home");
+    await ui.chooseFromMenu("Today's journal");
+    await ui.waitCurrent("Journal:2026:10:09");
+    // a day's page has the day in the tree, as Zim has it
+    assert((await ui.rows()).includes("Journal:2026:10:09"), "the page is in the tree below its year and month");
+    // the calendar follows a page that is made or deleted some other way
+    await ui.goto("Journal:2026:10:15");
+    await ui.typeAtEnd("x");
+    await ui.flush();
+    assertDeepEqual(await page.locator(".calendar-day.has-page").evaluateAll((days) => days.map((d) => d.textContent)), ["6", "9", "15"], "a day made by going to its page is marked");
+    await page.getByRole("button", { name: "Delete", exact: true }).click();
+    await ui.confirmDialog("Delete page");
+    await page.waitForFunction(() => document.querySelectorAll(".calendar-day.has-page").length === 2);
+  });
+
+  await app("the calendar can be used from the keyboard: one stop for Tab, the arrows from day to day, Page Up and Down for the months, Enter opens a day", { fixedTime: new Date("2026-10-09T10:00:00") }, async (ui) => {
+    const { page } = ui;
+    const focusedDate = () => page.evaluate(() => document.activeElement?.dataset?.date ?? null);
+    const stops = () => page.locator(".calendar-day").evaluateAll((days) => days.filter((d) => d.tabIndex === 0).map((d) => d.dataset.date));
+    const day = (date) => page.locator(`.calendar-day[data-date="${date}"]`);
+    assertDeepEqual(await stops(), ["2026-10-09"], "the Tab key stops at one day of the month, today");
+    await day("2026-10-09").focus();
+    for (const [key, expected] of [["ArrowRight", "2026-10-10"], ["ArrowDown", "2026-10-17"], ["ArrowLeft", "2026-10-16"], ["ArrowUp", "2026-10-09"], ["Home", "2026-10-05"], ["End", "2026-10-11"]]) {
+      await page.keyboard.press(key);
+      assertEqual(await focusedDate(), expected, `${key} goes to ${expected}`);
+    }
+    assertDeepEqual(await stops(), ["2026-10-11"], "and the stop goes with the focus");
+    // over the end of a month, in both directions
+    await day("2026-10-31").focus();
+    await page.keyboard.press("ArrowRight");
+    assertEqual(await focusedDate(), "2026-11-01", "the day after the 31st is in the next month");
+    assertEqual(await page.locator(".calendar-title").innerText(), "November 2026", "which is shown");
+    await page.keyboard.press("ArrowLeft");
+    assertEqual(await focusedDate(), "2026-10-31", "and back");
+    await page.keyboard.press("PageDown");
+    assertEqual(await focusedDate(), "2026-11-30", "Page Down is the same day of the next month, or its last");
+    await page.keyboard.press("PageUp");
+    assertEqual(await focusedDate(), "2026-10-30", "Page Up the same day of the month before");
+    // Enter opens the day (it is a button), and the caret goes to its page
+    await page.keyboard.press("Enter");
+    await ui.waitCurrent("Journal:2026:10:30");
+    assert(await ui.inEditor(), "...");
+    // a key that is not the calendar's is left alone, and so is one with a modifier
+    await day("2026-10-30").focus();
+    await page.keyboard.press("Shift+ArrowRight");
+    assertEqual(await focusedDate(), "2026-10-30", "...");
+    // the month buttons keep the focus when the month is drawn again
+    await page.getByRole("button", { name: "Next month" }).focus();
+    await page.keyboard.press("Enter");
+    assertEqual(await page.evaluate(() => document.activeElement?.getAttribute("aria-label")), "Next month", "...");
+    assertEqual(await page.locator(".calendar-title").innerText(), "November 2026", "...");
+  });
+
+  await app("tags are listed with their pages; a click on one, in the list or (with Ctrl) in a page, shows those pages, and the search finds them", {}, async (ui) => {
+    const { page } = ui;
+    const tags = () => page.locator(".tags-list .link-button").allInnerTexts();
+    const results = () => page.locator("#search-results .result-name").allInnerTexts();
+    assert(!(await page.locator("details.tags").evaluate((el) => el.open)), "the list of tags starts closed");
+    assertEqual(await page.locator("details.tags summary .count").innerText(), "(3)", "but says how many there are");
+    await page.locator("details.tags summary").click();
+    assertDeepEqual(await tags(), ["@garden (2)", "@journal (2)", "@spring (1)"], "every tag, with the number of pages that write it");
+    await page.locator(".tags-list .link-button", { hasText: "@spring" }).click();
+    assertEqual(await page.locator("#search").inputValue(), "@spring", "a click puts the tag in the search");
+    assertDeepEqual(await results(), ["Projects:Garden"], "and shows the pages that have it");
+    assert(await page.locator("#search-results").isVisible(), "the results stay (the click that chose the tag did not close them)");
+    assertEqual(await page.evaluate(() => document.activeElement?.id), "search", "and the search has the focus");
+    await page.keyboard.press("Enter");
+    await ui.waitCurrent("Projects:Garden");
+    // a Ctrl-click on a tag in the page does the same, and a plain click is only a click
+    const tag = page.locator(".cm-zim-tag", { hasText: "@garden" });
+    await tag.click();
+    assert(await page.locator("#search-results").isHidden(), "a plain click on a tag shows nothing");
+    await tag.click({ modifiers: ["Control"] });
+    assertDeepEqual((await results()).sort(), ["Help:Tags", "Projects:Garden"], "a Ctrl-click shows the pages that have it");
+    assertEqual(await ui.current(), "Projects:Garden", "without leaving the page");
+    // the search: a tag is found exactly, with words next to it to narrow it down
+    const search = page.locator("#search");
+    await search.fill("@garden beans");
+    assertDeepEqual((await results()).sort(), ["Help:Tags", "Projects:Garden"], "words and a tag together (the page about tags has both: it says so)");
+    await search.fill("@spring beans");
+    assertDeepEqual(await results(), ["Projects:Garden"], "the other tag narrows it to the page that has both");
+    await search.fill("@gar");
+    assertEqual(await page.locator("#search-results .search-none").innerText(), "No page has all of: @gar", "a part of a tag is not the tag");
+    await search.fill("");
+    // the list follows what is written: another case of a tag is the same tag, and the first page's spelling is the one shown
+    await ui.goto("Ideas");
+    await ui.typeAtEnd("\nBuy a @Garden gnome and a @new_tag.\n");
+    await ui.flush();
+    await page.waitForFunction(() => [...document.querySelectorAll(".tags-list .link-button")].some((b) => b.textContent.includes("@new_tag")));
+    assertDeepEqual(await tags(), ["@garden (3)", "@journal (2)", "@new_tag (1)", "@spring (1)"], "a new tag, and one more page for @garden (case does not matter)");
+    await ui.replaceText(samplePages.Ideas);
+    await ui.flush();
+    await page.waitForFunction(() => ![...document.querySelectorAll(".tags-list .link-button")].some((b) => b.textContent.includes("@new_tag")));
+    assertDeepEqual(await tags(), ["@garden (2)", "@journal (2)", "@spring (1)"], "and they go when the text that wrote them goes");
+    // a tag that many pages have shows them all (the results for words stop at twenty: they are for finding the one that is wanted)
+    await page.evaluate(async () => {
+      for (let i = 0; i < 30; i++) await window.__zim.app.session.save(`Many:Page ${String(i).padStart(2, "0")}`, `text @manytag ${i}\n`);
+    });
+    await page.waitForFunction(() => [...document.querySelectorAll(".tags-list .link-button")].some((b) => b.textContent.includes("@manytag (30)")));
+    await page.locator(".tags-list .link-button", { hasText: "@manytag" }).click();
+    assertEqual(await page.locator("#search-results .result").count(), 30, "a tag shows all its pages");
+    await search.fill("page");
+    assertEqual(await page.locator("#search-results .result").count(), 20, "and a word, twenty");
+  });
+
+  await app("a link is completed from the pages of the notebook: the best come first, Enter writes the shortest link, Escape leaves the text alone", {}, async (ui) => {
+    const { page } = ui;
+    const popup = page.locator(".cm-tooltip-autocomplete");
+    const offered = () => page.locator(".cm-tooltip-autocomplete li").allInnerTexts();
+    // (a key that comes in the first moments after the list opens is not meant for it: it is typing; so a person waits, and so does this)
+    const settled = async () => {
+      await ui.settle();
+      await page.waitForTimeout(200);
+    };
+    await ui.goto("Projects");
+    await ui.typeAtEnd("\n* see [[");
+    await settled();
+    assertEqual(await popup.count(), 0, "nothing is offered for a bare [[");
+    await page.keyboard.type("gard");
+    await popup.waitFor();
+    await settled();
+    const first = (await offered())[0];
+    assert(first.startsWith("Projects:Garden") && first.includes("[[+Garden]]"), `the best page first, with what is written for it (saw ${JSON.stringify(await offered())})`);
+    await page.keyboard.press("Enter");
+    await settled();
+    assertEqual(await popup.count(), 0, "the list is closed once one is chosen");
+    assert((await ui.text()).endsWith("* see [[+Garden]]"), `the shortest link that leads there from this page was written, closed (saw ${JSON.stringify((await ui.text()).slice(-30))})`);
+    assertEqual(await page.evaluate(() => { const { state } = window.__zim.editor.view; return state.selection.main.head === state.doc.length; }), true, "and the caret is after it");
+    await page.keyboard.type(" and more\nsee [[rea");
+    await popup.waitFor();
+    await settled();
+    // with the mouse
+    await popup.locator("li", { hasText: "Projects:Reading List" }).click();
+    await settled();
+    assert((await ui.text()).endsWith("and more\n* see [[+Reading List]]"), "a click on one writes it too (the new item of the list began with its own bullet)");
+    // arrows choose, Escape puts the list away and leaves what was typed
+    await page.keyboard.type("\nsee [[pro");
+    await popup.waitFor();
+    await settled();
+    const several = await offered();
+    assert(several.length >= 2, `several pages start with pro (saw ${JSON.stringify(several)})`);
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await settled();
+    const second = (await ui.text()).split("\n").at(-1);
+    assert(second !== "* see [[pro" && second.endsWith("]]"), `the second was chosen (saw ${JSON.stringify(second)})`);
+    await page.keyboard.type("\nsee [[gar");
+    await popup.waitFor();
+    await settled();
+    await page.keyboard.press("Escape");
+    await settled();
+    assertEqual(await popup.count(), 0, "Escape puts the list away");
+    assert((await ui.text()).endsWith("\n* see [[gar"), "and leaves what was typed");
+    // the display part and a place on a page are not for the list
+    await page.keyboard.type("den|sh");
+    await settled();
+    assertEqual(await popup.count(), 0, "nothing is offered after a |");
+    // not in code
+    await ui.goto("Scratch");
+    await ui.setText("====== Code ======\n\n'''\nfoo\n'''\n");
+    await ui.caretTo((await ui.text()).indexOf("foo") + 3);
+    await page.keyboard.type(" [[plan");
+    await settled();
+    assertEqual(await popup.count(), 0, "nothing is offered in a code block");
+    // and the page that was written keeps the links that were chosen
+    await ui.goto("Projects");
+    assert((await ui.text()).includes("* see [[+Garden]]"), "...");
+  });
+
+  await app("a table is drawn as a grid with its cells formatted, and is its text only while the caret is in it; looking at it changes nothing", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Help:Tables");
+    const grid = page.locator(".cm-zim-grid");
+    assertEqual(await grid.count(), 1, "the table is drawn as a grid");
+    assertDeepEqual(await grid.locator("tr").evaluateAll((rows) => rows.map((r) => [...r.children].map((c) => c.textContent))), [["Fruit", "In stock", "Notes"], ["apples", "12", "from the garden"], ["pears", "3", "ripe"], ["plums", "0", "sold out"]], "its rows, as what the cells say");
+    assertDeepEqual(await grid.locator("th").evaluateAll((cells) => cells.map((c) => c.tagName)), ["TH", "TH", "TH"], "the header cells are header cells");
+    assertEqual(await grid.locator("td strong").innerText(), "apples", "bold is bold");
+    assertEqual(await grid.locator("td em").innerText(), "ripe", "and italic italic");
+    assertEqual(await grid.locator(".cm-zim-link").getAttribute("data-link"), "Projects:Garden", "a link is a link, to its page");
+    assertEqual(await grid.locator(".cm-zim-link").innerText(), "garden", "showing its own text");
+    assert(!/\*\*|\[\[|\]\]|\/\/|\\\|/.test(await grid.innerText()), "no markup is shown");
+    const aligns = await grid.locator("tr").nth(1).locator("td").evaluateAll((cells) => cells.map((c) => getComputedStyle(c).textAlign));
+    assertDeepEqual(aligns, ["left", "right", "center"], "columns are lined up as the table says");
+    assertEqual(await page.locator(".cm-zim-table-toolbar").count(), 0, "there is no toolbar while the caret is elsewhere");
+    // looking changes nothing
+    await ui.flush();
+    assertEqual(await ui.text(), samplePages["Help:Tables"], "the page is as it was");
+    assertEqual(await ui.saveState(), "", "and nothing was saved");
+    // Ctrl-click on a link in a cell follows it
+    await grid.locator(".cm-zim-link").click({ modifiers: ["Control"] });
+    await ui.waitCurrent("Projects:Garden");
+    await ui.goto("Help:Tables");
+    // a click in a cell is the caret in that cell of the text, with the toolbar
+    await grid.locator("td", { hasText: "pears" }).click();
+    assertEqual(await grid.count(), 0, "the grid is gone");
+    assertEqual(await page.locator(".cm-line.cm-zim-table").count(), 5, "the table is its lines (the header, the alignment row and three rows)");
+    assert(await page.locator(".cm-zim-table-toolbar").isVisible(), "with the toolbar over it");
+    assert(await ui.inEditor(), "and the caret is in the editor");
+    const around = await page.evaluate(() => {
+      const { state } = window.__zim.editor.view;
+      const head = state.selection.main.head;
+      return [state.sliceDoc(head - 5, head), state.sliceDoc(head, head + 2)];
+    });
+    assertDeepEqual(around, ["pears", " |"], "the caret is at the end of what the cell says");
+    // the arrows leave the table, and come back into it
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    assertEqual(await grid.count(), 1, "out of the table, it is a grid again");
+    assertEqual(await page.locator(".cm-zim-table-toolbar").count(), 0, "and the toolbar is gone");
+    await page.keyboard.press("ArrowUp");
+    await page.keyboard.press("ArrowUp");
+    assertEqual(await grid.count(), 0, "an arrow into the table shows it as its text");
+    assert(await page.locator(".cm-zim-table-toolbar").isVisible(), "with its toolbar");
+    // the markup shown: the text, whatever the caret
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.locator("#markup").check();
+    assertEqual(await grid.count(), 0, "with Show markup the table is its lines");
+    await page.locator("#markup").uncheck();
+    assertEqual(await grid.count(), 1, "and a grid again without it");
+    // an arrow down from the empty line above it goes in as the arrow up from below does
+    await ui.caretTo((await ui.text()).indexOf("| Fruit") - 1);
+    assertEqual(await grid.count(), 1, "(the caret is on the line above, and the table is a grid)");
+    await page.keyboard.press("ArrowDown");
+    assertEqual(await grid.count(), 0, "an arrow down from the line above goes into the table");
+    assert(await page.locator(".cm-zim-table-toolbar").isVisible(), "with its toolbar");
+    await ui.flush();
+    assertEqual(await ui.pageText("Help:Tables"), samplePages["Help:Tables"], "(none of it changed the page)");
+  });
+
+  await app("in a table Tab goes from cell to cell, Enter to the cell below, Tab after the last cell makes a row, and Enter on an empty row ends the table", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Scratch");
+    const header = "Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\nCreation-Date: 2026-10-06T09:00:00+00:00\n\n";
+    await ui.setText(`${header}====== T ======\n\n| a | b |\n|---|---|\n| c | d |\n\nend\n`);
+    const selected = () => page.evaluate(() => { const { state } = window.__zim.editor.view; const r = state.selection.main; return state.sliceDoc(r.from, r.to); });
+    const table = async () => (await ui.text()).slice(header.length + "====== T ======\n\n".length);
+    await ui.caretTo((await ui.text()).indexOf("| a") + 3);
+    await page.keyboard.press("Tab");
+    assertEqual(await selected(), "b", "Tab goes to the next cell, with what is in it selected");
+    await page.keyboard.type("B");
+    await page.keyboard.press("Tab");
+    assertEqual(await selected(), "c", "and from the end of a row to the start of the next");
+    await page.keyboard.press("Shift+Tab");
+    assertEqual(await selected(), "B", "Shift+Tab goes back");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    assertEqual(await selected(), "d", "...");
+    await page.keyboard.press("Tab");
+    assertEqual(await table(), "| a   | B   |\n|-----|-----|\n| c   | d   |\n|     |     |\n\nend\n", "Tab after the last cell makes a row (and the table is written with its columns lined up)");
+    await page.keyboard.type("e");
+    await page.keyboard.press("Enter");
+    assertEqual(await table(), "| a   | B   |\n|-----|-----|\n| c   | d   |\n| e   |     |\n|     |     |\n\nend\n", "Enter in the last row, with something in it, makes a row below, in the same column");
+    await page.keyboard.press("Enter");
+    assertEqual(await table(), "| a   | B   |\n|-----|-----|\n| c   | d   |\n| e   |     |\n\n\nend\n", "Enter on an empty row ends the table: the row goes, and there is a line to write on");
+    await page.keyboard.type("after the table");
+    assertEqual(await table(), "| a   | B   |\n|-----|-----|\n| c   | d   |\n| e   |     |\nafter the table\n\nend\n", "which is after the table, and not in it");
+    assertEqual(await page.locator(".cm-zim-grid").count(), 1, "and the table is a grid again");
+    // Enter goes down a column
+    await ui.caretTo((await ui.text()).indexOf("| a") + 3);
+    await page.keyboard.press("Enter");
+    assertEqual(await selected(), "c", "Enter goes to the cell below the one it is in, past the row of dashes");
+    // Shift+Enter breaks the line in a cell
+    await ui.caretTo((await ui.text()).indexOf("| c") + 3);
+    await page.keyboard.press("Shift+Enter");
+    assert((await ui.text()).includes("| c\\n  "), "Shift+Enter writes a line break as a table holds one");
+    // it is undone like any change
+    await page.keyboard.press("Control+z");
+    assert(!(await ui.text()).includes("\\n"), "and can be undone");
+  });
+
+  await app("the toolbar of a table adds and removes rows and columns, aligns a column and tidies the table, where the caret is, and the caret stays", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Scratch");
+    await ui.setText("|a|b|\n|c|d|\n");
+    const button = (name) => page.locator(".cm-zim-table-toolbar").getByRole("button", { name });
+    const text = async () => (await ui.text()).trimEnd();
+    const selected = () => page.evaluate(() => { const { state } = window.__zim.editor.view; const r = state.selection.main; return state.sliceDoc(r.from, r.to); });
+    // the header is a header: no row to delete
+    await ui.caretTo(2);
+    assert(await button("Delete this row").isDisabled(), "the header can't be deleted");
+    assert(!(await button("Delete this column").isDisabled()), "but a column can");
+    await button("Add a row below this one").click();
+    assert(await ui.inText(), "the focus is in the text of the page after a button");
+    assertEqual(await text(), "| a   | b   |\n|     |     |\n| c   | d   |", "a row came below the header");
+    await page.keyboard.type("x");
+    assertEqual(await text(), "| a   | b   |\n| x    |     |\n| c   | d   |", "and the caret was in its first cell, ready to type");
+    await page.keyboard.press("Tab");
+    await button("Add a column after this one").click();
+    assertEqual((await text()).split("\n")[0], "| a   | b   | Header 3 |", "a column came after the caret's, with a header");
+    await button("Align this column to the right").click();
+    assertEqual((await text()).split("\n")[1], "|-----|-----|---------:|", "a column is aligned, and the row that says so is written");
+    assertEqual(await button("Align this column to the right").getAttribute("aria-pressed"), "true", "the button says what the column is");
+    await button("Delete this column").click();
+    assertEqual((await text()).split("\n")[0], "| a   | b   |", "a column went");
+    await ui.caretTo((await ui.text()).indexOf("| x") + 3);
+    await button("Delete this row").click();
+    assertEqual(await text(), "| a   | b   |\n|-----|-----|\n| c   | d   |", "a row went");
+    assert(await button("Delete this row").isDisabled(), "the only row below the header can't");
+    // tidy
+    await ui.setText("|a|bbbbb|\n|c|d|\n");
+    await ui.caretTo(2);
+    await button("Write the table with its columns lined up").click();
+    assertEqual(await text(), "| a   | bbbbb |\n| c   | d     |", "the columns are lined up");
+    assertEqual(await selected(), "a", "with the caret in the cell it was in");
+    // the last column stays
+    await ui.setText("|a|\n|c|\n");
+    await ui.caretTo(2);
+    assert(await button("Delete this column").isDisabled(), "the last column can't go");
+    // the keyboard reaches the toolbar: Alt+F10 goes to it, the arrows between the buttons, Escape back
+    await page.keyboard.press("Alt+F10");
+    assertEqual(await page.evaluate(() => document.activeElement?.textContent), "+ Row", "Alt+F10 goes to the first button");
+    await page.keyboard.press("ArrowRight");
+    assertEqual(await page.evaluate(() => document.activeElement?.textContent), "+ Column", "the arrow goes on (and skips what can't be done)");
+    await page.keyboard.press("Enter");
+    assert(await ui.inText(), "a button used with the keyboard gives the focus back to the page");
+    assertEqual((await text()).split("\n")[0], "| a   | Header 2 |", "and has done what it says");
+    await page.keyboard.press("Alt+F10");
+    assertEqual(await ui.inText(), false, "(the focus was in the toolbar)");
+    await page.keyboard.press("Escape");
+    assert(await ui.inText(), "Escape comes back to the text too");
+  });
+
+  await app("the Table button makes a table where the caret is, as a block of its own, ready to be written in, and what is typed is saved", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Scratch");
+    await ui.setText("Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== Scratch ======\nsome text\n");
+    await ui.caretTo((await ui.text()).indexOf("some text") + 4);
+    await page.getByRole("button", { name: "Table", exact: true }).click();
+    const text = await ui.text();
+    assert(text.endsWith("some text\n\n| Header 1 | Header 2 | Header 3 |\n|----------|----------|----------|\n|          |          |          |\n|          |          |          |\n"), `a table below the line with an empty line between (saw ${JSON.stringify(text.slice(-200))})`);
+    assert(await ui.inEditor(), "the caret is in the page");
+    assertEqual(await page.evaluate(() => { const { state } = window.__zim.editor.view; const r = state.selection.main; return state.sliceDoc(r.from, r.to); }), "Header 1", "the first header is selected, to be written over");
+    await page.keyboard.type("Name");
+    await page.keyboard.press("Tab");
+    await page.keyboard.type("Count");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    await page.keyboard.type("apple");
+    await page.keyboard.press("Tab");
+    await page.keyboard.type("3");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowDown");
+    await ui.flush();
+    const saved = await ui.pageText("Scratch");
+    assert(/\| Name \| Count \| Header 3 \|\n/.test(saved), `the header is as typed (saw ${JSON.stringify(saved.slice(-260))})`);
+    assert(/\| apple +\| 3 +\| +\|\n/.test(saved), "and the first row");
+    await page.locator(".cm-zim-grid").waitFor();
+    assertDeepEqual(await page.locator(".cm-zim-grid th").allInnerTexts(), ["Name", "Count", "Header 3"], "once the caret is out of it, it is the grid of what was typed");
+    // a caret in the header of the page is no place for one: it goes at the end of the page
+    await ui.caretTo(5);
+    await page.getByRole("button", { name: "Table", exact: true }).click();
+    const after = await ui.text();
+    assert(after.startsWith("Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n"), "the header of the page is as it was: a table put there would have broken it");
+    assertEqual(after.indexOf("| Header 1"), after.lastIndexOf("| Header 1"), "...");
+    assert(after.indexOf("| Header 1") > after.indexOf("| apple"), "the new table is below the one that was there");
   });
 
   await app("what is typed is saved by itself, or at once with Ctrl+S, and is there after a reload", {}, async (ui) => {
@@ -957,8 +1414,15 @@ try {
     assert((await ui.text()).endsWith("onetwo"), "and everything typed is there after a reload");
   });
 
-  await app("notebooks: make one, switch between them, rename one, delete one", {}, async (ui) => {
+  await app("notebooks: make one, switch between them, rename one, delete one", { fixedTime: new Date("2026-10-09T10:00:00") }, async (ui) => {
     const { page } = ui;
+    const lists = () => page.evaluate(() => ({
+      tags: document.querySelector("details.tags summary .count")?.textContent ?? "",
+      noTags: document.querySelector(".tags-list .none") !== null,
+      daysWithPages: document.querySelectorAll(".calendar-day.has-page").length,
+      headings: [...document.querySelectorAll(".contents-list .link-button")].map((b) => b.textContent),
+    }));
+    assertDeepEqual(await lists(), { tags: "(3)", noTags: false, daysWithPages: 1, headings: ["Welcome", "Where to start", "Try this"] }, "the lists beside the page are the sample notebook's");
     await ui.chooseFromMenu("New notebook…");
     const dialog = ui.dialog();
     await dialog.waitFor();
@@ -967,6 +1431,7 @@ try {
     assertEqual(await ui.notebookTitle(), "Garden notes", "it is open");
     assertDeepEqual(await ui.rows(), ["Home"], "with a home page and nothing else");
     assert((await ui.text()).includes("This notebook is empty."), "which says so");
+    assertDeepEqual(await lists(), { tags: "", noTags: true, daysWithPages: 0, headings: ["Home"] }, "and the lists beside the page are its own, not the other notebook's");
     await ui.openMenu();
     const listed = await ui.menu().getByRole("menuitemradio").evaluateAll((items) => items.map((i) => [i.textContent, i.getAttribute("aria-checked")]).sort());
     assertDeepEqual(listed, [["Garden notes", "true"], ["Sample notebook", "false"]], "the menu lists both, with the open one checked");
@@ -974,6 +1439,7 @@ try {
     await page.waitForFunction(() => document.querySelector(".notebook-title")?.textContent === "Sample notebook");
     assertDeepEqual(await ui.rows(), ["Help", "Home", "Ideas", "Journal", "Projects"], "the sample notebook is as it was");
     assertEqual(await ui.pageCount(), SAMPLE_PAGES.length, "with all its pages");
+    assertDeepEqual(await lists(), { tags: "(3)", noTags: false, daysWithPages: 1, headings: ["Welcome", "Where to start", "Try this"] }, "and its lists are back");
 
     await ui.chooseFromMenu("Rename notebook…");
     await ui.confirmDialog("Rename", { Name: "Sample (renamed)" });
@@ -1760,6 +2226,23 @@ try {
       const box = await page.getByRole("button", { name, exact: true }).boundingBox();
       assert(box && box.x >= 0 && box.x + box.width <= 390, `the ${name} button is on the screen`);
     }
+    // the lists under the tree are in the drawer and fit it
+    await page.locator(".icon-button").click();
+    await page.locator("details.tags summary").click();
+    for (const selector of [".calendar", ".contents-list", ".tags-list"]) {
+      const box = await page.locator(selector).first().boundingBox();
+      assert(box && box.x >= 0 && box.x + box.width <= 320 && box.height > 0, `${selector} fits the drawer (${JSON.stringify(box)})`);
+    }
+    await page.locator(".icon-button").click();
+    // and what is drawn in the page fits it: a table's toolbar wraps, a wide table scrolls by itself
+    await ui.goto("Help:Tables");
+    await page.locator(".cm-zim-grid td", { hasText: "pears" }).click();
+    for (const button of await page.locator(".cm-zim-table-toolbar button").all()) {
+      const box = await button.boundingBox();
+      assert(box && box.x >= 0 && box.x + box.width <= 390, `a button of the toolbar is on the screen (${JSON.stringify(box)})`);
+    }
+    const after = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    assert(after <= 0, `the page with a table in it does not scroll sideways (${after}px too wide)`);
   });
 
   // ==========================================================================================
@@ -1837,9 +2320,14 @@ try {
 
     await ui.typeAtEnd("The vault door code is 7391.\n");
     await ui.goto("Secrets:Plans");
-    await ui.typeAtEnd("Meet at the old mill.\n");
+    await ui.typeAtEnd("Meet at the old mill.\n====== Zebra Heading ======\nand a tag @zebratag\n");
     await ui.flush();
     assertEqual(await ui.saveState(), "Saved", "what is typed is saved in the vault");
+    // the lists beside the page (its headings, the tags of the notebook, the days of its journal) work here as in any notebook
+    await page.waitForFunction(() => [...document.querySelectorAll(".contents-list .link-button")].some((b) => b.textContent === "Zebra Heading"));
+    await page.locator("details.tags").evaluate((el) => (el.open = true));
+    assertDeepEqual(await page.locator(".tags-list .link-button").allInnerTexts(), ["@zebratag (1)"], "the tags of the encrypted notebook are listed");
+    assertEqual(await page.locator(".calendar-today").count(), 1, "and the calendar is there");
     assertDeepEqual(await ui.names(), ["Home", "Secrets:Plans"], "the pages are there");
 
     // nothing of it is where the browser keeps things for the page: not the address, the tab's title, the history, or the settings
@@ -1855,7 +2343,8 @@ try {
     await isOpenNotebook(page);
     await page.waitForFunction(() => document.querySelector(".lock-button").hidden);
     const shown = await page.evaluate(() => document.body.innerText + document.title);
-    for (const secret of ["Diary", "Plans", "7391", "old mill"]) assert(!shown.includes(secret), `${JSON.stringify(secret)} is still on the page after locking`);
+    for (const secret of ["Diary", "Plans", "7391", "old mill", "Zebra", "zebratag"]) assert(!shown.includes(secret), `${JSON.stringify(secret)} is still on the page after locking`);
+    assert(!(await page.locator(".contents-list, .tags-list, .calendar").evaluateAll((lists) => lists.map((l) => l.innerHTML).join(""))).includes("zebra"), "(nor in the lists beside the page: their markup too)");
     await ui.openMenu();
     assertDeepEqual(await ui.menu().getByRole("menuitem").allInnerTexts(), (await ui.menu().getByRole("menuitem").allInnerTexts()).filter((t) => !t.includes("Diary")), "no encrypted notebook is in the menu");
     assert(await ui.menu().getByRole("menuitem", { name: "Unlock encrypted notebooks…" }).isVisible(), "but there is a way to unlock them");
@@ -2340,6 +2829,8 @@ try {
       accented: "K\u00e4sekuchen f\u00fcr Zo\u00eb", cjk: "\u79d8\u5bc6\u306e\u5408\u8a00\u8449", emoji: "\u{1F510} geheim", accentedPage: "Verborgene Seite f\u00fcr K\u00e4se",
       // (typed in places that are not a page, and then given up)
       searched: "zebrasearchterm", renaming: "Renamed Secretly Zebra", unmade: "Never Made Page",
+      // (what the lists beside the page and the editor's own parts hold: a heading, the cell of a table, the page of a day, a link that was being completed)
+      heading: "Heading Of The Zebra Vault", cell: "Cellsecret Quagga", dayText: "Planted the quagga seeds on a secret day",
     };
     await newEncryptedNotebook(ui, secrets.notebook);
     await ui.goto(`Hidden:${secrets.page}`);
@@ -2349,6 +2840,32 @@ try {
     await ui.typeAtEnd("a page with an accented name\n");
     await ui.flush();
     await ui.goto(`Hidden:${secrets.page}`);
+    // a heading, a table, the tags list, a link that is being completed, and a day of the journal
+    await ui.typeAtEnd(`====== ${secrets.heading} ======\n\n| ${secrets.cell} | b |\n|---|---|\n| c | d |\n\n`);
+    await page.waitForFunction((heading) => [...document.querySelectorAll(".contents-list .link-button")].some((b) => b.textContent === heading), secrets.heading);
+    await page.locator("details.tags").evaluate((el) => (el.open = true));
+    await page.locator(".tags-list .link-button", { hasText: secrets.tag }).click();
+    await page.keyboard.press("Escape");
+    await page.locator("#search").fill("");
+    await ui.typeAtEnd("[[Hid");
+    await page.locator(".cm-tooltip-autocomplete").waitFor();
+    await page.waitForTimeout(200);
+    assert((await page.locator(".cm-tooltip-autocomplete li").allInnerTexts()).some((t) => t.startsWith("Hidden")), "the names of the encrypted notebook are offered for a link (its section is)");
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Backspace");
+    // (the 28th: a day that every month has, and that the sample's journal, which is of the 6th, has no page for)
+    await page.locator('.calendar-day[data-date$="-28"]').click();
+    await page.waitForFunction(() => /^Journal:\d{4}:\d{2}:28$/.test(window.__zim.app.current?.name ?? ""));
+    const dayPage = await ui.current();
+    await ui.typeAtEnd(`${secrets.dayText}\n`);
+    await ui.flush();
+    secrets.dayPage = dayPage;
+    await ui.goto(`Hidden:${secrets.page}`);
+    await page.locator("details.tags").evaluate((el) => (el.open = false));
     // the search box, and dialogs that are asked and given up: what is typed in them is not kept anywhere either
     await page.locator("#search").fill(secrets.searched);
     await page.keyboard.press("Escape");
@@ -2393,7 +2910,7 @@ try {
     for (const [kind, secret] of Object.entries(secrets)) {
       assertDeepEqual(where(secret), [], `the ${kind} (${JSON.stringify(secret)}) is nowhere the browser keeps things`);
     }
-    for (const part of ["Hidden", "7391", "ATTACHMENT", "application/x-secret-type", "Zebra", "K\u00e4se", "geheim", "\u79d8\u5bc6", "Verborgene"]) assertDeepEqual(where(part), [], `${JSON.stringify(part)} is nowhere the browser keeps things`);
+    for (const part of ["Hidden", "7391", "ATTACHMENT", "application/x-secret-type", "Zebra", "K\u00e4se", "geheim", "\u79d8\u5bc6", "Verborgene", "Quagga", "quagga"]) assertDeepEqual(where(part), [], `${JSON.stringify(part)} is nowhere the browser keeps things`);
     assertDeepEqual(where(PASSPHRASE), [], "nor is the passphrase");
 
     // unlocked again, everything is back
@@ -2541,6 +3058,24 @@ try {
     await isOpenNotebook(page);
   });
 
+  await app("a lock that is waiting for what is shown next has already emptied the lists beside the page", {}, async (ui) => {
+    const { page } = ui;
+    await newEncryptedNotebook(ui, "Diary");
+    await ui.typeAtEnd("====== Zebra Heading ======\nand a tag @zebratag\n");
+    await ui.flush();
+    await page.waitForFunction(() => [...document.querySelectorAll(".contents-list .link-button")].some((b) => b.textContent === "Zebra Heading"));
+    await page.locator("details.tags").evaluate((el) => (el.open = true));
+    assertDeepEqual(await page.locator(".tags-list .link-button").allInnerTexts(), ["@zebratag (1)"], "the lists have the notebook's headings and tags");
+    // the notebooks that would be shown instead are never got, so the lock goes no further than it can
+    await page.evaluate(() => {
+      window.__zim.app.store.listNotebooks = () => new Promise(() => {});
+    });
+    await page.locator(".lock-button").click();
+    await page.waitForFunction(() => !window.__zim.app.vault.unlocked);
+    const beside = await page.locator(".side-panels").evaluate((el) => el.textContent ?? "");
+    assert(!/zebra/i.test(beside), `the lists beside the page hold nothing of the notebook (saw ${JSON.stringify(beside)})`);
+  });
+
   await app("when the encrypted notebooks lock, a dialog open on them is closed, nothing is done to the notebook shown instead, and Back does not lead into them", {}, async (ui) => {
     const { page } = ui;
     await newEncryptedNotebook(ui, "Closing");
@@ -2641,7 +3176,7 @@ try {
     const places = await keptByTheBrowser(page);
     const where = (needle) => Object.entries(places).filter(([, value]) => value.includes(needle)).map(([place]) => place);
     assert(where("an open sentence for comparison").some((p) => p.startsWith("indexedDB:")), "the scan can read an open notebook's text");
-    for (const secret of [lost, lostAlso, "first line", "Draft page name", "Unsaved"]) assertDeepEqual(where(secret), [], `${JSON.stringify(secret)} is nowhere the browser keeps things`);
+    for (const secret of [lost, lostAlso, "first line, saved", "Draft page name", "Unsaved"]) assertDeepEqual(where(secret), [], `${JSON.stringify(secret)} is nowhere the browser keeps things`);
     const outside = await visibleOutside(page);
     for (const secret of [lost, lostAlso, "Draft page name", "Unsaved"]) for (const [where, value] of Object.entries(outside)) assert(!value.includes(secret), `${JSON.stringify(secret)} is in the ${where} of the page`);
   });

@@ -132,7 +132,7 @@ scripts/setup-browser.sh            # once: Chromium + libraries + a font, no ro
 npm run test:browser                # the built app in a real browser (ZIM_GOLDEN_DIR=... adds the real Zim manual; ONLY=text picks scenarios)
 npm run test:vault                  # the encrypted-notebook vault in a real browser: Worker, OPFS, reload, crash mid-write (five moments), a passphrase change and a restore cut off, backup and restore between browsers, every byte of the file system tried with the old key, one tab at a time, the Worker's network cut-off, heartbeat and silent death
 npm run measure:unlock -- [pages ...]      # what unlocking costs as a vault grows (a real browser; numbers in docs/zim-encrypted-notebooks.md)
-npm run screenshots <dir>           # twelve pictures of the app to look at (light, dark, phone, dialogs, pictures)
+npm run screenshots <dir>           # pictures of the app to look at (light, dark, phone, dialogs, pictures, tables, the journal and tags, completing a link)
 scripts/serve.sh start --host :: --port 8080   # serve web/dist in the background (see docs/zim-editor-plan.md: trying it from another machine)
 scripts/serve.sh start --host :: --port 8443 --tls --name ADDRESS   # https for encrypted notebooks from another machine (docs/zim-pwa.md: trusting its certificate)
 
@@ -187,8 +187,11 @@ docker compose up                   # Postgres + server (define compose file)
   type-checked (`tsc -p pwa`), and a change to it is a new version of the app. Do not turn it into a runtime
   cache or add a way to skip the check. `window.__ZIM_TEST__` scenarios run with service workers blocked unless
   they are about the worker.
-- Notebook rules (what a name or a link means, tree, backlinks, search, rename) live in
-  `core/zim-notebook` and nowhere else: the web app calls them through wasm and holds none of its own.
+- Notebook rules (what a name or a link means, tree, backlinks, search, rename, tags, the days of the journal,
+  the pages a link being typed can lead to) live in `core/zim-notebook` and nowhere else: the web app calls them
+  through wasm and holds none of its own. The same goes for a table: it is read and edited by
+  `core/zim-format`'s `table` module (through wasm); the editor draws the grid and runs the commands (one change
+  each, one undo) and holds no table rules; drawing or moving in a table never rewrites its text.
   A UI change is not done until it has been looked at (`npm run screenshots`) and driven in the real
   browser test (`npm run test:browser`); the unit tests cannot see layout, focus or timing.
 

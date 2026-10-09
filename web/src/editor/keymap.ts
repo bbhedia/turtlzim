@@ -1,4 +1,5 @@
 import type { KeyBinding } from "@codemirror/view";
+import { enterTableDown, enterTableUp, focusToolbar, nextCell, previousCell, tableEnter, tableLineBreak } from "./table-commands";
 import {
   WRAPPERS,
   indentLess,
@@ -45,6 +46,17 @@ export const zimKeymap: readonly KeyBinding[] = [
   { key: "F11", run: toggleCheckboxHere(true), preventDefault: true },
   { key: "Mod-Enter", run: toggleCheckboxHere(false), preventDefault: true },
   { key: "Mod-Shift-Enter", run: toggleCheckboxHere(true), preventDefault: true },
+
+  // In a table: Tab goes on to the next cell (to a new row after the last), Enter to the cell below, Shift-Enter breaks the
+  // line in a cell, and Alt-F10 goes to the toolbar. Anywhere else they leave the key alone.
+  { key: "Tab", run: nextCell },
+  { key: "Shift-Tab", run: previousCell },
+  { key: "Enter", run: tableEnter },
+  { key: "Shift-Enter", run: tableLineBreak },
+  { key: "Alt-F10", run: focusToolbar, preventDefault: true },
+  // (the editor's arrows go over a table that is drawn as a grid: these go into it, from the line above or below)
+  { key: "ArrowDown", run: enterTableDown },
+  { key: "ArrowUp", run: enterTableUp },
 
   // These only act inside a list (or on selected lines) and otherwise leave the key alone.
   { key: "Enter", run: listEnter },

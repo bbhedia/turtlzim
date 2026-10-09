@@ -7,19 +7,25 @@ import type { Extension } from "@codemirror/state";
 import { EditorView, drawSelection, highlightSpecialChars, keymap } from "@codemirror/view";
 import type { ViewUpdate } from "@codemirror/view";
 import { insertReference, toggleCheckboxAt } from "./commands";
+import { followFacet } from "./follow";
+import { insertTable } from "./table-commands";
+import { linkCompletion } from "./completion";
 import { zimKeymap } from "./keymap";
 import { decorationsField } from "./decorations";
-import { imageAt, linkAt } from "./links";
+import { imageAt, linkAt, tagAt } from "./links";
 import type { LinkInfo } from "./links";
 import { imageSourceFacet, linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, syntaxField } from "./syntax";
 import type { ImageSource, LinkStatus } from "./syntax";
 import { zimTheme } from "./theme";
+import type { LinkSuggestion } from "../notebook-core";
 
 export { buildDecorations, decorationsField } from "./decorations";
 export * as commands from "./commands";
 export { zimKeymap } from "./keymap";
-export { classifyLink, imageAt, linkAt } from "./links";
-export type { LinkInfo, LinkKind } from "./links";
+export { applyLink, linkSource } from "./completion";
+export { addColumnRight, addRowBelow, alignColumn, deleteColumn, deleteRow, insertTable, nextCell, previousCell, tableAt, tableEnter, tidyTable } from "./table-commands";
+export { classifyLink, imageAt, linkAt, tagAt } from "./links";
+export type { LinkInfo, LinkKind, TagAt } from "./links";
 export { imageSourceFacet, linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, spansOf, syntaxField } from "./syntax";
 export type { ImageSource, LinkStatus } from "./syntax";
 
@@ -28,6 +34,13 @@ export interface ZimEditorOptions {
   onChange?: (update: ViewUpdate) => void;
   /** Called when the user follows a link (Ctrl/Cmd-click, or any click in a read-only editor). */
   onNavigate?: (link: LinkInfo) => void;
+  /** Called when the user follows a tag (Ctrl/Cmd-click, or any click in a read-only editor): the name, without its `@`. */
+  onTag?: (tag: string) => void;
+  /**
+   * The pages that a link being typed (`[[Gar`) can lead to, best first, with what to write for each; without
+   * this, links are not completed.
+   */
+  completeLink?: (typed: string) => LinkSuggestion[];
   /**
    * Whether a link's target leads to a page that exists (`"missing"` links are drawn differently).
    * Call `refreshLinks()` on the editor when the answers may have changed.
@@ -71,6 +84,7 @@ export interface ZimEditorOptions {
 export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
   return [
     ...(options.exactLineBreaks ? [EditorState.lineSeparator.of("\n")] : []),
+    ...(options.onNavigate || options.onTag ? [followFacet.of({ ...(options.onNavigate ? { link: options.onNavigate } : {}), ...(options.onTag ? { tag: options.onTag } : {}) })] : []),
     ...(options.linkStatus ? [linkStatusFacet.of(options.linkStatus)] : []),
     ...(options.imageSource ? [imageSourceFacet.of(options.imageSource)] : []),
     syntaxField,
@@ -109,14 +123,21 @@ export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
         const picture = (event.target as HTMLElement | null)?.closest?.(".cm-zim-image");
         const pos = picture ? view.posAtDOM(picture) : view.posAtCoords({ x: event.clientX, y: event.clientY });
         const link = pos === null ? null : picture ? imageAt(view.state, pos) : linkAt(view.state, pos);
-        if (!link) return false;
-        options.onNavigate?.(link);
+        if (link) {
+          options.onNavigate?.(link);
+          event.preventDefault();
+          return true;
+        }
+        const tag = pos === null || picture || !options.onTag ? null : tagAt(view.state, pos);
+        if (!tag) return false;
+        options.onTag?.(tag.name);
         event.preventDefault();
         return true;
       },
 
     }),
     ...(options.onFiles ? [fileHandlers(options.onFiles)] : []),
+    ...(options.completeLink && !options.readOnly ? [linkCompletion(options.completeLink)] : []),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) options.onChange?.(update);
     }),
@@ -172,6 +193,8 @@ export interface ZimEditor {
    */
   goTo(position: number, options?: { focus?: boolean; scroll?: boolean }): void;
   focus(): void;
+  /** A new table of `columns` columns and `rows` rows below its header, as a block of its own, with the first header selected to be written over. */
+  insertTable(columns?: number, rows?: number): void;
   /**
    * Put `text` at position `at`, or in place of the selection, with the caret after it, and focus the
    * editor. A caret in the header, or at the top of the page, is no place: the text goes at the end.
@@ -206,6 +229,10 @@ export function createZimEditor(parent: HTMLElement, doc = "", options: ZimEdito
       if (goOptions.focus) view.focus();
     },
     focus: () => view.focus(),
+    insertTable(columns, rows) {
+      insertTable(columns, rows)(view);
+      view.focus();
+    },
     insert(text, at) {
       view.dispatch(insertReference(view.state, text, typeof at === "number" ? Math.min(at, view.state.doc.length) : at));
       view.focus();

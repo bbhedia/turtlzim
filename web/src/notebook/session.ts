@@ -2,8 +2,8 @@
 // "rename it in the model, rewrite the links, and write all of it to the store in one go", and where
 // a page's file properties (byte-order mark, line endings) are kept so that export writes each page
 // back as it was read.
-import { NotebookModel, checkPageName, newPageText, pageKey, pageToPath, zimTimestamp } from "../notebook-core";
-import type { Backlink, RenameReport, ResolvedFile, ResolvedLink, SearchHit, TreeNode } from "../notebook-core";
+import { NotebookModel, checkPageName, newPageText, pageKey, pageToPath, startingText, zimTimestamp } from "../notebook-core";
+import type { Backlink, LinkSuggestion, RenameReport, ResolvedFile, ResolvedLink, SearchHit, TagInfo, TreeNode } from "../notebook-core";
 import { encodePage } from "../zim";
 import type { LineEnding } from "../zim";
 import { typed } from "./media";
@@ -193,8 +193,28 @@ export class NotebookSession {
     return this.model.backlinks(name);
   }
 
+  /** The days of a month that have a journal page with text, as day numbers in order. */
+  journalDays(year: number, month: number): number[] {
+    return this.model.journalDays(year, month);
+  }
+
+  /** Every `@tag` of the notebook with the pages that write it, by name. */
+  tags(): TagInfo[] {
+    return this.model.tags();
+  }
+
+  /** The pages that write a tag (named with or without the `@`), in name order. */
+  pagesWithTag(tag: string): string[] {
+    return this.model.pagesWithTag(tag);
+  }
+
   search(query: string, limit = 50): SearchHit[] {
     return this.model.search(query, limit);
+  }
+
+  /** The pages a link being typed on page `from` can be completed to, best first, with what to write for each. */
+  completeLink(from: string, typed: string, limit = 20): LinkSuggestion[] {
+    return this.model.completeLink(from, typed, limit);
   }
 
   /** The name as this notebook would spell it: an existing section or page keeps its spelling. */
@@ -244,7 +264,7 @@ export class NotebookSession {
     return this.exclusive(async () => {
       const spelled = this.spell(name);
       if (this.model.has(spelled)) throw new Error(`A page called ${this.model.find(spelled) ?? spelled} already exists.`);
-      await this.saveNow(spelled, text ?? newPageText(spelled, zimTimestamp()));
+      await this.saveNow(spelled, text ?? startingText(spelled, zimTimestamp()));
       return this.model.find(spelled) ?? spelled;
     });
   }

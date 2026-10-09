@@ -1,5 +1,6 @@
 // A notebook to look at: sections and sub-pages, every kind of link with a live example, a page
-// that doesn't exist yet (so its link looks different), tasks, and a place to link to.
+// that doesn't exist yet (so its link looks different), tasks, tags, a table, a day of the journal,
+// and a place to link to.
 // Written for this demo. Names and links are checked by test/session.test.ts.
 import type { NotebookStore, NotebookInfo, StoredPage } from "./store";
 
@@ -16,8 +17,9 @@ This is a **notebook**: pages that link to each other, written in the Zim wiki f
 
 * [[Help:Editor]]: formatting and keyboard shortcuts
 * [[Help:Links]]: how a link finds its page
+* [[Help:Tables]], [[Help:Journal]] and [[Help:Tags]]
 * [[Projects]]: a section with pages below it
-* [[Journal:2026-10-06|Today's journal]]
+* [[Journal:2026:10:06|A day of the journal]]
 * [[Ideas]]: one of its links goes to a page that doesn't exist yet
 
 ===== Try this =====
@@ -45,6 +47,10 @@ Headings are Ctrl+Alt+1 to 5, and Ctrl+Alt+0 makes a heading plain text again. C
 2. as you go
 [ ] Ctrl+Enter ticks a box
 [*] this one is done
+
+===== Finding your way =====
+
+Type ''[['' and a few letters of a page's name: the pages that fit are offered, the best first, and Enter writes the link (the shortest one that leads there from this page). The //Contents// list on the left shows the headings of the page you are on; click one to go to it. A word that starts with an at sign is a tag: see [[Help:Tags]].
 
 ===== Code =====
 
@@ -93,6 +99,59 @@ This page is below [[Help:Links]], so from here:
 `,
   },
   {
+    name: "Help:Tables",
+    text: HEADER + `====== Tables ======
+
+A table is a block of lines that start and end with a bar. The first line is the header; the dashes below it say how each column is lined up ('':--'' left, '':-:'' centred, ''--:'' right), and every line after that is a row:
+
+| Fruit | In stock | Notes |
+|:------|---------:|:-----:|
+| **apples** | 12 | from the [[Projects:Garden\\|garden]] |
+| pears | 3 | //ripe// |
+| plums | 0 | sold out |
+
+While the caret is somewhere else the table is drawn as a grid, with its cells formatted. Put the caret in it (click a cell) and it turns into the lines it is written as, with a row of buttons over it.
+
+===== Writing in a table =====
+
+* **Tab** goes to the next cell and **Shift+Tab** back; Tab in the last cell makes a new row
+* **Enter** goes to the cell below, and makes a row below the last; on an empty last row it ends the table
+* **Shift+Enter** breaks the line inside a cell (it is written ''\\n'')
+* The buttons add or delete a row or a column, line a column up on the left, in the middle or on the right, and **Tidy** writes the lines out again with the bars under each other (Alt+F10 goes to them from the keyboard)
+* The **Table** button above the page makes a new table where the caret is
+
+===== In the text =====
+
+A bar that is part of what a cell says is written ''\\|''. A header that ends with ''<'' marks a column whose cells wrap, instead of staying on one line. Nothing is changed in a table until you change it: the lines are kept as they were written.
+
+Back to [[Help:Editor]].
+`,
+  },
+  {
+    name: "Help:Journal",
+    text: HEADER + `====== The journal ======
+
+The calendar on the left has a page for every day. A day's page is called //Journal:Year:Month:Day//, like [[:Journal:2026:10:06|Journal:2026:10:06]]; the days that have one are in bold with a dot. Click a day to open its page: it is made when you write something in it, and starts with the day as its title. **Today** (and //Today's journal// in the notebook menu) opens today's.
+
+Pages below a day, like //Journal:2026:10:06:Notes//, belong to it but are not the day. A name with a month that is not one, or a day that is not, is just a page.
+
+Back to [[Home]].
+`,
+  },
+  {
+    name: "Help:Tags",
+    text: HEADER + `====== Tags ======
+
+A word that starts with an at sign is a tag: @garden is one, and so is @journal. Tags are not found in headings, code, tables or the lines at the top of a page, and case does not matter.
+
+* The //Tags// list on the left has every tag with the number of pages that write it; click one to see them
+* Ctrl-click a tag in a page does the same
+* In the search box, **@garden** finds the pages with that tag exactly, and words next to it narrow them down: **@garden beans**
+
+See [[Projects:Garden]] and [[:Journal:2026:10:06|Journal:2026:10:06]] for pages that have them.
+`,
+  },
+  {
     name: "Projects",
     text: HEADER + `====== Projects ======
 
@@ -116,7 +175,7 @@ Pages below this one are the projects. The tree on the left shows them.
 	[ ] Saw it to length
 [x] Move the greenhouse (not this year)
 
-See the [[+Plan|plan]] for where things go, and [[Journal:2026-10-06]] for what happened today. @garden @spring
+See the [[+Plan|plan]] for where things go, and [[Journal:2026:10:06]] for what happened that day. @garden @spring
 `,
   },
   {
@@ -146,8 +205,8 @@ Back to [[Projects]].
 `,
   },
   {
-    name: "Journal:2026-10-06",
-    text: HEADER + `====== 2026-10-06 ======
+    name: "Journal:2026:10:06",
+    text: HEADER + `====== Tuesday 06 October 2026 ======
 
 Morning: cleared the beds ([[Projects:Garden]]). Wrote down some thoughts in [[Ideas]].
 

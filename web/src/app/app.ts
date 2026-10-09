@@ -4,8 +4,8 @@
 // those.
 import { createZimEditor } from "../editor";
 import type { ImageSource, LinkInfo, LinkStatus, ZimEditor } from "../editor";
-import { anchorsIn, checkPageName, classifyLink, newPageText, pageKey, zimTimestamp } from "../notebook-core";
-import type { Backlink, SearchHit } from "../notebook-core";
+import { anchorsIn, checkPageName, classifyLink, journalDayOf, journalPage, pageKey, startingText, zimTimestamp } from "../notebook-core";
+import type { Backlink, JournalDay, SearchHit } from "../notebook-core";
 import { FileUrls } from "../notebook/file-urls";
 import { IndexedDbStore } from "../notebook/idb";
 import { attachmentName, formatSize, isImageType, pictureAddress } from "../notebook/media";
@@ -23,7 +23,10 @@ import { TurtlStore } from "../vault/turtl-store";
 import { createZip, readZip } from "../zip";
 import { closeAllDialogs, showDialog, showMessage } from "./dialogs";
 import type { Phase, Pwa } from "../pwa/register";
+import { CalendarPanel, localToday } from "./calendar";
+import { ContentsPanel, headingsOf } from "./contents";
 import { clear, h, highlighted } from "./dom";
+import { TagsPanel } from "./tags";
 import { TreeView } from "./tree-view";
 
 const prefs = {
@@ -93,6 +96,10 @@ function pageFromHash(): string | null {
 const OPENABLE_PROTOCOLS = new Set(["http:", "https:", "ftp:"]);
 
 const SAVE_DELAY_MS = 700;
+/** The most pages that the results of a search for a tag show. */
+const TAGGED_PAGES_SHOWN = 200;
+/** How long after typing the sidebar's list of headings is made again. */
+const CONTENTS_DELAY_MS = 250;
 /** An encrypted notebook has no draft kept anywhere outside the vault for a closing page to rescue, so what is typed goes in sooner. */
 const PRIVATE_SAVE_DELAY_MS = 250;
 
@@ -147,6 +154,11 @@ export class App {
   autoLockMs = AUTO_LOCK_MS;
   private autoLockTimer: number | undefined;
   private readonly tree: TreeView;
+  /** The sidebar's lists besides the tree: the headings of the open page, the days of the journal, the tags of the notebook. */
+  private readonly contents: ContentsPanel;
+  private readonly calendar: CalendarPanel;
+  private readonly tagList: TagsPanel;
+  private contentsTimer: number | undefined;
   private readonly linkCache = new Map<string, LinkStatus>();
   /** Addresses for the pictures of the open notebook. */
   private urls: FileUrls | null = null;
@@ -162,6 +174,8 @@ export class App {
   private saveChain: Promise<void> = Promise.resolve();
   private loading = false;
   private navigation = 0;
+  /** A tag was just chosen, in the page or the sidebar: the click that chose it is still on its way to the document, and must not close the results it opened. */
+  private keepSearch = false;
   private searchHits: SearchHit[] = [];
   private searchActive = -1;
   private readonly els: {
@@ -189,6 +203,7 @@ export class App {
     download: HTMLButtonElement;
     remove: HTMLButtonElement;
     attach: HTMLButtonElement;
+    table: HTMLButtonElement;
     attachInput: HTMLInputElement;
     attachments: HTMLDetailsElement;
     attachmentCount: HTMLElement;
@@ -207,6 +222,23 @@ export class App {
       // (which sections are folded is the names of pages: an encrypted notebook's are not kept outside it)
       onFoldChange: (folded) => !this.isPrivate && prefs.set(`folded:${this.session?.info.id}`, JSON.stringify([...folded])),
     });
+    this.contents = new ContentsPanel((from) => {
+      this.editor.goTo(from, { focus: true });
+      this.closeSidebarIfNarrow();
+    }, prefs.get("panel:contents") !== "closed");
+    this.calendar = new CalendarPanel(
+      {
+        daysWithPages: (year, month) => (this.session ? this.session.journalDays(year, month) : []),
+        open: (day) => this.openDay(day),
+      },
+      localToday,
+      prefs.get("panel:calendar") !== "closed",
+    );
+    this.tagList = new TagsPanel((tag) => this.showTag(tag), prefs.get("panel:tags") === "open");
+    // (whether a panel is open is a setting of this app, not something about a notebook: it is remembered, whatever notebook is open)
+    for (const [name, panel] of [["contents", this.contents.element], ["calendar", this.calendar.element], ["tags", this.tagList.element]] as const) {
+      panel.addEventListener("toggle", () => prefs.set(`panel:${name}`, panel.open ? "open" : "closed"));
+    }
     this.els = this.build(root);
     vault.onChange((event) => this.onVaultChange(event));
     vault.onSettled((finished) => void this.tellSettled(finished));
@@ -264,6 +296,7 @@ export class App {
     const subpage = h("button", { type: "button", text: "New sub-page", on: { click: () => void this.newPage(this.current ? `${this.current.name}:` : "") } });
     const attachInput = h("input", { type: "file", hidden: true, multiple: true, "aria-label": "Choose files to attach to this page", on: { change: () => { const files = [...(attachInput.files ?? [])]; attachInput.value = ""; if (files.length) void this.attachFiles(files); } } });
     const attach = h("button", { type: "button", text: "Attach…", title: "Attach files or pictures to this page (you can also drop them on the page, or paste a picture)", on: { click: () => attachInput.click() } });
+    const table = h("button", { type: "button", text: "Table", title: "Insert a table here (Tab goes from cell to cell, Enter to the cell below)", on: { click: () => this.editor.insertTable() } });
     const download = h("button", { type: "button", text: "Download", title: "Download this page as a .txt file", on: { click: () => this.downloadPage() } });
     const remove = h("button", { type: "button", class: "danger-text", text: "Delete", on: { click: () => void this.deletePage() } });
     const notice = h("div", { class: "notice", role: "status", hidden: true });
@@ -288,10 +321,10 @@ export class App {
     const sidebar = h(
       "aside",
       { id: "sidebar", class: "sidebar", "aria-label": "Page tree" },
-      h("div", { class: "sidebar-tools" }, button("Fold all", { on: { click: () => this.tree.foldAll(true) } }), button("Unfold all", { on: { click: () => this.tree.foldAll(false) } })),
-      this.tree.element,
+      h("div", { class: "side-main" }, h("div", { class: "sidebar-tools" }, button("Fold all", { on: { click: () => this.tree.foldAll(true) } }), button("Unfold all", { on: { click: () => this.tree.foldAll(false) } })), this.tree.element),
+      h("div", { class: "side-panels" }, this.contents.element, this.calendar.element, this.tagList.element),
     );
-    const page = h("main", { class: "page" }, h("div", { class: "pagebar" }, breadcrumb, h("div", { class: "page-actions" }, rename, subpage, attach, download, remove)), updateBanner, notice, editorHost, attachments, backlinks);
+    const page = h("main", { class: "page" }, h("div", { class: "pagebar" }, breadcrumb, h("div", { class: "page-actions" }, rename, subpage, attach, table, download, remove)), updateBanner, notice, editorHost, attachments, backlinks);
 
     root.append(
       h(
@@ -316,6 +349,8 @@ export class App {
       onFiles: (files, at) => void this.attachFiles(files, at),
       onChange: () => this.onEditorChange(),
       onNavigate: (link) => void this.followLink(link),
+      onTag: (tag) => this.showTag(tag),
+      completeLink: (typed) => (this.session && this.current ? this.session.completeLink(this.current.name, typed) : []),
     });
     sidebarToggle.setAttribute("aria-expanded", String(root.querySelector(".app")?.getAttribute("data-sidebar") === "open"));
 
@@ -325,7 +360,7 @@ export class App {
     search.addEventListener("focus", () => search.value && this.runSearch(search.value));
     document.addEventListener("click", (e) => {
       const target = e.target as Node;
-      if (!search.contains(target) && !searchResults.contains(target)) this.closeSearch();
+      if (!this.keepSearch && !search.contains(target) && !searchResults.contains(target)) this.closeSearch();
       if (!notebookMenu.contains(target) && !notebookButton.contains(target)) this.closeNotebookMenu();
     });
     document.addEventListener("keydown", (e) => {
@@ -413,7 +448,7 @@ export class App {
     zipInput.addEventListener("change", () => void this.readPickedFiles(zipInput, "zip"));
     backupInput.addEventListener("change", () => void this.restoreFromPickedBackup(backupInput));
 
-    return { root, page, sidebarToggle, notebookButton, notebookMenu, lock, search, searchResults, markup, breadcrumb, notice, updateBanner, updateText, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, attach, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput, backupInput };
+    return { root, page, sidebarToggle, notebookButton, notebookMenu, lock, search, searchResults, markup, breadcrumb, notice, updateBanner, updateText, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, attach, table, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput, backupInput };
   }
 
   private toggleSidebar(): void {
@@ -479,6 +514,7 @@ export class App {
     // sections start folded, until the person has chosen otherwise
     this.tree.setNodes(session.tree());
     this.tree.setFolded(this.savedFolds(id));
+    this.tagList.show(session.tags());
     await this.openPage(pageName && session.exists(pageName) ? pageName : session.home, { push: false, replace: true });
   }
 
@@ -536,9 +572,16 @@ export class App {
       this.renderAttachments();
       return;
     }
+    if (event.kind === "page") {
+      // (a page was saved: what it tags may have changed)
+      this.tagList.show(this.session.tags());
+      return;
+    }
     if (event.kind !== "structure") return;
     this.linkCache.clear();
     this.tree.setNodes(this.session.tree());
+    this.tagList.show(this.session.tags());
+    this.calendar.refresh();
     this.editor?.refreshLinks();
     if (this.current) {
       this.renderBreadcrumb();
@@ -563,6 +606,7 @@ export class App {
       else if (vaultSupport().ok) this.els.notebookMenu.append(h("hr", {}), item("Restore encrypted notebooks from a backup…", () => this.els.backupInput.click()));
       this.els.notebookMenu.append(
         h("hr", {}),
+        item("Today's journal", () => this.openDay(localToday())),
         item("New notebook…", () => void this.newNotebook()),
         item("Rename notebook…", () => void this.renameNotebook()),
         item("Import a folder…", () => this.els.folderInput.click()),
@@ -792,6 +836,11 @@ export class App {
     if (!this.isPrivate) return;
     this.closeSearch();
     this.els.search.value = "";
+    // (the sidebar's lists too: the headings, the days and the tags of the notebook that is going)
+    window.clearTimeout(this.contentsTimer);
+    this.contents.show([]);
+    this.calendar.clear();
+    this.tagList.show([]);
     // (saves that were in flight fail at once, the engine being gone: they are waited for, so that none comes back to say it failed
     // after the status line was cleared, as opening the next page does, with the name of the page in it)
     this.discardUnsaved();
@@ -1306,7 +1355,7 @@ export class App {
       return;
     }
     const exists = this.session.has(spelled);
-    const text = exists ? (this.session.text(spelled) as string) : newPageText(spelled, zimTimestamp());
+    const text = exists ? (this.session.text(spelled) as string) : startingText(spelled, zimTimestamp());
     this.loading = true;
     this.linkCache.clear();
     this.current = { name: spelled, exists };
@@ -1317,6 +1366,8 @@ export class App {
     this.els.page.scrollTop = 0;
     this.locate(spelled, options.push && !(this.isPrivate && previous?.name === spelled) ? "push" : options.replace ? "replace" : "none");
     this.tree.setCurrent(spelled);
+    this.calendar.select(journalDayOf(spelled));
+    this.renderContents();
     this.renderBreadcrumb();
     this.renderBacklinks();
     this.renderAttachments();
@@ -1348,6 +1399,7 @@ export class App {
     this.els.download.disabled = !this.current?.exists;
     this.els.subpage.disabled = !this.current;
     this.els.attach.disabled = !this.current;
+    this.els.table.disabled = !this.current;
   }
 
   private renderNotice(): void {
@@ -1587,6 +1639,8 @@ export class App {
     if (this.loading || !this.current) return;
     this.dirty = true;
     this.setSaveState("Editing…");
+    window.clearTimeout(this.contentsTimer);
+    this.contentsTimer = window.setTimeout(() => this.renderContents(), CONTENTS_DELAY_MS);
     window.clearTimeout(this.saveTimer);
     this.saveTimer = window.setTimeout(() => void this.flush(), this.isPrivate ? PRIVATE_SAVE_DELAY_MS : SAVE_DELAY_MS);
   }
@@ -1774,7 +1828,8 @@ export class App {
   private runSearch(query: string): void {
     const q = query.trim();
     if (!q) return this.closeSearch();
-    this.searchHits = this.session.search(q, 20);
+    // (twenty are enough for words, which are typed on until the page is the one wanted; a tag is a list of what has it)
+    this.searchHits = this.session.search(q, /(^|\s)@\S/.test(q) ? TAGGED_PAGES_SHOWN : 20);
     this.searchActive = this.searchHits.length ? 0 : -1;
     const box = this.els.searchResults;
     clear(box);
@@ -1821,6 +1876,29 @@ export class App {
     if (!hit) return;
     this.closeSearch();
     await this.openPage(hit.page, { push: true, focus: true, closeSidebar: true });
+  }
+
+  /** The headings of the page that is shown, in the sidebar. */
+  private renderContents(): void {
+    window.clearTimeout(this.contentsTimer);
+    this.contents.show(this.current ? headingsOf(this.editor.view.state) : []);
+  }
+
+  /** Show the pages that have `tag` (without its `@`), as a search for it: its results are chosen from like any other. */
+  private showTag(tag: string): void {
+    this.keepSearch = true;
+    window.setTimeout(() => (this.keepSearch = false), 0);
+    const query = `@${tag}`;
+    this.els.search.value = query;
+    this.runSearch(query);
+    this.els.search.focus();
+  }
+
+  /** Open the page of a day of the journal (it is made when something is written in it). */
+  private openDay(day: JournalDay): void {
+    const page = journalPage(day);
+    if (!page) return;
+    void this.openPage(page, { push: true, focus: true, closeSidebar: true });
   }
 
   private closeSearch(): void {

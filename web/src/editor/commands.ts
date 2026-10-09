@@ -459,16 +459,9 @@ export function toggleCheckboxHere(cross = false): StateCommand {
 // ---------------------------------------------------------------------------------------------
 // Inserting references (to attachments)
 
-/**
- * Put `text` (a reference to an attachment, say) in the page, as a change: at `at` if that is given
- * (where something was dropped), else in place of the selection, with the caret after it. At the end
- * of the page, on a line of its own, if `at` is `"end"`, or if the place is a caret in the header
- * block or at the very top of the page (the page was only just opened, and anything put there would
- * break the header).
- */
-export function insertReference(state: EditorState, text: string, at?: number | "end"): TransactionSpec {
+/** Where the body of the page starts: below its header block and the blank line that ends it (0 if it has none). */
+export function pageBodyStart(state: EditorState): number {
   const spans = spansOf(state);
-  // the header block and the blank line that ends it: the body starts below that
   let bodyStart = spans.length > 0 && spans.kind(0) === Kind.Header ? spans.end(0) : 0;
   if (bodyStart === 0 && state.doc.length > 0) {
     // A page with carriage returns in it (mixed line endings) is kept as it is, and then the parser sees no
@@ -478,6 +471,18 @@ export function insertReference(state: EditorState, text: string, at?: number | 
     if (found) bodyStart = found[0].length;
   }
   while (bodyStart > 0 && bodyStart < state.doc.length && /[\r\n]/.test(state.sliceDoc(bodyStart, bodyStart + 1))) bodyStart++;
+  return bodyStart;
+}
+
+/**
+ * Put `text` (a reference to an attachment, say) in the page, as a change: at `at` if that is given
+ * (where something was dropped), else in place of the selection, with the caret after it. At the end
+ * of the page, on a line of its own, if `at` is `"end"`, or if the place is a caret in the header
+ * block or at the very top of the page (the page was only just opened, and anything put there would
+ * break the header).
+ */
+export function insertReference(state: EditorState, text: string, at?: number | "end"): TransactionSpec {
+  const bodyStart = pageBodyStart(state);
   const main = state.selection.main;
   const from = at === "end" ? 0 : (at ?? main.from);
   const to = at === undefined ? main.to : from;

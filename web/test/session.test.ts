@@ -406,7 +406,7 @@ describe("the sample notebook", () => {
     }
     expect(missing.sort()).toEqual(["Help:Links: [[Not written yet]]", "Ideas: [[Beekeeping]]"]);
     // and the pages that other pages lead to are found by their backlinks
-    expect(s.backlinks("Projects:Garden").map((b) => b.from)).toContain("Journal:2026-10-06");
+    expect(s.backlinks("Projects:Garden").map((b) => b.from)).toContain("Journal:2026:10:06");
     expect(s.backlinks("Help:Editor").length).toBeGreaterThan(1);
   });
 

@@ -281,8 +281,15 @@ describe("the keymap", () => {
     }
   });
 
-  it("binds each key once", () => {
-    expect(new Set(keys).size).toBe(keys.length);
+  it("binds each key once, except the three that a table and a list share (the table's is tried first, and says no outside a table)", () => {
+    const shared = ["Tab", "Shift-Tab", "Enter"];
+    const rest = keys.filter((key) => !shared.includes(key as string));
+    expect(new Set(rest).size).toBe(rest.length);
+    for (const key of shared) {
+      const bound = zimKeymap.filter((binding) => binding.key === key);
+      expect(bound, key).toHaveLength(2);
+      expect(bound[0]!.run, key).not.toBe(bound[1]!.run);
+    }
   });
 });
 

@@ -20,9 +20,23 @@ yet (CLAUDE.md, Open issues #5).
   (the caret goes there), to a web address (only `http`, `https` and `ftp`, in a window with no way
   back to the app). A link to a page that doesn't exist is drawn differently, and following it shows
   the page as a new page would start; it is only *made* when something is typed in it.
+* **Contents** (a list in the sidebar): the headings of the page that is open, as a person reads them
+  (no `======`, no `**`), indented by level; a click takes the caret to one. It follows what is typed.
+* **Journal and calendar** (a calendar in the sidebar, Monday first): a day's page is `Journal:YYYY:MM:DD`
+  (`zim-notebook.md`); the days that have one are in bold with a dot, today is outlined, the open page's day is
+  filled. A click on a day opens its page (a day with none is shown as a new page: it starts with the day as its
+  title, and is only made when something is written in it); **Today**, and *Today's journal* in the notebook
+  menu, open today's.
+* **Tags** (a list in the sidebar, closed until opened): every `@tag` of the notebook with the number of pages
+  that write it. A click on one, or a Ctrl-click on a tag in a page, shows the pages that have it as search
+  results; the search takes `@tag` words (a tag exactly) together with ordinary ones.
+* **Completing a link**: type `[[` and a letter or two of a page's name; Enter writes the shortest link that
+  leads there from the page you are on (`zim-editor-plan.md`).
+* **Tables**: drawn as a grid, written as lines with a toolbar while the caret is in them; the **Table**
+  button makes one (`zim-editor-plan.md`).
 * **Backlinks** under every page: the pages whose links lead to it, with the line the first one is on.
 * **Search** (`/` focuses it): every word has to be in the page's name or in its text *as a person
-  reads it*: `**bold**` is searched as `bold`, `[[Projects:Garden|the garden]]` as `the garden`, a
+  reads it* (and every `@tag` in the query has to be written, exactly): `**bold**` is searched as `bold`, `[[Projects:Garden|the garden]]` as `the garden`, a
   heading without its `======`, a code block exactly as written. A snippet shows the words found in
   context, with the same markup left out.
 * **Attachments and pictures.** A page's attachments live in the folder named like it, as in Zim
@@ -38,13 +52,18 @@ yet (CLAUDE.md, Open issues #5).
 * **Encrypted notebooks.** New notebook (or Import) can make one; they are listed with the open ones
   and behave the same, but are kept as ciphertext, need a passphrase, and are locked away with the
   Lock button (see `zim-encrypted-notebooks.md` for how, what it protects, and its limits).
-* **A phone-sized screen** gets the tree as a drawer, and the top bar wraps.
+* **A phone-sized screen** gets the tree (with the lists below it) as a drawer, and the top bar wraps.
+* **What is remembered** about the lists: whether Contents, Calendar and Tags are open (`zim:panel:*` in
+  `localStorage`: a setting of the app, not of a notebook). In an encrypted notebook the lists show its
+  headings, days and tags while it is open and are emptied when it is locked, like everything else on the screen
+  (`isPrivate`; the scan of the browser's files covers a heading, a table cell, a day's page and its text, a tag and
+  a link being completed).
 
 ## Layers
 
 | Layer | Where | Does |
 |---|---|---|
-| Rules | `core/zim-notebook` (Rust) | names, link resolution, file references (`files.rs`), tree, backlinks, search, rename that keeps links and file references intact |
+| Rules | `core/zim-notebook` (Rust) | names, link resolution, file references (`files.rs`), tree, backlinks, search (with tags), the journal's days, link completion, rename that keeps links and file references intact |
 | Bindings | `core/zim-wasm`, `web/src/notebook-core.ts` | `NotebookModel` (wasm `Notebook`), page names, `plain` text, `newPageText`, paths |
 | Store | `web/src/notebook/store.ts`, `idb.ts` | where pages are kept: `MemoryStore`, `IndexedDbStore` |
 | Encrypted store | `web/src/vault/` | `TurtlStore` (a store over the Turtl core in a Worker), the `Vault` that a passphrase unlocks: `zim-encrypted-notebooks.md` |
@@ -52,7 +71,7 @@ yet (CLAUDE.md, Open issues #5).
 | Session | `web/src/notebook/session.ts` | an open notebook: the model over a store; every change is written to the store before it is announced |
 | Files | `web/src/notebook/zim-files.ts`, `media.ts`, `web/src/zip.ts` | `notebook.zim`; folders and zips ⇄ pages and attachments; media types |
 | Pictures | `web/src/notebook/file-urls.ts`, `web/src/editor/` | object URLs for stored pictures; the editor draws `{{images}}` from them |
-| App | `web/src/app/` | the interface: tree, dialogs, search, import and export, saving |
+| App | `web/src/app/` | the interface: tree, the lists beside it (`contents.ts`, `calendar.ts`, `tags.ts`), dialogs, search, import and export, saving |
 | On the device | `web/pwa/sw.js`, `web/src/pwa/`, `web/scripts/pwa.mjs`, `web/public/` | the service worker that saves the app and pins its files, its registration and the offers of a new version, the manifest and icons: `zim-pwa.md` |
 
 The app holds no notebook rules of its own: what a link means, what a rename must rewrite and what
@@ -183,9 +202,11 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
 | Session, files, zip | `web/test/session.test.ts` (rename/delete/failed write/export paths/import rules/zip round trips and damage; attachments through rename, delete and export; Zim's manual in and out, every file byte for byte) |
 | The app on the device | `zim-pwa.md` (what verifies what): `web/test/pwa-worker.test.ts` (the worker, in a pretend browser), `pwa-page.test.ts`, `pwa-build.test.ts`, and the scenarios "The app on the device" in `browser.mjs` |
 | Encrypted notebooks | `zim-encrypted-notebooks.md` (what verifies what); `web/test/{vault,engine-failures,cut-off,turtl-store,routed-store}.test.ts`, `store.test.ts` (the shared contract), `vault-browser.mjs` (`npm run test:vault`) |
+| Contents, calendar, tags, link completion | `cargo test -p zim-notebook` (`tags`, `journal`, `complete`), `web/test/zim-features.test.ts` (the shapes across wasm, the calendar against the browser's own dates for every day of two centuries, headings as people read them, the completion source and what choosing writes), and in Chromium the scenarios "the contents list…", "the calendar marks…", "tags are listed…", "a link is completed…" |
+| Tables | `cargo test -p zim-format` (`tests/table.rs`: reading, escapes, every edit, byte-exact round trip), `web/test/tables.test.ts` (where the caret is, each edit and where the caret goes, Tab/Enter/arrows, insert, how a table is drawn and when), and in Chromium "a table is drawn as a grid…", "in a table Tab…", "the toolbar of a table…", "the Table button…" |
 | Pictures | `web/test/editor.test.ts` (images with a host: pictures, chips and why, caret and selection rules, Ctrl-click), `commands.test.ts` (where a reference goes), `file-urls.test.ts` (loading, stale addresses, failures not retried) |
 | **The app in Chromium** | `web/test/browser.mjs`: the scenarios below, on the built app, served by the same server `npm run serve` runs |
-| How it looks | `npm run screenshots <dir>`: twelve screenshots (light, dark, phone, dialogs, search, menu, pictures, the viewer) to look at |
+| How it looks | `npm run screenshots <dir>`: screenshots (light, dark, phone, dialogs, search, menu, pictures, the viewer, tables as a grid and as text, the journal and tags, completing a link) to look at |
 
 The browser scenarios, each in a fresh profile (so a fresh IndexedDB): the editor (rendering, markup
 shown where the caret is, typing, undo, checkbox clicks, shortcuts, list editing, carriage returns,
@@ -193,7 +214,13 @@ every real Zim page loaded); starting on the sample; tree and Back/Forward and r
 the tree by keyboard (focus stays in it); Ctrl-click, anchors and plain names; missing links and
 creating a page by typing; backlinks; new page and sub-page with name checks; rename (links follow;
 after a reload everything is as renamed; without link updates; refused names); delete; sections;
-search; autosave and Ctrl+S across a reload; typing kept when the page closes in the middle of a
+search; the contents of a page (its headings as people read them, a click that goes there, what is typed, open or closed
+remembered); the calendar (a month, the days that have a page, a day opened, today's page started with the day as its
+title, other months, Today and the menu, the arrow keys and the one stop for Tab); tags (listed, shown by a click or a
+Ctrl-click, searched for exactly, the list following what is written); completing a link (the best first, the shortest
+link written, the mouse, the arrows, Escape, nothing in code); tables (a grid with its cells formatted, the text and a
+toolbar while the caret is in it, the arrows into it, Tab and Enter and Shift+Enter, the toolbar's buttons and Alt+F10,
+the Table button); autosave and Ctrl+S across a reload; typing kept when the page closes in the middle of a
 write, and an old draft not overwriting a newer page; a failing store; a browser that keeps nothing
 (the app runs from memory, says so, and can still export); attachments (the button, paste, drop on
 text, on a bullet, on the page and outside it; the panel; pictures at their sizes; the viewer; chips
@@ -208,7 +235,8 @@ from a deflate zip that Python made**; links that could run code; deep links; a 
 and encrypted notebooks through the interface: made with a passphrase and written in, locked and
 unlocked after a reload, Back and Forward and the address and tab title saying nothing, no draft
 left behind, export with its warning, import as encrypted, rename, delete, a lost passphrase erased,
-a short passphrase refused, auto-lock, the browser's promise to keep the data (also when it comes
+a short passphrase refused, the lists beside the page and a table and a link being completed leaving nothing
+in what the browser keeps, auto-lock, the browser's promise to keep the data (also when it comes
 late), a page that isn't secure, the passphrase changed from the menu (and a lock that comes in the
 middle of it), the encrypted notebooks backed up from the menu and restored in another browser, and a
 scan of everything the browser keeps for a notebook's contents;
@@ -236,7 +264,7 @@ scripts/setup-browser.sh                        # once
 ZIM_GOLDEN_DIR=~/.cache/turtlzim-labs/zim-desktop-wiki npm run test:browser
 ONLY="rename" npm run test:browser              # just the scenarios whose name has "rename"
 SCREENSHOTS=dir npm run test:browser            # a failing scenario leaves a screenshot of the page in dir
-npm run screenshots dir                         # the twelve pictures of the app
+npm run screenshots dir                         # the pictures of the app
 scripts/serve.sh start --host :: --port 8080    # serve it (docs/zim-editor-plan.md: trying it from another machine)
 ```
 
@@ -262,8 +290,10 @@ typing can reproduce (found as a rare flake, bisected, and the stress loop went 
 * **Persistence is the browser's to give.** `navigator.storage.persist()` is requested, but a browser
   may refuse, and a user can clear site data; export is the backup. Where a profile will not store
   anything (some private windows) the app runs from memory and says so.
-* **Not yet Zim features:** journal pages and a calendar, a tag list, a table of contents, templates,
-  page properties, the header block hidden (it is shown, dimmed), tables.
+* **Not yet Zim features:** templates, page properties, the header block hidden (it is shown, dimmed),
+  journals of weeks and months (only days), a calendar in a language but English (the titles of days and the
+  names of months), tags that are pages or nest, pictures in the cells of a table, and the other lists
+  of Zim's side pane (the index of tagged pages is the search).
 * **Synced or shared notebooks** (and lazy indexing, replacing the notebooks' keys when the passphrase
   changes, and the other limits of the encrypted kind: `zim-encrypted-notebooks.md`): the sync server comes next (CLAUDE.md, Open issues
   #3, #5, #6).

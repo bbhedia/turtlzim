@@ -20,7 +20,9 @@ if (!out) {
 }
 mkdirSync(out, { recursive: true });
 
-const server = createStaticServer({ dir: fileURLToPath(new URL("../dist/", import.meta.url)) });
+// (ZIM_DIST: another build of the app to take the pictures of, as in browser.mjs)
+const dist = process.env.ZIM_DIST ?? fileURLToPath(new URL("../dist/", import.meta.url));
+const server = createStaticServer({ dir: dist });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
 const browser = await launchBrowser();
@@ -73,6 +75,41 @@ page = await open({ width: 390, height: 800 });
 await shot(page, "7-phone-home");
 await page.locator(".icon-button").click();
 await shot(page, "8-phone-tree");
+await page.locator("details.tags summary").click();
+await shot(page, "8a-phone-tree-with-the-lists");
+await page.close();
+
+console.log("tables, the journal, tags, completing a link");
+page = await open({ width: 1280, height: 820 });
+await goTo(page, "Help:Tables");
+await shot(page, "23-table-as-a-grid");
+await page.locator(".cm-zim-grid td", { hasText: "pears" }).click();
+await shot(page, "24-table-being-edited");
+await goTo(page, "Journal:2026:10:06");
+await page.locator("details.tags summary").click();
+await shot(page, "25-journal-calendar-and-tags");
+await page.locator(".tags-list .link-button", { hasText: "@garden" }).click();
+await shot(page, "26-pages-of-a-tag");
+await page.keyboard.press("Escape");
+await page.evaluate(() => document.activeElement?.blur());
+await goTo(page, "Projects");
+await page.locator(".cm-content").click();
+await page.keyboard.press("Control+End");
+await page.keyboard.type("see [[gard");
+await page.locator(".cm-tooltip-autocomplete").waitFor();
+await shot(page, "27-completing-a-link");
+await page.close();
+
+console.log("tables, dark");
+page = await open({ width: 1280, height: 820 }, "dark");
+await goTo(page, "Help:Tables");
+await shot(page, "28-dark-table-as-a-grid");
+await page.locator(".cm-zim-grid td", { hasText: "pears" }).click();
+await shot(page, "29-dark-table-being-edited");
+await page.keyboard.press("Control+End");
+await page.keyboard.type("\nsee [[tag");
+await page.locator(".cm-tooltip-autocomplete").waitFor();
+await shot(page, "30-dark-completing-a-link");
 await page.close();
 
 console.log("pictures and attachments");
@@ -172,7 +209,7 @@ await page.close();
 
 console.log("the app on the device (a copy of the app, so that a second version can be put on its server)");
 const copy = mkdtempSync(join(tmpdir(), "zim-shots-"));
-cpSync(fileURLToPath(new URL("../dist/", import.meta.url)), copy, { recursive: true });
+cpSync(dist, copy, { recursive: true });
 writeServiceWorker(copy);
 const site = createStaticServer({ dir: copy });
 await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));

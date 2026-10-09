@@ -91,12 +91,50 @@ the parser's spans, never from sniffing the text. `Mod` is Ctrl, or Cmd on a Mac
 | `Enter` | in a list: continue it (numbers and letters count up, boxes start open); on an empty item go out a level, then off the list |
 | `Backspace` right after a marker | take the item out a level, then off the list |
 | `Tab` · `Shift-Tab` | nest · un-nest the selected list items (a tab in plain text) |
-| `Ctrl/Cmd-click` | follow a link (`onNavigate`) |
+| In a table: `Tab` · `Shift-Tab` | the next · previous cell, with its text selected; `Tab` after the last cell makes a row |
+| In a table: `Enter` · `Shift-Enter` | the cell below (a row below the last; on an empty last row, out of the table) · a line break in the cell (`\n`) |
+| In a table: `Alt-F10` | to its toolbar (the arrows between the buttons, `Escape` back) |
+| `ArrowDown` · `ArrowUp` beside a table | into its first · last row (the editor's own arrows go over a table drawn as a grid) |
+| `[[` and a key | the pages the link may lead to (`completeLink`): arrows and `Enter` choose, `Escape` puts the list away |
+| `Ctrl/Cmd-click` | follow a link (`onNavigate`) or a tag (`onTag`), in a page or in the cell of a table |
 
 An inline toggle takes the style off when the caret or selection is inside a construct of that kind;
 otherwise it wraps the selection (trimmed, one piece per line), or the word under a bare caret, or
 inserts an empty pair. Keys a browser reserves for itself cannot be bound by a page (Ctrl+1..9 switch
 tabs, Ctrl+T opens one), hence Ctrl+Alt+digit for headings.
+
+## Tables, completing a link, and tags
+
+**A table is a grid until the caret comes into it.** A block of `|` lines that `table::parse` can read
+(spec §2.7) is drawn by a block widget in place of its lines (`web/src/editor/table-widget.ts`): a grid with
+the header, the columns lined up as the table says, and each cell's text *formatted* (bold, italic, code, links,
+tags: the syntax characters are left out; a cell is read by the same `highlight` as a page). The document is the
+same text throughout: the widget is a decoration, nothing is parsed back, and looking at a table changes no
+byte. A click puts the caret at the end of that cell *in the text*, which turns the table into its lines
+(`cm-zim-table`, monospace) with a toolbar widget over the first of them; once the caret is out of the block the
+grid is back (*Show markup* keeps the lines). A table that can't be read (a header and nothing below it) is only
+lines, as before. Ctrl/Cmd-click on a link or a tag in a cell follows it, through `followFacet` (a widget can't reach
+the options the editor was made with). The editor's own up and down arrows go *over* a block widget, so the keymap has
+arrows of its own that go in, when the line beside the caret is a table.
+
+Editing is the Rust code's. Each command (`table-commands.ts`) reads the block (`tableLayout`), asks for the new
+text (`tableAddRow`, `tableDeleteColumn`, `tableSetAlign`, `tableFormat` …), and puts it in as one change (one undo)
+with the caret in the cell where the person goes on. The toolbar: `+ Row`, `− Row`, `+ Column`, `− Column`,
+`Left`/`Center`/`Right` (the one that is the column's is pressed), `Tidy`; what can't be done is disabled (the header,
+the only row below it, the only column). A button acts where the caret is and gives the focus back to the page. **Insert
+table** (`ZimEditor.insertTable`, the app's **Table** button): a block of its own below the line the caret is on (or on its
+empty line, with an empty line each side, and never in the header of the page), with the first header selected to be
+written over.
+
+**Completing a link** (`completion.ts`, `@codemirror/autocomplete`): after `[[` and one key, the host's `completeLink(typed)`
+is asked (in the app it is `complete_link` of `core/zim-notebook`: `zim-notebook.md`). The list is in the host's order
+(`filter: false`); each entry shows the page, the link that will be written when that is not the name (`[[+Garden]]`), and
+says *section* for a page that only holds pages. Choosing one writes the link and its closing brackets in one change (the
+brackets already there are taken for its own; a caret in the middle of a closed link replaces its whole target) with the
+caret after it. Nothing is offered in the header, in code, or in a page that can't be changed, nor after a `|` or `#`. The
+keys are the library's; an Enter in the first moments after the list opens is typing, not a choice.
+
+**Tags** are drawn as before; Ctrl/Cmd-click on one calls `onTag(name)` (the app shows the pages that have it).
 
 ## Performance
 
@@ -220,6 +258,9 @@ selection shows it directly.
 - [x] Notebook app around it (`zim-web-app.md`): page tree, links followed and drawn as missing,
       backlinks, plain-text search, rename that keeps links intact, import and export of folders and
       zips, saving that survives a reload or a closing page, phone layout.
+- [x] Tables (a grid with formatted cells, the text and a toolbar while the caret is in it, Tab/Enter/arrow keys,
+      insert), completing `[[links]]`, Ctrl-click on a tag: this section and `web/test/tables.test.ts`,
+      `zim-features.test.ts` and the scenarios of `browser.mjs`.
 - [x] Encrypted notebooks (`zim-encrypted-notebooks.md`): the same editor over the Turtl core in a
       Worker; a notebook is open or encrypted, and an encrypted one is kept out of the address, the
       title and the browser's own storage.
@@ -234,9 +275,13 @@ selection shows it directly.
   stays drawn while the caret is beside it; selecting it, or placing the caret inside its source,
   shows the source, and double-clicking selects it. Pictures, drops and pastes of files are the
   host's: `onFiles`, `insert`.
-- **Completing page names** (typing `[[` to get a list of pages) is not there; following and
-  drawing links is (the editor raises `onNavigate`, the app resolves it with the notebook rules).
-- **Tables and object blocks** (`{{{code ...}}}`) are shown raw, as the format crate keeps them opaque.
+- **Completing links** offers pages and sections only: not headings (`Page#`), files (`./`) or the display
+  part after `|`.
+- **Object blocks** (`{{{code ...}}}`) are shown raw, as the format crate keeps them opaque. **Tables** are
+  drawn with each cell's text formatted, but a cell holds no pictures; there are no merged cells, no sorting, no
+  drag to resize or move a row or column (the toolbar adds, deletes and aligns), and a table in a list item or
+  indented is not one (the parser's rule). Moving through a table is by Tab, Enter and the arrows; there is no
+  selection of cells.
 - **The header block** is shown, dimmed. Zim hides it; folding it is a small follow-up.
 - **Accessibility**: Tab is a list command (it traps keyboard focus, as most editors do; CodeMirror's
   tab-focus-mode toggle is not wired up), and the checkbox/bullet widgets have roles but no keyboard

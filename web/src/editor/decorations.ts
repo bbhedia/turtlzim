@@ -7,6 +7,11 @@ import type { Spans } from "../spans";
 import { imageParam, imagesIn } from "../notebook-core";
 import type { TextImage } from "../notebook-core";
 import { imageSourceFacet, linkStatusFacet, refreshLinks, setShowMarkup, showMarkupField, spansOf } from "./syntax";
+import { followFacet } from "./follow";
+import { linkToFollow } from "./links";
+import { cachedLayout, placeIn, whatCanGo } from "./table-commands";
+import { TableToolbar, TableWidget } from "./table-widget";
+import type { GridHost } from "./table-widget";
 import { BulletWidget, CheckboxWidget, ChipWidget, ImageWidget, RuleWidget, isCheckbox } from "./widgets";
 
 /** The decorations of a document, and the subset of them that hide text (the caret skips those). */
@@ -54,6 +59,13 @@ export function buildDecorations(state: EditorState, spans: Spans, showMarkup: b
 
   const all: Range<Decoration>[] = [];
   const atomic: Range<Decoration>[] = [];
+
+  // what a click with Ctrl in the grid of a table does with a link or a tag in a cell: what the editor was given for the page's own
+  const follow = state.facet(followFacet);
+  const gridHost = (): GridHost => ({
+    ...(follow.link ? { followLink: (target: string, a: number, b: number) => follow.link?.(linkToFollow(target, a, b)) } : {}),
+    ...(follow.tag ? { followTag: (tag: string) => follow.tag?.(tag) } : {}),
+  });
 
   const lineDeco = (pos: number, cls: string, style?: string): void => {
     all.push(Decoration.line({ class: cls, ...(style ? { attributes: { style } } : {}) }).range(pos));
@@ -137,11 +149,27 @@ export function buildDecorations(state: EditorState, spans: Spans, showMarkup: b
         }
         break;
 
-      case Kind.Opaque:
+      case Kind.Opaque: {
+        // A table that can be read as one is drawn as a grid, until the caret comes into it: then it is the text it is
+        // written as, with a toolbar over it. (Anything else in this kind of block is shown as written.)
+        const text = detail === Opaque.TABLE ? state.sliceDoc(from, to) : "";
+        const layout = detail === Opaque.TABLE ? cachedLayout(text) : undefined;
+        if (layout && !reveal(from, to)) {
+          all.push(Decoration.replace({ widget: new TableWidget(text, gridHost()), block: true }).range(from, to));
+          skipUntil = to;
+          break;
+        }
         eachLine(from, to, (line) =>
           lineDeco(line.from, `cm-zim-opaque ${detail === Opaque.OBJECT ? "cm-zim-object" : "cm-zim-table"}`),
         );
+        const head = state.selection.main.head;
+        if (layout && !state.readOnly && head >= from && head <= to) {
+          const { row, column } = placeIn(layout, text, head - from);
+          const can = whatCanGo({ from, to, text, layout, row, column });
+          all.push(Decoration.widget({ widget: new TableToolbar({ canDeleteRow: can.row, canDeleteColumn: can.column, align: layout.aligns[column] ?? "normal" }), block: true, side: -1 }).range(from));
+        }
         break;
+      }
 
       case Kind.Marker: {
         const owner = detail;
