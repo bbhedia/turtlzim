@@ -2106,6 +2106,245 @@ async fn vault_backup_moves_a_vault_to_another_computer() {
 #[cfg(not(target_arch = "wasm32"))]
 async_test!(vault_backup_moves_a_vault_to_another_computer_flow, vault_backup_moves_a_vault_to_another_computer());
 
+// ---------------------------------------------------------------------------------------------
+// what a review of the passphrase change and the backup found: checks that nothing tested, and two things that were wrong
+// ---------------------------------------------------------------------------------------------
+
+/// Let go of the file that `vault_of_two` made (natively it is a file of its own, which outlives the test).
+fn forget_the_file(turtl: &Turtl, vault: &TwoNotebooks) {
+    let mut db_guard = lock!(turtl.db);
+    crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&vault.file_note)).unwrap();
+}
+
+/// The cost that an unfinished change of passphrase asks for is held to what a device can do, as the account's own is,
+/// before anything is tried: a record that asks for more is refused whichever passphrase is typed, the one that opens
+/// the account as it is included (that one has the cost it was made at, and the other is the one that would be tried).
+async fn local_pending_cost_is_held() {
+    use crate::models::protected::Protected;
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.make_local_only();
+    let (first, second) = ("the first passphrase of this vault", "the second passphrase of this vault");
+    let name = "pending-cost-vault";
+    let vault = vault_of_two(&turtl, name, first).await;
+    let change = User::prepare_local_change(&turtl, &String::from(first), &String::from(second)).unwrap();
+    User::begin_local_change(&turtl, &change).unwrap();
+    drop(change);
+    let written = Kept::of(&turtl, name);
+    assert!(written.record().get("pending").is_some());
+    let with_cost = |ops: i64, mem: i64| {
+        let mut record = written.record();
+        record["pending"]["kdf"] = json!({"ops": ops, "mem": mem});
+        Kept { record: jedi::stringify(&record).unwrap(), keys: written.keys.iter().map(|row| Protected::clone(row).unwrap()).collect() }
+    };
+    // (more than the most a record may ask, in ops and in memory; both fit in the 32 bits of wasm32)
+    for (ops, mem) in &[(1i64 << 26, 134217728i64), (4194304, (1i64 << 30) + 1)] {
+        for typed in &[first, second] {
+            with_cost(*ops, *mem).put_back(&turtl, name);
+            let started = crate::util::get_time();
+            let refused = relogin(&turtl, name, typed).await.unwrap_err();
+            match refused.shed() {
+                TError::BadValue(message) => assert!(message.contains("more to log in than this device allows"), "ops {} mem {}: {}", ops, mem, message),
+                other => panic!("ops {} mem {}, {:?} typed: expected the cost to be refused, got {:?}", ops, mem, typed, other),
+            }
+            let took = (crate::util::get_time() - started).num_milliseconds();
+            assert!(took < 2000, "it should be refused without trying, not after {} ms", took);
+            assert!(!lockr!(turtl.user).logged_in);
+        }
+    }
+    // the record as it was written is no such thing: it logs in, and the change is settled
+    written.put_back(&turtl, name);
+    assert_eq!(relogin(&turtl, name, second).await.unwrap(), Some(true));
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    forget_the_file(&turtl, &vault);
+}
+async_test!(local_pending_cost_is_held_flow, local_pending_cost_is_held());
+
+/// A change of passphrase that fails after the record was written (here, a row of the user's own that the key can't
+/// seal) is dropped whole: the record is what it was to the byte, the new passphrase opens nothing, the old one opens
+/// everything as before, and another change can be begun at once.
+async fn local_passphrase_change_that_fails() {
+    use crate::models::protected::Protected;
+    let server = start_server().await;
+    let mut turtl = test_turtl(&server);
+    turtl.make_local_only();
+    let (first, second) = ("the first passphrase of this vault", "the second passphrase of this vault");
+    let name = "failing-vault";
+    let vault = vault_of_two(&turtl, name, first).await;
+    let before = Kept::of(&turtl, name);
+    let old_key = user_key(&turtl);
+    // a row in the table of the user's own records that is not a record at all
+    {
+        let db_guard = lock!(turtl.db);
+        db_guard.as_ref().unwrap().store_value("users", &json!({"id": "not-a-user-row", "nonsense": true})).unwrap();
+    }
+    let failed = ask(&turtl, json!(["ff1", "user:change-passphrase", first, second])).await;
+    assert_eq!(failed["e"], json!(1), "the change was meant to fail: {}", failed);
+    let after = Kept::of(&turtl, name);
+    assert!(after.record().get("pending").is_none(), "what was begun was left: {}", after.record);
+    assert_eq!(after.record, before.record, "the account is as it was, to the byte");
+    assert_eq!(after.rows(), before.rows(), "and so are the keys");
+    assert_eq!(user_key(&turtl).data(), old_key.data(), "and the key this session has");
+    assert_eq!(keys_opened_by(&turtl, &old_key), (2, 2));
+    // the damage is mended, and the vault is as before: only the old passphrase opens it
+    {
+        let db_guard = lock!(turtl.db);
+        let mut gone = User::default();
+        gone.set_id(String::from("not-a-user-row"));
+        db_guard.as_ref().unwrap().delete(&gone).unwrap();
+    }
+    assert_unauthorized(relogin(&turtl, name, second).await);
+    assert_eq!(relogin(&turtl, name, first).await.unwrap(), None, "there was nothing to settle");
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    // and a change can be made now
+    let changed = ask(&turtl, json!(["ff2", "user:change-passphrase", first, second])).await;
+    assert_eq!(changed["e"], json!(0), "{}", changed);
+    assert_unauthorized(relogin(&turtl, name, first).await);
+    relogin(&turtl, name, second).await.unwrap();
+    assert_vault_reads(&turtl, &vault, &[]).await;
+    assert!(Protected::key(&*lockr!(turtl.user)).is_some());
+    forget_the_file(&turtl, &vault);
+}
+async_test!(local_passphrase_change_that_fails_flow, local_passphrase_change_that_fails());
+
+/// A backup that holds an account that a core without a server can't make is refused whole, however well it is made as a
+/// file, and nothing of it is kept: a name that is a path, or has capitals (logging in makes a name lower case, so it would
+/// be there and never open), an id that is not a number, a cost that no device can bear, a record that is not a user's.
+async fn vault_restore_refuses_accounts_that_cannot_be_made() {
+    use crate::vault_backup::Backup;
+    let server = start_server().await;
+    let local = || { let mut turtl = test_turtl(&server); turtl.make_local_only(); turtl };
+    let a = local();
+    let vault = vault_of_two(&a, "hostile-vault", "the passphrase of the hostile vault").await;
+    let bytes = read_backup_in_pieces(&a, 100_000).await;
+    forget_the_file(&a, &vault);
+    let hostile: Vec<(&str, Box<dyn Fn(&mut Backup)>)> = vec![
+        ("a name with capitals", Box::new(|b| b.name = String::from("Hostile-Vault"))),
+        ("a name that is a path", Box::new(|b| b.name = String::from("../hostile"))),
+        ("an id that is not a number", Box::new(|b| b.record["id"] = json!("abc"))),
+        ("an id that is a path", Box::new(|b| b.record["id"] = json!("../1"))),
+        ("a cost that no device can bear", Box::new(|b| b.record["kdf"] = json!({"ops": 4194304, "mem": (1u64 << 30) + 1}))),
+        ("an unfinished change that costs more than that", Box::new(|b| b.record["pending"] = json!({"auth": "x", "kdf": {"ops": 1u64 << 26, "mem": 134217728}, "data": {}, "new_under_old": "a", "old_under_new": "b"}))),
+        ("no user record", Box::new(|b| b.record["data"] = json!("text"))),
+    ];
+    for (what, edit) in &hostile {
+        let mut backup = Backup::read(&bytes).unwrap();
+        edit(&mut backup);
+        let damaged = backup.write().unwrap();
+        let b = local();
+        let refused = send_backup_in_pieces(&b, &damaged, 100_000).await;
+        assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("bad_value")), "{}: {}", what, refused);
+        assert!(refused["d"]["message"].as_str().unwrap().contains("the backup can't be restored"), "{}: {}", what, refused);
+        assert_eq!(ask(&b, json!(["hv1", "user:local-accounts"])).await["d"], json!([]), "{}: a vault was left", what);
+    }
+    // (the same file, as it was made, restores)
+    let b = local();
+    let restored = send_backup_in_pieces(&b, &bytes, 100_000).await;
+    assert_eq!(restored["e"], json!(0), "{}", restored);
+}
+async_test!(vault_restore_refuses_accounts_that_cannot_be_made_flow, vault_restore_refuses_accounts_that_cannot_be_made());
+
+/// A restore that fails (here, the database of the vault can't be made: a folder is where its file goes) leaves no vault
+/// behind: the account is written last, since it is what makes a vault exist; and the restore goes through when the way is free.
+#[cfg(not(target_arch = "wasm32"))]
+async fn vault_restore_that_fails_leaves_no_vault() {
+    use crate::vault_backup::Backup;
+    let server = start_server().await;
+    let started = || { let mut turtl = test_turtl(&server); turtl.make_local_only(); turtl };
+    let name = "failing-restore-vault";
+    let first_computer = DiskFolder::new("failing-restore-first");
+    let (vault, bytes) = {
+        let a = started();
+        let vault = vault_of_two(&a, name, "the passphrase of the failing restore").await;
+        let bytes = read_backup_in_pieces(&a, 100_000).await;
+        forget_the_file(&a, &vault);
+        a.logout().unwrap();
+        (vault, bytes)
+    };
+    drop(first_computer);
+
+    let _second_computer = DiskFolder::new("failing-restore-second");
+    let b = started();
+    let record = Backup::read(&bytes).unwrap().record;
+    let location = b.get_user_db_location(&String::from(record["id"].as_str().unwrap())).unwrap();
+    ::std::fs::create_dir_all(&location).unwrap();
+    let refused = send_backup_in_pieces(&b, &bytes, 100_000).await;
+    assert_eq!(refused["e"], json!(1), "the restore was meant to fail: {}", refused);
+    assert_eq!(ask(&b, json!(["fr1", "user:local-accounts"])).await["d"], json!([]), "a restore that failed left a vault (an account with no database)");
+    ::std::fs::remove_dir(&location).unwrap();
+    let restored = send_backup_in_pieces(&b, &bytes, 100_000).await;
+    assert_eq!(restored["e"], json!(0), "{}", restored);
+    assert_eq!(ask(&b, json!(["fr2", "user:local-accounts"])).await["d"], json!([name]));
+    drop(b);
+    let b = started();
+    let login = ask(&b, json!(["fr3", "user:login", name, "the passphrase of the failing restore"])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    assert_vault_reads(&b, &vault, &[]).await;
+    forget_the_file(&b, &vault);
+}
+#[cfg(not(target_arch = "wasm32"))]
+async_test!(vault_restore_that_fails_leaves_no_vault_flow, vault_restore_that_fails_leaves_no_vault());
+
+/// A restore that was stopped after the database was written and before the account was (the page closed, the power
+/// gone) leaves a database that belongs to no vault; the next restore, of any backup, is the vault the backup says: nothing
+/// of what the stopped one wrote (notebooks, pages, files) comes with it.
+#[cfg(not(target_arch = "wasm32"))]
+async fn vault_restore_replaces_what_a_stopped_restore_left() {
+    let server = start_server().await;
+    let started = || { let mut turtl = test_turtl(&server); turtl.make_local_only(); turtl };
+    let (name, passphrase) = ("stopped-restore-vault", "the passphrase of the stopped restore");
+    let first_computer = DiskFolder::new("stopped-restore-first");
+    let (vault, older, newer, later_file) = {
+        let a = started();
+        let vault = vault_of_two(&a, name, passphrase).await;
+        let older = read_backup_in_pieces(&a, 100_000).await;
+        // a notebook made later, with a page and a file of its own
+        let space = ask(&a, json!(["sr1", "profile:sync:model", "add", "space", {"user_id": "0", "title": "Later notebook", "color": "#800000"}])).await;
+        assert_eq!(space["e"], json!(0), "{}", space);
+        let later_file = ask(&a, json!(["sr2", "profile:sync:model", "add", "note", {
+            "space_id": space["d"]["id"], "user_id": "0", "type": "zim-file", "title": "Later notebook/later.png",
+            "file": {"name": "later.png", "type": "image/png", "filedata": {"data": crypto::to_base64(&vec![1u8, 2, 3, 4, 5]).unwrap()}},
+        }])).await;
+        assert_eq!(later_file["e"], json!(0), "{}", later_file);
+        let newer = read_backup_in_pieces(&a, 100_000).await;
+        assert!(newer.len() > older.len());
+        let later_file = String::from(later_file["d"]["id"].as_str().unwrap());
+        forget_the_file(&a, &vault);
+        {
+            let mut db_guard = lock!(a.db);
+            crate::models::file::FileData::store_delete(db_guard.as_mut().unwrap(), None, Some(&later_file)).unwrap();
+        }
+        a.logout().unwrap();
+        (vault, older, newer, later_file)
+    };
+    drop(first_computer);
+
+    let _second_computer = DiskFolder::new("stopped-restore-second");
+    {
+        let b = started();
+        let restored = send_backup_in_pieces(&b, &newer, 100_000).await;
+        assert_eq!(restored["e"], json!(0), "{}", restored);
+        assert!(crate::models::file::FileData::file_finder(None, Some(&later_file)).is_ok());
+        // stopped before the account was written: the database and the files are there, and no vault
+        lockr!(b.kv).kv_delete(&format!("local-account:{}", name)).unwrap();
+        assert_eq!(ask(&b, json!(["sr3", "user:local-accounts"])).await["d"], json!([]));
+    }
+    let b = started();
+    let restored = send_backup_in_pieces(&b, &older, 100_000).await;
+    assert_eq!(restored["e"], json!(0), "{}", restored);
+    assert_eq!(restored["d"], json!({"spaces": 2, "notes": 3, "files": 1}));
+    assert!(crate::models::file::FileData::file_finder(None, Some(&later_file)).is_err(), "a file of the stopped restore was left");
+    drop(b);
+    let b = started();
+    let login = ask(&b, json!(["sr4", "user:login", name, passphrase])).await;
+    assert_eq!(login["e"], json!(0), "{}", login);
+    // exactly the notebooks of the older backup: the later one did not come with it
+    assert_vault_reads(&b, &vault, &[]).await;
+    forget_the_file(&b, &vault);
+}
+#[cfg(not(target_arch = "wasm32"))]
+async_test!(vault_restore_replaces_what_a_stopped_restore_left_flow, vault_restore_replaces_what_a_stopped_restore_left());
+
 /// What a JS host sees of the core on wasm32 (wasm_host.rs): everything the core sends goes to the
 /// message handler, the same JSON as on native; without a handler it queues up for the poll
 /// functions; and the core can be stopped. Driven here the way a host would drive it.

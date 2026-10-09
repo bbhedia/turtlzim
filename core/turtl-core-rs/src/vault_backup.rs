@@ -241,10 +241,12 @@ impl Backup {
 }
 
 /// The account's record, checked as what a core without a server can make an account of: a name that is safe to keep it
-/// under, an id that is a number (a user's database is named after it), costs a device can bear, and a record that is a record.
+/// under (and that logging in can find: it makes names lower case, so an account kept under a name with capitals could
+/// never be opened, nor restored over), an id that is a number (a user's database is named after it), costs a device can
+/// bear, and a record that is a record.
 fn checked_account(backup: &Backup) -> TResult<LocalAccount> {
     let name = &backup.name;
-    if name.is_empty() || name.len() > 128 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' || b == b'@') {
+    if name.is_empty() || name.len() > 128 || !name.bytes().all(|b| !b.is_ascii_uppercase() && (b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.' || b == b'@')) {
         return bad_backup("its account has a name that an account can't have");
     }
     let record: LocalAccount = match jedi::from_val(backup.record.clone()) {
@@ -328,7 +330,13 @@ pub(crate) fn restore(turtl: &Turtl, bytes: &[u8]) -> TResult<Value> {
     }
 
     let location = turtl.get_user_db_location(&record.id)?;
+    // What is at the place of the database is left of a restore that was stopped (the page closed, the power gone) after
+    // the database was written and before the account was: with no account there is no vault, so it is nobody's, and it
+    // must not become part of this one (the older of two backups restored after the newer one was stopped would bring the
+    // newer one's notebooks with it). It goes, with the files it had.
+    let _ = storage::delete_db(&location);
     let mut db = Storage::new(&location, schema::get_schema())?;
+    FileData::store_delete(&mut db, Some(&record.id), None)?;
     let mut written_files: Vec<String> = Vec::new();
     let written = (|| -> TResult<()> {
         db.begin()?;
@@ -478,7 +486,8 @@ mod tests {
             edit(&mut backup);
             checked_account(&backup).map(|_| ()).unwrap_err().to_string()
         };
-        for name in &["", "has a space", "a/b", "../x", "with:colon", &"x".repeat(129)] {
+        // (capitals: logging in makes a name lower case, so the account would be there and never open)
+        for name in &["", "has a space", "a/b", "../x", "with:colon", &"x".repeat(129), "A-Vault", "a-vaulT", "VAULT"] {
             assert!(with(&|b| b.name = String::from(*name)).contains("name that an account can't have"), "{:?}", name);
         }
         for id in &["", "abc", "12 3", "../1", "123456789012345678901", "-1"] {
