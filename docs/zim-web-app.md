@@ -209,7 +209,9 @@ and encrypted notebooks through the interface: made with a passphrase and writte
 unlocked after a reload, Back and Forward and the address and tab title saying nothing, no draft
 left behind, export with its warning, import as encrypted, rename, delete, a lost passphrase erased,
 a short passphrase refused, auto-lock, the browser's promise to keep the data (also when it comes
-late), a page that isn't secure, and a scan of everything the browser keeps for a notebook's contents;
+late), a page that isn't secure, the passphrase changed from the menu (and a lock that comes in the
+middle of it), the encrypted notebooks backed up from the menu and restored in another browser, and a
+scan of everything the browser keeps for a notebook's contents;
 and what the review of them found: a question asked on one notebook can't change another, a lock
 closes questions and asks before it loses typing, a page the browser kept is hidden and locks when
 it comes back, a lock that can't switch the screen starts the page again, a dead engine, an unlock
@@ -262,6 +264,6 @@ typing can reproduce (found as a rare flake, bisected, and the stress loop went 
   anything (some private windows) the app runs from memory and says so.
 * **Not yet Zim features:** journal pages and a calendar, a tag list, a table of contents, templates,
   page properties, the header block hidden (it is shown, dimmed), tables.
-* **Synced or shared notebooks** (and the passphrase change, lazy indexing, and the other limits of the
-  encrypted kind: `zim-encrypted-notebooks.md`): the sync server comes next (CLAUDE.md, Open issues
+* **Synced or shared notebooks** (and lazy indexing, replacing the notebooks' keys when the passphrase
+  changes, and the other limits of the encrypted kind: `zim-encrypted-notebooks.md`): the sync server comes next (CLAUDE.md, Open issues
   #3, #5, #6).

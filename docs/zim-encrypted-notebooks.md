@@ -24,6 +24,14 @@ each claim is checked.
   *Unlock encrypted notebooks…*.
 * **I forgot it…** in the unlock dialog is the only way out of a lost passphrase: it erases every
   encrypted notebook of the browser, after saying so.
+* **Change the passphrase…** (notebook menu, while unlocked) asks for the current passphrase and a new
+  one, typed twice, with the same box to tick as when it was chosen. It takes a couple of seconds and
+  the notebooks stay unlocked. If the page is closed in the middle, the next unlock settles it and
+  says how: the passphrase typed is the one the vault has (see *Changing the passphrase*).
+* **Back up the encrypted notebooks…** (unlocked) saves one file, `encrypted-notebooks-<date>.zimvault`,
+  with everything in them, still encrypted. **Restore encrypted notebooks from a backup…** (the notebook
+  menu of a browser that has none) puts it back, locked, and asks for its passphrase (see *Backup and
+  restore*).
 * Exporting an encrypted notebook says first that the zip is **not** encrypted; downloading a page
   or an attachment says, in the status line, that the copy is not.
 * A browser that won't promise to keep the data says so once, when the browser has answered (which
@@ -49,7 +57,8 @@ each claim is checked.
 | The engine's host | `web/src/vault/core-boot.ts`, `core-worker.ts` | starts the core in a module Worker the way `wasm_host.rs` prescribes: wasm, libsodium injected, databases in OPFS, config |
 | The client | `web/src/vault/core-client.ts` | requests as promises, `CoreError`, events, text made fit for the engine's parser (half of a character can't be sent), and the watchdog: "the engine was lost" when it dies loudly, or has been waited for and has said nothing for 45 s |
 | The Worker's network cut-off | `web/src/vault/cut-off.ts` | after boot, `fetch`, `XMLHttpRequest`, `WebSocket` and the other ways a Worker has of reaching out refuse, for good |
-| The vault | `web/src/vault/vault.ts` | one account that a passphrase unlocks: `create`, `unlock`, `lock`, `erase`; one tab at a time; says when it is lost; locking never waits for an unlock that is under way (it ends that engine) |
+| The vault | `web/src/vault/vault.ts` | one account that a passphrase unlocks: `create`, `unlock`, `lock`, `erase`, `changePassphrase`, `exportBackup`, `restoreBackup`; one tab at a time; says when it is lost, and when unlocking settled a change that had been stopped; locking never waits for an unlock that is under way (it ends that engine) |
+| The backup | `core/turtl-core-rs/src/vault_backup.rs` | the backup file's format, how one is made from the vault and checked and put back; the commands that hand it to the host in pieces (`vault:backup:*`, `vault:restore:*`) |
 | The store | `web/src/vault/turtl-store.ts` | a `NotebookStore` over the core (below) |
 | The router | `web/src/notebook/routed-store.ts` | open and encrypted notebooks in one list; encrypted ids carry the prefix `vault:` |
 | The app | `web/src/app/app.ts` | the dialogs, the Lock button, and the **private mode** that keeps an open encrypted notebook out of every place the browser keeps things |
@@ -81,8 +90,8 @@ arrive together or not at all.
   account (N = 2^14). There is no server to slow guessing down and the data is within reach of
   whoever has the browser's files, so the passphrase's cost is all there is. The cost is stored with
   the account (`LocalAccount.kdf`) and a login uses what is stored, so accounts can be made at a
-  higher cost later without locking anyone out; moving an existing account to a new cost needs a
-  re-key, which is not built. A stored cost that no device could pay (more than 1 GiB of memory or
+  higher cost later without locking anyone out; an account made at another cost is moved to the
+  current one when its passphrase is changed. A stored cost that no device could pay (more than 1 GiB of memory or
   2^25 operations) is refused without trying, so a damaged or planted record can't make a login run
   for ever. The salt is made from the account's name, which is random.
   *Checked:* the known-answer test for this cost uses a key made by Python's `hashlib.scrypt`
@@ -112,6 +121,98 @@ arrive together or not at all.
   which is not a wipe (a JavaScript string can't be wiped). The passphrase is the one secret the page
   holds in the same way (see Limits).
 
+## Changing the passphrase
+
+What the passphrase makes is the user's key. The keys of the notebooks are sealed with it (the
+keychain), and so is the private part of the user's own record. Changing the passphrase makes a new key
+from the new passphrase and seals those again with it. **The notebooks' own keys, and so the notes and
+files themselves, do not change**, which is why it costs two key derivations (about 1.3 s in Chromium)
+and nothing more, however much the vault holds.
+
+What that does and does not do:
+
+* After it, the old passphrase opens nothing that is kept: the keychain's rows, the user's record and
+  the account's `auth` are sealed with the new key, and the old ones are written over (below). A person
+  who learns the old passphrase later, and gets the files, has to guess the new one.
+* It can't take back what was copied before: **a copy of the files, or a backup, made before the change
+  still opens with the old passphrase**, and with it the notebooks' keys, which did not change. That is
+  the price of not re-encrypting everything; replacing the notebooks' keys (a re-encryption of every note
+  and file) is not built.
+* It asks for the current passphrase first, as a person who walked up to an unlocked computer should
+  not be able to change it.
+
+**The two places that hold what the key seals are separate files**: the account's record (in the
+key-value store) and the keychain (in the user's database). No single write can change both, so it
+goes in steps that a crash can stop between (`User::change_local_passphrase`):
+
+1. the new key, auth and user record are worked out (nothing is written);
+2. they are written into the account's record next to what is there (`pending`), together with each of
+   the two keys sealed with the other: **from now on either passphrase opens the vault**;
+3. the keys in the user's database are sealed with the new key, in one transaction (all of them or none);
+4. the new auth and user record become the account's, and `pending` goes.
+
+An unlock settles whatever is left (`User::settle_local_change`, before anything is read): a new
+passphrase finishes the change, an old one undoes it, from any of the states a crash can leave
+(nothing sealed yet, all of it, or, should it ever happen, some), and the passphrase that was typed is
+the one the vault has afterwards. The host is told which (`user:passphrase:settled`) and the app says
+so. A change can't be begun while one is unfinished. If a damaged `pending` can't give the key that the
+passphrase typed needs, nothing is written and the person is told to try the other one.
+
+**What is written over.** SQLite leaves a deleted or replaced row in its page until something is
+written over it, and a change of passphrase replaces exactly what must be gone: the record (made bigger
+by `pending` and smaller again, so that it does not go back where it was) and the keys. A real Chromium
+run, reading every byte of the browser's file system and trying every sealed thing in it with the old
+key, found **two sealed things still there after a change: the old user record and the old `auth`**.
+Every database of the core now runs with `PRAGMA secure_delete = ON`, which writes deleted and replaced
+content over with zeros, and the same scan finds none. (This also means a deleted page's ciphertext is
+zeros after the delete, where the section below used to say it might linger. What the browser or the
+operating system does with the storage below SQLite, flash that remaps blocks, a snapshot of the disk,
+is not the app's to wipe.)
+
+## Backup and restore
+
+**Back up the encrypted notebooks…** saves one file with everything in the vault, **still encrypted**, as
+it is kept: the account's record, the rows of the user's database (the keychain with the notebooks'
+keys, the notebooks, the pages) and the files of the pages. Nothing is opened or sealed again to make
+it, so it holds no more than the browser's own files hold (the list in the next section), and it opens
+with the passphrase the vault had when it was made: a passphrase changed since opens the vault, not the
+backup. It is a copy of one moment, taken whole (the core makes it in one command, and the dialog that
+asks for it is modal): what is written afterwards is not in it. Whoever has the file can't read it,
+but can guess its passphrase at 128 MiB a try, so it is to be kept as safely as the notebooks.
+
+It is also how a vault is moved to another computer until there is sync: restored there it is the
+vault, and the two go their own ways from then on. Nothing is merged.
+
+**Restore encrypted notebooks from a backup…** (the notebook menu of a browser that has none) puts it
+back, locked, and then asks for its passphrase. It never replaces a vault that is there (an unlocked
+one, or a locked one: erase it first, from the unlock window's *I forgot it…*). The whole file is checked
+before anything is written; the user's database is written in one transaction and the account's record
+last, since it is the record that makes a vault exist: a restore that is stopped, by anything, leaves
+no vault, and the same file restores afterwards.
+
+```text
+"ZIMVAULT"  the format (u16, now 1)
+then records, each one: kind (u8)  length (u32)  that many bytes     (numbers are big endian)
+  1    account   JSON {"name": ..., "record": ...}          one, the first
+  2    row       JSON {"table": ..., "row": {...}}          one for each row of keychain, spaces, boards, notes, invites, users
+  3    file      length of the note's id (u16)  the id  the file as it is kept (sealed)
+  255  end       SHA-256 of every byte before this record   the last, with nothing after it
+```
+
+What is checked when one is read (`Backup::read`, `checked_account`): how it begins; that every record
+starts and ends where it says; the sum at the end (a file cut short, or with one byte changed, is
+refused: the test changes every byte of a good file, one at a time, and every one is caught); known
+tables only; an id for every row, no row or file twice, a file only for a note that is there and whose
+id is safe to be part of a file's name; and the account: a name and an id that can't be a path, costs
+that a device can bear, a record that is a record. The sum is for accidents. It can't tell a file made
+on purpose from a real one, and does not need to: a vault opens only with its own passphrase and
+everything in it is sealed.
+
+Limits: a backup may be up to 1 GiB, the engine holds all of it in memory while it makes or restores
+one (about twice its size at the peak), and it crosses between the page and the engine as text, 2 MiB
+at a time. A backup does not follow a passphrase change, and does not include what a browser keeps
+outside the vault.
+
 ## What is stored, and what a thief of the browser's files learns
 
 The core's databases are SQLite files in the origin-private file system (`turtl-core/`). Everything
@@ -137,8 +238,9 @@ keys of notebooks and notes.
 None of it says what is in them. If the number of pages or the moment you last wrote matters to you,
 it is visible.
 
-Deleted notes' ciphertext may stay in the database's free pages until overwritten (only ciphertext was
-ever written, so there is no plaintext to wipe).
+Deleted and replaced rows are written over with zeros (`secure_delete`), so a deleted note's ciphertext,
+and its keys, are not left in the database's free pages (and only ciphertext was ever written, so there
+is no plaintext to wipe).
 
 ## What it protects against, and what it does not
 
@@ -233,15 +335,35 @@ The ids kept are the notebooks' random ids, which are visible in the databases a
   (checked in a real Chromium that proceeds past the warning). That page can't be saved for offline use
   unless the computer trusts the server's authority: `docs/zim-pwa.md`.)
 * **Unlocking costs the whole vault.** `local_start` decrypts and indexes *every* note of *every*
-  encrypted notebook when the vault is unlocked: 2.1 s for 2,700 notes (1.4 s of it is the key). A
-  vault of tens of thousands of notes will be slow to open. The fix is to index lazily (list a
-  notebook from the database's own indexes and decrypt only that notebook's notes); not done.
+  encrypted notebook when the vault is unlocked. Measured in Chromium with `npm run measure:unlock`
+  (pages of about 1.5 KB, each vault made, locked and unlocked after a reload): the key takes about
+  1 s of every unlock whatever the vault holds, and then
+
+  | pages | text | unlock | then opening the notebook reads it |
+  |---|---|---|---|
+  | 1 | 0 | 0.97 s | 0.02 s |
+  | 301 | 0.4 MB | 1.2 s | 0.19 s |
+  | 1,501 | 2.1 MB | 1.7 s | 0.45 s |
+  | 6,001 | 8.6 MB | 7.1 s | 1.9 s |
+
+  so a thousand pages add about 0.5 to 1 s, and a vault of tens of thousands of pages would take
+  half a minute or more to open. (Attachments are not read at unlock.) The fix would be to index lazily
+  (list a notebook from the database's own indexes and decrypt only the notebooks that are opened); it
+  would only help a vault of several big notebooks of which one is opened, since the app reads a whole
+  notebook when it opens it, and it changes what the engine's search and tag commands see. Not done:
+  at the sizes measured the cost is a few seconds behind a spinner, and the change is not worth its risk
+  yet. Nothing larger than 6,000 pages was measured.
 * **Big imports get slower per page as they grow.** Measured in Chromium (one batch of notes of about
   1 KB each): 500 take 1.8 s, 1,000 take 3.1 s, 2,000 take 6.5 s and 4,000 take 14.6 s; the cost of
   one write rose from 2.7 ms to 4.2 ms across the 4,000, and the commit at the end is linear (about
-  a third of a millisecond a note). Nothing larger was measured.
-* **No passphrase change**, no recovery, no second device: sync with the Turtl server is the next
-  step and needs the server revived (CLAUDE.md, Open issues 3 and 5).
+  a third of a millisecond a note). Written in groups of 250 pages of 1.5 KB with `secure_delete` on:
+  1,500 pages took 5.4 s and 6,000 took 30 s (about 5 ms a page at the end).
+* **No recovery, no sync.** A lost passphrase can't be recovered; a vault moves between computers
+  only by a backup, by hand. Sync with the Turtl server is the next step and needs the server revived
+  (CLAUDE.md, Open issues 3 and 5).
+* **Changing the passphrase does not replace the notebooks' keys.** A copy of the files, or a backup,
+  made before the change still opens with the old passphrase, with the keys that did not change (see
+  *Changing the passphrase*).
 * **Attachments are at most 50 MB** each in an encrypted notebook: a file goes through the engine
   whole, as base64 text (several copies of it exist for a moment). Larger files are refused up
   front, with the reason, and nothing is changed.
@@ -275,6 +397,16 @@ The ids kept are the notebooks' random ids, which are visible in the databases a
 | In the interface: made, written in, locked, unlocked; Back/Forward and the address say nothing; no draft; export warns; import and rename and delete; a lost passphrase is erased; a short passphrase is refused; an insecure page says so; auto-lock; **IndexedDB, localStorage, sessionStorage, the Cache API and every OPFS file hold none of a notebook's name, page names, text (accented, Chinese and emoji too: looked for as UTF-8 and as UTF-16, with a control file that shows the scan finds UTF-8), tags, attachment name, type or bytes, nor what was typed in the search box or a dialog that was given up**, nor the passphrase | `web/test/browser.mjs`, the scenarios after "an encrypted notebook is made…" |
 | A question that was asked on one notebook can't change another; a lock closes questions and leaves the notebook shown instead untouched, and Back does not lead into the locked one; a lock asks before it loses typing and an idle one says what it lost, and none of that is anywhere the browser keeps things; a page the browser kept is hidden and then locks; a lock that can't switch the screen starts the page again; a dead engine locks the vault with a message and leaves nothing on the screen; a list of notebooks that can't be got is said so; Escape does not give up an unlock; a late answer from the browser about keeping the data is waited for; a plain copy is said to be plain; a page nobody asked to test has no `window.__zim` | `web/test/browser.mjs`, the scenarios under "What the review of the encrypted notebooks found" |
 
+| A passphrase is changed: a wrong current one, a weak or unchanged new one, an open batch and a core with no vault are refused and change nothing; the notebooks' keys, the user's record and the user's own row are then sealed with the new key and none with the old; the vault goes on (a notebook made afterwards has its key under the new one); only the new passphrase opens it; an account made at another cost moves to the current one; a key that nothing opens is counted and left alone; a change can be made again | `flow_tests::local_passphrase_change_flow`, `local_passphrase_change_of_an_old_account_flow`, `local_passphrase_change_with_a_dead_key_flow`, natively and on wasm32 |
+| A change that is stopped after any of its writes is settled by either passphrase (the new finishes it, the old undoes it, to the byte), the host is told which, a second change on top is refused, and a damaged `pending` is never the end of the vault: what can be done is, and what can't is refused whole and leaves the other passphrase working; with the files on disk and the core started again, the same through `user:login`, and no file holds a passphrase or anything the old key sealed | `local_passphrase_change_interrupted_flow` (written/sealed × old/new, four damages), `local_passphrase_change_on_disk_flow` |
+| Mutation checks of the above: 24 mutants (the pending write dropped, the keys not sealed, the key in memory not replaced, the record not promoted, the settle going the wrong way or without the other key, the login ignoring `pending` or reusing a key across costs, the current passphrase not checked, the same passphrase allowed, a change on top allowed, an open batch missed, the old cost kept, the user's row skipped, a login that does not settle or does not log out after failing, the command not allowed, the algorithm byte trusted) | 23 are caught; the one that was not showed that code was dead (the in-memory keychain entries are re-keyed by `save_key` when used) and it was removed |
+| A damaged envelope header is an error and never a panic: every byte of a good one changed to every value, and every cut | `crypto::tests::damaged_envelopes_are_errors` (found because a test planted a key that nothing opens: the algorithm byte was used to index an array) |
+| What is replaced or deleted is not left in the file; after a change **no sealed thing in any file of the browser's file system opens with the old key** (found two: the old record and the old `auth`), and neither passphrase is in any file | `storage::tests::what_is_replaced_or_deleted_is_not_left_in_the_file` (fails with `secure_delete` off), `vault-browser.mjs`: "the passphrase can be changed…" |
+| A change in the page: the old passphrase is refused afterwards, the new one opens everything, a page written after is kept, what is wrong with the dialog's fields is said as it is typed, a lock that comes in the middle of a change does not hide that it was made, what unlocking settled is told, and nothing of either passphrase or of the notebook is where the browser keeps things | `web/test/browser.mjs`: "the passphrase is changed from the menu…", "a lock that comes while the passphrase is being changed…", "a change of passphrase that unlocking settled is told…"; `vault.test.ts` (plumbing, normalisation, errors, one at a time, the real core) |
+| A change cut off in a real browser, at twenty moments spread over the time it takes, leaves a vault that one of the two passphrases opens, whole, with the passphrase typed as the vault's (the moments rarely fall in the few milliseconds when something is half done: those states are the core's tests above, which stop the change between its writes) | `vault-browser.mjs`: "a change of passphrase that is cut off at any moment…" |
+| A backup is a file that reads back as it was written, refuses everything that is wrong with one (every cut, every changed byte, each way a made file can be wrong), restores in a core that has none, and not over a vault or an unlocked one; it holds nothing that can be read, comes in pieces of any size, and a restore moves a vault to another computer with its keys, pages, files and user row, under the passphrase it had when the backup was made | `vault_backup::tests`, `flow_tests::vault_backup_in_pieces_flow` (both targets), `vault_backup_moves_a_vault_to_another_computer_flow` (native, files on disk, the file folder emptied between); 24 mutants of the backup code (the sum not checked, anything allowed after the end, an unknown table, a file for no note or for a note whose id is a path, a row twice, any cost, id or name, restoring over a vault or an unlocked one, files or rows or the user's row not backed up or not put back, a batch cut in two, pieces out of order or too big, the commands not allowed) are all caught |
+| In the browser: a backup of a vault restores in another browser profile and opens there, nothing in it or in what the browser keeps there can be read, a damaged, cut or foreign file is refused and leaves no vault, one made after a passphrase change needs the new passphrase and one made before the old, and a restore cut off at four moments leaves a whole vault or none and can be tried again; in the app: the menu offers each only where it can be done, the file is named, downloaded and unreadable, the other browser restores it through the file chooser and unlocks it | `vault-browser.mjs` (the three scenarios and four moments), `browser.mjs`: "the encrypted notebooks are backed up from the menu…" |
+
 The tests that can fail were checked to: each was run with the thing it tests broken (see the commit
 messages), and the ones that did not notice were tightened.
 
@@ -300,19 +432,34 @@ commit messages). The ones that mattered most:
 | Some claims here were stronger than the code ("nothing secret is held by the page's own thread", "a Worker that dies without a word can't be seen", a cost that "can be raised later without locking anyone out", what a rolled-back batch does to files, what the crash test showed) | Corrected in this document |
 
 What the review also said that is **not fixed**, and is in Limits or below: unlocking decrypts and
-indexes everything; someone who can write the files can roll them back or swap ciphertexts; an
-existing account can't be moved to a new cost; the account record's own `id` is not authenticated;
+indexes everything; someone who can write the files can roll them back or swap ciphertexts; the
+account record's own `id` is not authenticated (an existing account can be moved to a new cost since:
+by changing its passphrase);
 a browser that asks the person about keeping the data gets its answer waited for, however long that
 takes.
 
+## What finishing them found
+
+Building the passphrase change, the backup and their tests turned up four things in code that was
+already there. Each was fixed and has a test that fails without the fix.
+
+| Found | What was done |
+|---|---|
+| **Old records stayed in the files.** After a change of passphrase, reading every byte of the browser's file system and trying every sealed thing with the *old* key opened two: the old user record and the old `auth`. SQLite does not write over what is replaced or deleted, and the change makes the record bigger (`pending`) and then smaller, so the new one never lands where the old was. The same holds for every replaced or deleted row of every notebook | Every database runs with `PRAGMA secure_delete = ON`. The core test fails without it (a value replaced by a bigger, then a smaller one is found in the file); the browser scan finds nothing sealed with the old key with it |
+| **A damaged ciphertext could panic the core.** `crypto::decrypt` indexed its list of algorithms with a byte of the data being decrypted: a key row whose bytes were damaged (or made) with a large value there crashed the engine instead of being an error | It is looked up and refused. The test changes every byte of the header of a good envelope to every value, and cuts it at every length |
+| The test that reads every command of the dispatcher to check that each is refused unless allowed did not see an arm written `"a" \| "b" =>` (and would have skipped it) | It reads alternatives |
+| Events are one queue for the whole process, and the tests run side by side: a test that read them took another test's | The outcome of settling a change is also what `local_start` returns, and the one test that reads events looks only at its own account's |
+
 ## Not done
 
-* Changing the passphrase (the core refuses `user:change-password` without a server; it re-encrypts
-  the keychain with a new key and is doable offline).
+* Replacing the notebooks' own keys when the passphrase changes (re-encrypting every note and file:
+  heavy, and it must survive a crash half way as the change of the passphrase does).
+* A backup that is sealed with a passphrase of its own, or that can be restored over a vault, or merged
+  into one.
 * Sync of encrypted notebooks to the Turtl server (the data model is Turtl's own, so the server
   would store ciphertext only; it needs the server revived and a decision about accounts: CLAUDE.md,
   Open issue 5).
 * Lazy indexing (above), per-notebook passphrases (today one vault, one passphrase), a setting for
   the auto-lock time.
-* Moving an existing account to a new scrypt cost (a re-key), and authenticating the account record
-  (its `id` and `kdf` are checked only by a login that must then decrypt the user record).
+* Authenticating the account record (its `id` and `kdf` are checked only by a login that must then
+  decrypt the user record).

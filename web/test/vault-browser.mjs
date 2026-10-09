@@ -69,6 +69,7 @@ async function openLab(context, where = origin, expected = [], query = "") {
 }
 
 const PASSPHRASE = "pale river stone lantern";
+const NEXT = "a different passphrase, quite long";
 const lab = (page, call, ...args) => page.evaluate(({ call, args }) => window.lab[call](...args), { call, args });
 const mustWork = async (outcome, what) => {
   assert(outcome.ok, `${what}: ${outcome.error}: ${outcome.message}`);
@@ -176,6 +177,169 @@ try {
     }
   });
 
+  const SECRETS_FOR_BACKUP = {
+    notebook: "Zebra Journal", home: "Secret Plans Page", text: "the vault door code is 7391", other: "Hidden Sub Page Name",
+    path: "diagram-4417.png", bytes: "ATTACHMENT-BYTES-5529", type: "image/x-secret",
+  };
+  const madeNotebook = (page) =>
+    page.evaluate((s) => window.lab.notebooks.create(s.notebook, [["Home", `${s.home} ${s.text}`], [`Home:${s.other}`, "second page"]], [[s.path, s.bytes, s.type]]), SECRETS_FOR_BACKUP);
+  /** Everything of a notebook as the lab reads it, for comparing what was backed up with what was restored. */
+  const readNotebook = async (page, id) => ({
+    list: (await mustWork(await page.evaluate(() => window.lab.notebooks.list()), "listing")).map((n) => [n.id, n.title, n.home, n.kind]),
+    pages: (await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), id), "reading pages")).map((p) => [p[0], p[1]]).sort(),
+    files: await mustWork(await page.evaluate((id) => window.lab.notebooks.files(id), id), "reading files"),
+  });
+  const backupBytes = (base64) => Buffer.from(base64, "base64");
+
+  await scenario("a backup of the vault is one file that holds nothing that can be read, and restores in another browser, which then opens it with the same passphrase", async () => {
+    const here = await fresh();
+    const elsewhere = await fresh();
+    const another = await fresh();
+    try {
+      const page = await openLab(here);
+      await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+      const made = await mustWork(await madeNotebook(page), "making a notebook");
+      const before = await readNotebook(page, made.id);
+      const started = Date.now();
+      const backup = await mustWork(await lab(page, "exportBackup"), "making a backup");
+      console.log(`  (a backup of a small vault took ${Date.now() - started} ms and is ${backupBytes(backup).length} bytes)`);
+      const bytes = backupBytes(backup);
+      assertEqual(bytes.subarray(0, 8).toString("latin1"), "ZIMVAULT", "it is a backup, by its first bytes");
+      assert(contains(bytes, made.id), "the notebook's id is in it (which shows that the right file was read)");
+      for (const secret of [...Object.values(SECRETS_FOR_BACKUP), "second page", PASSPHRASE]) assert(!contains(bytes, secret), `${JSON.stringify(secret)} can be read in the backup`);
+      // making one changes nothing: the vault is as it was, and still unlocked
+      assertEqual(await lab(page, "unlocked"), true, "still unlocked");
+      assertEqual(await readNotebook(page, made.id), before, "and what is in it is as it was");
+
+      // another browser, which has no vault: the backup is restored, locked, and opens with the passphrase it had
+      const other = await openLab(elsewhere);
+      assertEqual(await mustWork(await lab(other, "exists"), "looking"), false, "nothing is there yet");
+      const restored = await mustWork(await lab(other, "restoreBackup", backup), "restoring");
+      assertEqual(restored, { spaces: 1, notes: 4, files: 1 }, "the notebook, its two pages, the file's own note, and the notebook's own settings");
+      assertEqual(await lab(other, "unlocked"), false, "restored, and locked");
+      assertEqual(await mustWork(await lab(other, "exists"), "looking"), true, "the vault is there");
+      const wrong = await lab(other, "unlock", "pale river stone lantern!");
+      assertEqual([wrong.ok, wrong.error], [false, "WrongPassphraseError"], "a wrong passphrase is refused");
+      await mustWork(await lab(other, "unlock", PASSPHRASE), "unlocking the restored vault");
+      assertEqual(await readNotebook(other, made.id), before, "everything is there, as it was: the notebook, the pages, and the attachment's bytes");
+      await mustWork(await lab(other, "lock"), "locking");
+      // and what it keeps there has nothing that can be read either
+      for (const [path, fileBytes] of await mustWork(await lab(other, "opfsFiles"), "reading what the browser keeps")) {
+        for (const secret of [...Object.values(SECRETS_FOR_BACKUP), "second page", PASSPHRASE]) assert(!contains(fileBytes, secret), `${JSON.stringify(secret)} is in ${path}`);
+      }
+      // it is restored where there is no vault, and nowhere else
+      const again = await lab(other, "restoreBackup", backup);
+      assertEqual([again.ok, again.error], [false, "VaultExistsError"], "not over a vault that is there");
+      await mustWork(await lab(other, "unlock", PASSPHRASE), "the vault that was there is as it was");
+      const vaultHere = await lab(other, "restoreBackup", backup);
+      assertEqual([vaultHere.ok, vaultHere.error], [false, "VaultExistsError"], "nor over one that is unlocked");
+      await mustWork(await lab(other, "lock"), "locking");
+      // the first browser still has what it had
+      assertEqual(await readNotebook(page, made.id), before, "the browser it was made in was not changed by the backup or the restore");
+      await mustWork(await lab(page, "lock"), "locking");
+
+      // a third browser, and files that are not what they should be: each is refused, whole, and no vault is left behind
+      const third = await openLab(another);
+      const damaged = Buffer.from(bytes);
+      damaged[Math.floor(damaged.length / 2)] ^= 0x01;
+      for (const [what, file, why] of [
+        ["a backup with one byte changed", damaged, /the backup can't be restored/],
+        ["a backup cut short", bytes.subarray(0, bytes.length - 1), /the backup can't be restored/],
+        ["a file that is not a backup", Buffer.from("%PDF-1.4 and the rest of a document"), /not a backup of encrypted notebooks/],
+      ]) {
+        const refused = await lab(third, "restoreBackup", file.toString("base64"));
+        assert(!refused.ok && why.test(refused.message), `${what} was not refused as it should be: ${JSON.stringify(refused)}`);
+        assertEqual(await mustWork(await lab(third, "exists"), "looking"), false, `${what}: no vault was left behind`);
+      }
+      // and the backup, after all that: it restores
+      assertEqual((await mustWork(await lab(third, "restoreBackup", backup), "restoring after the refusals")).notes, 4, "restored after all that");
+      await mustWork(await lab(third, "unlock", PASSPHRASE), "unlocking");
+      assertEqual(await readNotebook(third, made.id), before, "and it is whole");
+      await mustWork(await lab(third, "lock"), "locking");
+    } finally {
+      await here.close();
+      await elsewhere.close();
+      await another.close();
+    }
+  });
+
+  await scenario("a backup is the vault as it was when it was made: one made after the passphrase was changed opens with the new one, one made before with the old", async () => {
+    const here = await fresh();
+    const first = await fresh();
+    const second = await fresh();
+    try {
+      const page = await openLab(here);
+      await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+      const made = await mustWork(await page.evaluate(() => window.lab.notebooks.create("Journal", [["Home", "before"]], [])), "making a notebook");
+      const old = await mustWork(await lab(page, "exportBackup"), "a backup before the change");
+      await mustWork(await lab(page, "changePassphrase", PASSPHRASE, NEXT), "changing the passphrase");
+      const fresher = await mustWork(await lab(page, "exportBackup"), "a backup after the change");
+      await mustWork(await lab(page, "lock"), "locking");
+
+      const a = await openLab(first);
+      await mustWork(await lab(a, "restoreBackup", fresher), "restoring the newer backup");
+      const refused = await lab(a, "unlock", PASSPHRASE);
+      assertEqual([refused.ok, refused.error], [false, "WrongPassphraseError"], "the passphrase from before the change does not open a backup made after it");
+      await mustWork(await lab(a, "unlock", NEXT), "the new passphrase opens it");
+      assertEqual((await readNotebook(a, made.id)).pages, [["Home", "before"]], "with its pages");
+      await mustWork(await lab(a, "lock"), "locking");
+
+      const b = await openLab(second);
+      await mustWork(await lab(b, "restoreBackup", old), "restoring the older backup");
+      const refusedNew = await lab(b, "unlock", NEXT);
+      assertEqual([refusedNew.ok, refusedNew.error], [false, "WrongPassphraseError"], "the new passphrase does not open a backup made before the change");
+      await mustWork(await lab(b, "unlock", PASSPHRASE), "the old passphrase does");
+      assertEqual((await readNotebook(b, made.id)).pages, [["Home", "before"]], "with its pages");
+      await mustWork(await lab(b, "lock"), "locking");
+    } finally {
+      await here.close();
+      await first.close();
+      await second.close();
+    }
+  });
+
+  // The engine is ended without a word at a different moment of restoring a backup of 800 pages: whenever it falls, there is
+  // a whole vault or none, and a restore that is tried again goes through.
+  for (const after of [20, 120, 400, 1200]) {
+    await scenario(`a restore cut off in the middle (the tab closes ${after} ms in) leaves a vault that is whole, or none, and can be tried again`, async () => {
+      const here = await fresh();
+      const elsewhere = await fresh();
+      try {
+        const page = await openLab(here);
+        await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+        const made = await mustWork(await page.evaluate(() => window.lab.notebooks.create("Big", [["Home", "before"]], [])), "making a notebook");
+        await mustWork(await page.evaluate((id) => window.lab.notebooks.replace(id, [], Array.from({ length: 800 }, (_, i) => [`Page ${i}`, `text of page ${i}`])), made.id), "writing 800 pages");
+        const backup = await mustWork(await lab(page, "exportBackup"), "making the backup");
+        await mustWork(await lab(page, "lock"), "locking");
+
+        const other = await openLab(elsewhere);
+        const ended = await mustWork(await lab(other, "restoreBackupAndCrash", backup, after), "restoring and ending the engine");
+        assert(ended === "finished" || /^stopped: /.test(ended), `the restore neither finished nor stopped: ${ended}`);
+        await other.reload();
+        await other.waitForFunction(() => window.lab !== undefined);
+        const exists = await mustWork(await lab(other, "exists"), "looking");
+        if (exists) {
+          // finished, as far as anything can tell: then it is the whole vault
+          await mustWork(await lab(other, "unlock", PASSPHRASE), "unlocking what was restored");
+          assertEqual((await readNotebook(other, made.id)).pages.length, 801, "a vault that is there is whole");
+          await mustWork(await lab(other, "lock"), "locking");
+        } else {
+          assert(ended !== "finished", "a restore that finished left no vault");
+          // nothing is there, and the same backup restores now
+          const second = await mustWork(await lab(other, "restoreBackup", backup), "restoring again");
+          assertEqual(second.notes, 802, "and then it is whole (800 pages, Home, and the notebook's own settings)");
+          await mustWork(await lab(other, "unlock", PASSPHRASE), "unlocking");
+          assertEqual((await readNotebook(other, made.id)).pages.length, 801, "every page is there");
+          await mustWork(await lab(other, "lock"), "locking");
+        }
+        console.log(`  (${after} ms: ${ended === "finished" ? "it finished" : exists ? "cut off, and a whole vault was there" : "cut off, and no vault was there"})`);
+      } finally {
+        await here.close();
+        await elsewhere.close();
+      }
+    });
+  }
+
   await scenario("what the browser keeps does not hold the passphrase", async () => {
     const context = await fresh();
     try {
@@ -191,6 +355,124 @@ try {
         assert(!contains(bytes, PASSPHRASE), `the passphrase is in ${path}`);
         assert(!contains(bytes, "pale river"), `a part of the passphrase is in ${path}`);
       }
+    } finally {
+      await context.close();
+    }
+  });
+
+  await scenario("the passphrase can be changed: the old one stops opening the vault, the new one opens it with everything in it, and nothing sealed with the old key is left in what the browser keeps", async () => {
+    const context = await fresh();
+    try {
+      const page = await openLab(context);
+      await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+      const name = await mustWork(await lab(page, "whoAmI"), "asking");
+      const made = await mustWork(await page.evaluate(() => window.lab.notebooks.create("Journal", [["Home", "before the change"]], [["a.bin", "bytes of a file", "application/x-test"]])), "making a notebook");
+      await mustWork(await lab(page, "lock"), "locking");
+
+      // before: what the browser keeps is sealed with the key the old passphrase makes (so that a nothing, afterwards, means something)
+      const before = await mustWork(await lab(page, "sealedWith", name, PASSPHRASE), "looking at what is sealed with the old key");
+      assert(before.opened >= 3, `the notebook's key, the user's record and the account's auth are sealed with the key the passphrase makes: ${JSON.stringify(before)}`);
+      assertEqual((await mustWork(await lab(page, "sealedWith", name, NEXT), "looking at what is sealed with the new key")).opened, 0, "nothing is sealed with the new passphrase's key yet");
+
+      await mustWork(await lab(page, "unlock", PASSPHRASE), "unlocking");
+      const wrong = await lab(page, "changePassphrase", "not the passphrase", NEXT);
+      assertEqual([wrong.ok, wrong.error], [false, "WrongPassphraseError"], "a wrong current passphrase is refused");
+      const weak = await lab(page, "changePassphrase", PASSPHRASE, "short");
+      assert(!weak.ok && /at least 10/.test(weak.message), `a weak new passphrase is refused: ${JSON.stringify(weak)}`);
+      assertEqual(await lab(page, "unlocked"), true, "and the vault is as it was");
+      const started = Date.now();
+      const done = await mustWork(await lab(page, "changePassphrase", PASSPHRASE, NEXT), "changing the passphrase");
+      console.log(`  (changing the passphrase took ${Date.now() - started} ms)`);
+      assertEqual(done.unreadable, 0, "every key could be opened");
+      assert(done.sealed >= 1, `and at least the notebook's was sealed again: ${JSON.stringify(done)}`);
+      assertEqual(await lab(page, "unlocked"), true, "the vault stays unlocked");
+      assertEqual((await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading")).map((p) => [p[0], p[1]]), [["Home", "before the change"]], "what was there is there");
+      // and it goes on working, with the new key: a page written now is kept
+      await mustWork(await page.evaluate((id) => window.lab.notebooks.replace(id, [], [["Later", "written after the change"]]), made.id), "writing after the change");
+      await mustWork(await lab(page, "lock"), "locking");
+
+      // what the browser keeps now: sealed with the key of the new passphrase, and not one thing, not even a copy a database may have left in a page it freed, with the old
+      const afterNew = await mustWork(await lab(page, "sealedWith", name, NEXT), "looking at what is sealed with the new key");
+      const afterOld = await mustWork(await lab(page, "sealedWith", name, PASSPHRASE), "looking at what is sealed with the old key");
+      assertEqual(afterOld.opened, 0, `something is still sealed with the old passphrase's key: ${JSON.stringify(afterOld.where)}`);
+      assertEqual(afterNew.opened, before.opened, "everything that was sealed with the old key is sealed with the new one");
+      const files = await mustWork(await lab(page, "opfsFiles"), "reading what the browser keeps");
+      for (const [path, bytes] of files) {
+        assert(!contains(bytes, PASSPHRASE), `the old passphrase is in ${path}`);
+        assert(!contains(bytes, NEXT), `the new passphrase is in ${path}`);
+      }
+
+      // after a reload: the old passphrase is refused, the new one opens everything
+      await page.reload();
+      await page.waitForFunction(() => window.lab !== undefined);
+      const refused = await lab(page, "unlock", PASSPHRASE);
+      assertEqual([refused.ok, refused.error], [false, "WrongPassphraseError"], "the old passphrase no longer opens the vault");
+      await mustWork(await lab(page, "unlock", NEXT), "unlocking with the new passphrase");
+      assertEqual(await lab(page, "settled"), [], "there was nothing half done to settle");
+      assertEqual((await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading")).map((p) => [p[0], p[1]]).sort(), [["Home", "before the change"], ["Later", "written after the change"]], "the pages are there, the one written after the change too");
+      assertEqual((await mustWork(await page.evaluate((id) => window.lab.notebooks.files(id), made.id), "reading files")).map((f) => f[4]), ["bytes of a file"], "and the file");
+      await mustWork(await lab(page, "lock"), "locking");
+    } finally {
+      await context.close();
+    }
+  });
+
+  await scenario("a change of passphrase that is cut off at any moment leaves a vault that one of the two passphrases opens, whole, and the one typed is the one it has", async () => {
+    const context = await fresh();
+    try {
+      const page = await openLab(context);
+      const reloaded = async () => {
+        await page.reload();
+        await page.waitForFunction(() => window.lab !== undefined);
+      };
+      await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+      const made = await mustWork(await page.evaluate(() => window.lab.notebooks.create("Crash test", [["Home", "before"]], [])), "making a notebook");
+      // how long a change takes here (it is made of two key derivations, and a few writes at the very end): the crashes are placed around the end
+      let current = PASSPHRASE;
+      let next = "calibration passphrase of the vault";
+      const started = Date.now();
+      await mustWork(await lab(page, "changePassphrase", current, next), "a change that is not cut off");
+      const duration = Date.now() - started;
+      current = next;
+      console.log(`  (a change takes ${duration} ms here)`);
+
+      const offsets = [-duration + 300, -600, -300, -200, -150, -120, -100, -85, -70, -60, -50, -40, -30, -22, -15, -8, 0, 20, 60, 150];
+      const histogram = {};
+      for (const [i, offset] of offsets.entries()) {
+        next = `trial ${i} passphrase of the vault`;
+        const after = Math.max(60, duration + offset);
+        const ended = await mustWork(await lab(page, "changePassphraseAndCrash", current, next, after), "changing and ending the engine");
+        assert(ended === "finished" || /^stopped: /.test(ended), `the change neither finished nor stopped: ${ended}`);
+        if (ended !== "finished") assertEqual(await lab(page, "unlocked"), false, "the vault noticed that its engine was gone, and is locked");
+        await reloaded();
+        // (even trials type the new passphrase first, odd ones the old: either may be what is asked for after a crash)
+        const order = i % 2 === 0 ? [next, current] : [current, next];
+        let typed = null;
+        for (const passphrase of order) {
+          const attempt = await lab(page, "unlock", passphrase);
+          if (attempt.ok) {
+            typed = passphrase;
+            break;
+          }
+          assertEqual(attempt.error, "WrongPassphraseError", `trial ${i} (${after} ms): a passphrase that did not open it was refused for another reason: ${attempt.message}`);
+        }
+        assert(typed !== null, `trial ${i} (${after} ms, ${ended}): neither the old nor the new passphrase opens the vault`);
+        const settled = await lab(page, "settled");
+        const how = `${ended === "finished" ? "finished" : "cut off"}, ${typed === next ? "new" : "old"} typed first-or-second, ${settled.length ? (settled[0] ? "an unfinished change was finished" : "an unfinished change was undone") : "nothing to settle"}`;
+        histogram[how] = (histogram[how] ?? 0) + 1;
+        // whole: the page that was there, and nothing half written
+        assertEqual((await mustWork(await page.evaluate((id) => window.lab.notebooks.pages(id), made.id), "reading pages")).map((p) => [p[0], p[1]]), [["Home", "before"]], `trial ${i}: the notebook is whole`);
+        // the passphrase typed is the vault's; the other no longer opens it
+        await mustWork(await lab(page, "lock"), "locking");
+        const other = typed === next ? current : next;
+        const refused = await lab(page, "unlock", other);
+        assertEqual([refused.ok, refused.error], [false, "WrongPassphraseError"], `trial ${i}: the passphrase that was not typed still opens the vault`);
+        await mustWork(await lab(page, "unlock", typed), `trial ${i}: unlocking again with the passphrase that opened it`);
+        assertEqual(await lab(page, "settled"), [], "and there is nothing left to settle");
+        await mustWork(await lab(page, "lock"), "locking");
+        current = typed;
+      }
+      console.log(`  (where the ${offsets.length} cut-offs fell: ${JSON.stringify(histogram)})`);
     } finally {
       await context.close();
     }

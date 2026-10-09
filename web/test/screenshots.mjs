@@ -97,6 +97,14 @@ await page.close();
 console.log("encrypted notebooks");
 page = await open({ width: 1280, height: 820 });
 const topDialog = () => page.locator("dialog.dialog").last();
+// (a browser with no encrypted notebooks can restore some from a backup)
+await page.locator(".notebook-button").click();
+const [chooser] = await Promise.all([page.waitForEvent("filechooser"), page.getByRole("menuitem", { name: "Restore encrypted notebooks from a backup…" }).click()]);
+await chooser.setFiles({ name: "encrypted-notebooks-2026-10-09.zimvault", mimeType: "application/octet-stream", buffer: Buffer.alloc(3_400_000, 1) });
+const restoring = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Restore encrypted notebooks", exact: true }) });
+await restoring.waitFor();
+await shot(page, "13a-restore-dialog");
+await restoring.getByRole("button", { name: "Cancel" }).click();
 await page.locator(".notebook-button").click();
 await page.getByRole("menuitem", { name: "New notebook…" }).click();
 await topDialog().getByLabel("Name").fill("Diary");
@@ -124,7 +132,17 @@ await page.evaluate(() => window.__zim.editor.setText("====== Plans ======\n\nMe
 await shot(page, "16-encrypted-notebook-open");
 await page.locator(".notebook-button").click();
 await shot(page, "17-menu-with-encrypted-notebook");
-await page.keyboard.press("Escape");
+await page.getByRole("menuitem", { name: "Change the passphrase…" }).click();
+const changing = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Change the passphrase", exact: true }) });
+await changing.getByLabel("Current passphrase").fill(passphrase);
+await changing.getByLabel("New passphrase", { exact: true }).fill("short");
+await shot(page, "17a-change-passphrase-dialog");
+await changing.getByRole("button", { name: "Cancel" }).click();
+await page.locator(".notebook-button").click();
+await page.getByRole("menuitem", { name: "Back up the encrypted notebooks…" }).click();
+await page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Back up the encrypted notebooks", exact: true }) }).waitFor();
+await shot(page, "17a2-backup-dialog");
+await page.getByRole("button", { name: "Cancel" }).click();
 // typing that can't be saved (the disk is full, say), and Lock pressed: the person is asked before it is lost
 await page.evaluate(() => { window.__zim.app.session.save = async () => { throw new Error("the disk is full"); }; });
 await page.locator(".cm-content").click();

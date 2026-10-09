@@ -1,8 +1,10 @@
 // A page that puts the vault in reach of the browser tests, which call `lab` from outside: they
 // can't pass functions or classes across, so each call answers with plain data.
+import sodium from "libsodium-wrappers-sumo";
 import { pageKey } from "../../src/notebook-core";
 import type { PageChange, StoredFile, StoredPage } from "../../src/notebook/store";
-import { Vault, VaultBusyError, WrongPassphraseError, NoVaultError, WorkerTransport, vaultSupport } from "../../src/vault";
+import { Vault, VaultBusyError, VaultExistsError, WrongPassphraseError, NoVaultError, NotABackupError, WorkerTransport, vaultSupport } from "../../src/vault";
+import { base64ToBytes, bytesToBase64 } from "../../src/vault/base64";
 import { TurtlStore } from "../../src/vault/turtl-store";
 import { initZim } from "../../src/zim";
 
@@ -29,6 +31,29 @@ const vault = new Vault({
 /** What the vault said happened to it, in order. */
 const happened: string[] = [];
 vault.onChange((event) => happened.push(event.kind === "lost" ? `lost: ${event.reason}` : event.kind));
+/** The changes of passphrase that unlocking settled, in order: true when it finished one, false when it undid one. */
+const settledChanges: boolean[] = [];
+vault.onSettled((finished) => settledChanges.push(finished));
+
+/** Every byte the origin-private file system holds, as [path, bytes]. */
+async function readOpfs(): Promise<Array<[string, Uint8Array]>> {
+  const found: Array<[string, Uint8Array]> = [];
+  const walk = async (dir: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
+    for await (const [name, handle] of (dir as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
+      if (handle.kind === "directory") await walk(handle as FileSystemDirectoryHandle, `${prefix}${name}/`);
+      else found.push([`${prefix}${name}`, new Uint8Array(await (await (handle as FileSystemFileHandle).getFile()).arrayBuffer())]);
+    }
+  };
+  await walk(await navigator.storage.getDirectory(), "");
+  return found;
+}
+
+/** The text of a file's bytes, one character to a byte (what a search for ASCII text needs, whatever else the bytes are). */
+const asLatin1 = (bytes: Uint8Array): string => {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 8192) text += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  return text;
+};
 /** How many times the engine's Worker has said anything since `listen`. */
 let heard = 0;
 const store = new TurtlStore(() => vault.core, pageKey);
@@ -55,6 +80,78 @@ const lab = {
     (lastTransport as unknown as { worker: Worker | null }).worker?.terminate();
   },
   happened: () => [...happened],
+  settled: () => [...settledChanges],
+  changePassphrase: (current: string, next: string) => attempt(() => vault.changePassphrase(current, next)),
+  /** A backup of the vault, as base64 (what a page can hand to a test). */
+  exportBackup: () => attempt(async () => bytesToBase64(new Uint8Array(await (await vault.exportBackup()).arrayBuffer()))),
+  restoreBackup: (backup: string) => attempt(() => vault.restoreBackup(new Blob([base64ToBytes(backup) as BlobPart]))),
+  /** Start restoring a backup, end the engine `after` ms later as a closed tab would, and say how it ended. */
+  restoreBackupAndCrash: (backup: string, after: number) =>
+    attempt(async () => {
+      const restoring = vault.restoreBackup(new Blob([base64ToBytes(backup) as BlobPart]));
+      setTimeout(() => lastTransport?.kill("the tab was closed"), after);
+      return restoring.then(() => "finished", (error: Error) => `stopped: ${error.message}`);
+    }),
+  /** Start changing the passphrase, end the engine `after` ms later as a closed tab would, and say how it ended. */
+  changePassphraseAndCrash: (current: string, next: string, after: number) =>
+    attempt(async () => {
+      const changing = vault.changePassphrase(current, next);
+      setTimeout(() => lastTransport?.kill("the tab was closed"), after);
+      return changing.then(() => "finished", (error: Error) => `stopped: ${error.message}`);
+    }),
+  /**
+   * How many of the things the browser keeps are sealed with the key that `passphrase` makes for the account `name`, and how
+   * many such things there are: found the way a thief with the files and a guess would, by trying every sealed thing in every file
+   * (the live ones and any copy a database left behind in a page it freed) with the key. The vault has to be locked.
+   */
+  sealedWith: (name: string, passphrase: string) =>
+    attempt(async () => {
+      await sodium.ready;
+      // (the key as the core makes it: scrypt at what a vault is made at, with a salt that is made from the account's name)
+      const salt = sodium.crypto_hash_sha512(sodium.from_string(`v0/${name}`)).slice(0, sodium.crypto_pwhash_scryptsalsa208sha256_SALTBYTES);
+      const key = sodium.crypto_pwhash_scryptsalsa208sha256(32, sodium.from_string(passphrase), salt, 4194304, 134217728);
+      let found = 0;
+      let opened = 0;
+      const where: string[] = [];
+      const tried = new Set<string>();
+      for (const [path, bytes] of await readOpfs()) {
+        const text = asLatin1(bytes);
+        // a sealed thing is a header (version 6, one byte of description, 12 bytes of nonce) and the ciphertext: written in base64 in the rows, in hex in the account's auth
+        const candidates: Array<[Uint8Array, string]> = [];
+        for (const match of text.matchAll(/AAYBAA[wxyz][A-Za-z0-9+/]{16,}={0,2}/g)) {
+          if (tried.has(match[0])) continue;
+          tried.add(match[0]);
+          try {
+            candidates.push([sodium.from_base64(match[0], sodium.base64_variants.ORIGINAL), `${path}: ${text.slice(Math.max(0, (match.index ?? 0) - 12), match.index)}…`]);
+          } catch {
+            // not a whole sealed thing (the text it was found in goes on, or it is not base64 after all)
+          }
+        }
+        for (const match of text.matchAll(/000601000c[0-9a-f]{40,}/g)) {
+          if (tried.has(match[0])) continue;
+          tried.add(match[0]);
+          try {
+            candidates.push([sodium.from_hex(match[0]), `${path}: ${text.slice(Math.max(0, (match.index ?? 0) - 12), match.index)}…`]);
+          } catch {
+            // not a whole sealed thing (an odd number of digits: it was cut)
+          }
+        }
+        for (const [sealed, context] of candidates) {
+          // version(2) description-length(1) description(1) nonce-length(1) nonce(12) ciphertext
+          if (sealed.length < 17 + 16 || sealed[2] !== 1 || sealed[4] !== 12) continue;
+          found++;
+          try {
+            sodium.crypto_aead_chacha20poly1305_ietf_decrypt(null, sealed.subarray(17), sealed.subarray(0, 17), sealed.subarray(5, 17), key);
+            opened++;
+            where.push(`opened ${sealed.length}: ${context.replace(/[^\x20-\x7e]/g, ".")}`);
+          } catch {
+            // sealed with another key
+            where.push(`not ${sealed.length}: ${context.replace(/[^\x20-\x7e]/g, ".")}`);
+          }
+        }
+      }
+      return { found, opened, where };
+    }),
   support: () => vaultSupport(),
   secureContext: () => globalThis.isSecureContext,
   unlocked: () => vault.unlocked,
@@ -129,20 +226,9 @@ const lab = {
           worker.postMessage({ url });
         }),
     ),
-  errors: { VaultBusyError: VaultBusyError.name, WrongPassphraseError: WrongPassphraseError.name, NoVaultError: NoVaultError.name },
+  errors: { VaultBusyError: VaultBusyError.name, VaultExistsError: VaultExistsError.name, WrongPassphraseError: WrongPassphraseError.name, NoVaultError: NoVaultError.name, NotABackupError: NotABackupError.name },
   /** Every byte the origin-private file system holds, as [path, bytes]; the vault has to be locked (nothing may hold its files). */
-  opfsFiles: () =>
-    attempt(async () => {
-      const found: Array<[string, number[]]> = [];
-      const walk = async (dir: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
-        for await (const [name, handle] of (dir as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }).entries()) {
-          if (handle.kind === "directory") await walk(handle as FileSystemDirectoryHandle, `${prefix}${name}/`);
-          else found.push([`${prefix}${name}`, [...new Uint8Array(await (await (handle as FileSystemFileHandle).getFile()).arrayBuffer())]]);
-        }
-      };
-      await walk(await navigator.storage.getDirectory(), "");
-      return found;
-    }),
+  opfsFiles: () => attempt(async () => (await readOpfs()).map(([path, bytes]): [string, number[]] => [path, [...bytes]])),
 };
 
 declare global {

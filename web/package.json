@@ -17,6 +17,7 @@
     "test": "vitest run",
     "test:browser": "node test/browser.mjs",
     "test:vault": "node test/vault-browser.mjs",
+    "measure:unlock": "node test/measure-unlock.mjs",
     "screenshots": "node test/screenshots.mjs"
   },
   "dependencies": {

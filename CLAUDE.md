@@ -45,8 +45,9 @@ the core's `zim-format` parser compiled to wasm, so there is one Zim parser. Pla
 Encrypted notebooks (chosen by the user 2026-10-06): the web app keeps them with **the Turtl core
 itself**, compiled to wasm and run in a Worker with `local_only` (no server): one local account (the
 vault, unlocked by a passphrase, scrypt at 128 MiB) holds one Turtl *space* per notebook and one *note*
-per page and per attachment. Design, threat model, limits and what verifies each claim:
-`docs/zim-encrypted-notebooks.md`.
+per page and per attachment. The passphrase can be changed (a crash half way is settled by whichever passphrase
+is typed next) and the whole vault can be backed up to one still-encrypted file and restored in another browser.
+Design, threat model, limits and what verifies each claim: `docs/zim-encrypted-notebooks.md`.
 
 ---
 
@@ -129,7 +130,8 @@ npm run pwa:check                   # is dist/ what its sw.js was made for?  (no
 npm test                            # Vitest: editor logic, headless (ZIM_GOLDEN_DIR=... adds real pages)
 scripts/setup-browser.sh            # once: Chromium + libraries + a font, no root
 npm run test:browser                # the built app in a real browser (ZIM_GOLDEN_DIR=... adds the real Zim manual; ONLY=text picks scenarios)
-npm run test:vault                  # the encrypted-notebook vault in a real browser: Worker, OPFS, reload, crash mid-write (five moments), one tab at a time, the Worker's network cut-off, heartbeat and silent death
+npm run test:vault                  # the encrypted-notebook vault in a real browser: Worker, OPFS, reload, crash mid-write (five moments), a passphrase change and a restore cut off, backup and restore between browsers, every byte of the file system tried with the old key, one tab at a time, the Worker's network cut-off, heartbeat and silent death
+npm run measure:unlock -- [pages ...]      # what unlocking costs as a vault grows (a real browser; numbers in docs/zim-encrypted-notebooks.md)
 npm run screenshots <dir>           # twelve pictures of the app to look at (light, dark, phone, dialogs, pictures)
 scripts/serve.sh start --host :: --port 8080   # serve web/dist in the background (see docs/zim-editor-plan.md: trying it from another machine)
 scripts/serve.sh start --host :: --port 8443 --tls --name ADDRESS   # https for encrypted notebooks from another machine (docs/zim-pwa.md: trusting its certificate)
@@ -172,7 +174,10 @@ docker compose up                   # Postgres + server (define compose file)
   is in anything the browser keeps") is what catches one that doesn't. The core's `local_only` mode
   asks no server for anything: it refuses the network where requests are made and answers only the
   commands in `dispatch::LOCAL_COMMANDS` (a command that a local core needs is added there on purpose;
-  the test that reads every command of the dispatcher says which is missing). Locking must work
+  the test that reads every command of the dispatcher says which is missing). Every database the core opens
+  runs with `secure_delete`: what is replaced or deleted is written over, so a key or record that was replaced
+  (a changed passphrase) is not left in the file, and a new place that keeps something sealed must not
+  go around that. Locking must work
   whatever else fails (the keys go first, the screen second), and a dialog that is confirmed later
   acts only on the notebook it was opened on (`App.stale`).
 - **The built app is pinned by its service worker** (`web/pwa/sw.js`, `docs/zim-pwa.md`). It lists every file of

@@ -25,7 +25,8 @@ import { createStaticServer, selfSignedCertificate } from "../scripts/serve.mjs"
 import { launchBrowser } from "./browser-launch.mjs";
 import { png } from "./pictures.mjs";
 
-const dist = fileURLToPath(new URL("../dist/", import.meta.url));
+// (ZIM_DIST: another build of the app to run the scenarios on, so that a build made to be broken on purpose, to see that a test notices, is never the one a server is serving)
+const dist = process.env.ZIM_DIST ?? fileURLToPath(new URL("../dist/", import.meta.url));
 if (!existsSync(join(dist, "index.html"))) {
   console.error("web/dist is missing: run `npm run wasm && npm run build` first");
   process.exit(2);
@@ -1878,6 +1879,234 @@ try {
     assert((await ui.pageText("Secrets:Plans")).includes("Meet at the old mill."), "and the other");
     await page.locator(".lock-button").click();
     await isOpenNotebook(page);
+  });
+
+  await app("the passphrase is changed from the menu: what is wrong is refused with the reason, the notebooks go on working, and afterwards only the new passphrase opens them", {}, async (ui) => {
+    const { page } = ui;
+    const NEXT = "a different passphrase, quite long";
+    await newEncryptedNotebook(ui, "Diary");
+    await ui.typeAtEnd("The vault door code is 7391.\n");
+    await ui.flush();
+
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Change the passphrase…" }).click();
+    const change = vaultDialog(page, "Change the passphrase");
+    const confirm = change.getByRole("button", { name: "Change the passphrase" });
+    const problem = (text) => change.locator(".field-problem").filter({ hasText: text }).waitFor();
+    // what is wrong with the new passphrase is said as it is typed
+    await change.getByLabel("Current passphrase").fill(PASSPHRASE);
+    await change.getByLabel("New passphrase", { exact: true }).fill("short");
+    await problem("at least 10");
+    await change.getByLabel("New passphrase", { exact: true }).fill(PASSPHRASE);
+    await problem("the passphrase it has now");
+    await change.getByLabel("New passphrase", { exact: true }).fill(NEXT);
+    await change.getByLabel("New passphrase again").fill(`${NEXT}!`);
+    await problem("not the same");
+    assert(await confirm.isDisabled(), "it can't be confirmed like that");
+    await change.getByLabel("New passphrase again").fill(NEXT);
+    assert(await confirm.isEnabled(), "and can once it is right");
+    await confirm.click();
+    await change.locator(".dialog-error").filter({ hasText: "Tick the box" }).waitFor();
+    await change.getByLabel("I understand").check();
+    // a wrong current passphrase is refused, and the dialog stays for another try
+    await change.getByLabel("Current passphrase").fill("not the passphrase at all");
+    await confirm.click();
+    await change.locator(".dialog-error").filter({ hasText: "not the current passphrase" }).waitFor();
+    assert(await change.isVisible(), "the dialog stays open after a wrong current passphrase");
+    await change.getByLabel("Current passphrase").fill(PASSPHRASE);
+    await confirm.click();
+    await noDialogs(page);
+    assert((await ui.status()).includes("Changed the passphrase"), `it says so: ${await ui.status()}`);
+    assertEqual(await ui.notebookTitle(), "Diary", "the encrypted notebook is still open");
+    assert(await page.locator(".lock-button").isVisible(), "and unlocked");
+
+    // it goes on working: a line typed now is saved
+    await ui.typeAtEnd("A line after the change.\n");
+    await ui.flush();
+    assertEqual(await ui.saveState(), "Saved", "what is typed after the change is saved");
+
+    // nothing the browser keeps for the page has either passphrase in it, or anything of the notebook
+    const outside = await visibleOutside(page);
+    for (const secret of [PASSPHRASE, NEXT, "Diary", "7391", "after the change"]) {
+      for (const [where, value] of Object.entries(outside)) assert(!value.includes(secret), `${JSON.stringify(secret)} is in the ${where} of the page: ${value.slice(0, 200)}`);
+    }
+
+    // locked, and after a reload: the old passphrase is refused, the new one opens it with everything in it
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+    await ui.reload();
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Unlock encrypted notebooks…" }).click();
+    const unlocking = vaultDialog(page, "Unlock encrypted notebooks");
+    await unlocking.getByLabel("Passphrase").fill(PASSPHRASE);
+    await unlocking.getByRole("button", { name: "Unlock", exact: true }).click();
+    await unlocking.locator(".dialog-error").filter({ hasText: "not the passphrase" }).waitFor();
+    await unlocking.getByRole("button", { name: "Cancel" }).click();
+    await noDialogs(page);
+    await unlockFromMenu(ui, NEXT);
+    assertEqual(await ui.notebookTitle(), "Diary", "the notebook that was open is open again");
+    assert((await ui.pageText("Home")).includes("The vault door code is 7391."), "its first page is as it was");
+    assert((await ui.pageText("Home")).includes("A line after the change."), "and what was typed after the change is there");
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+  });
+
+  await app("a lock that comes while the passphrase is being changed does not hide that it was changed", {}, async (ui) => {
+    const { page } = ui;
+    const NEXT = "a different passphrase, quite long";
+    await newEncryptedNotebook(ui, "Diary");
+    await ui.typeAtEnd("The vault door code is 7391.\n");
+    await ui.flush();
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Change the passphrase…" }).click();
+    const change = vaultDialog(page, "Change the passphrase");
+    await change.getByLabel("Current passphrase").fill(PASSPHRASE);
+    await change.getByLabel("New passphrase", { exact: true }).fill(NEXT);
+    await change.getByLabel("New passphrase again").fill(NEXT);
+    await change.getByLabel("I understand").check();
+    await change.getByRole("button", { name: "Change the passphrase" }).click();
+    // (the engine is busy making keys for a second or so: the lock is asked for in the middle of it, as the idle timer would)
+    await page.evaluate(() => void window.__zim.app.lockVault("away"));
+    const told = vaultDialog(page, "The passphrase was changed");
+    await told.waitFor({ timeout: 20_000 });
+    const text = await told.innerText();
+    assert(text.includes("open with the new passphrase"), `it says which passphrase the notebooks have: ${text}`);
+    for (const secret of ["Diary", "7391", "Home"]) assert(!text.includes(secret), `it names nothing of the notebooks: ${text}`);
+    await told.getByRole("button", { name: "OK" }).click();
+    await isOpenNotebook(page);
+    await page.waitForFunction(() => document.querySelector(".lock-button").hidden);
+    // and it is true: the new passphrase opens them, the old does not
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Unlock encrypted notebooks…" }).click();
+    const unlocking = vaultDialog(page, "Unlock encrypted notebooks");
+    await unlocking.getByLabel("Passphrase").fill(PASSPHRASE);
+    await unlocking.getByRole("button", { name: "Unlock", exact: true }).click();
+    await unlocking.locator(".dialog-error").filter({ hasText: "not the passphrase" }).waitFor();
+    await unlocking.getByRole("button", { name: "Cancel" }).click();
+    await noDialogs(page);
+    await unlockFromMenu(ui, NEXT);
+    assert((await ui.pageText("Home")).includes("The vault door code is 7391."), "and what is in them is there");
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+  });
+
+  await app("a change of passphrase that unlocking settled is told to the person, in words that say which passphrase the notebooks have now", {}, async (ui) => {
+    const { page } = ui;
+    await newEncryptedNotebook(ui, "Diary");
+    // (the core says it when it finds one: what is checked here is what the app makes of it, once for each way it can go)
+    for (const [finished, said] of [[true, "It is finished now"], [false, "It is undone now"]]) {
+      await page.evaluate((finished) => [...window.__zim.app.vault.settledListeners].forEach((listener) => listener(finished)), finished);
+      const message = vaultDialog(page, "A change of passphrase had been left unfinished");
+      await message.waitFor();
+      const text = await message.innerText();
+      assert(text.includes(said), `it says ${JSON.stringify(said)}: ${text}`);
+      assert(text.includes("the one you just typed"), `and that it is the passphrase that was typed: ${text}`);
+      for (const secret of ["Diary", "Home"]) assert(!text.includes(secret), `it names nothing of the notebooks: ${text}`);
+      await message.getByRole("button", { name: "OK" }).click();
+      await noDialogs(page);
+    }
+    await page.locator(".lock-button").click();
+    await isOpenNotebook(page);
+  });
+
+  await scenario("the encrypted notebooks are backed up from the menu, and restored from it in another browser, where they open with their passphrase", async () => {
+    const first = await openApp();
+    const second = await openApp();
+    try {
+      const [a, b] = [first.ui, second.ui];
+      const item = (ui, name) => ui.menu().getByRole("menuitem", { name });
+      // a browser with no encrypted notebooks can restore some, and has none to back up
+      await b.openMenu();
+      assert(await item(b, "Restore encrypted notebooks from a backup…").isVisible(), "there is a way to restore");
+      assertEqual(await item(b, "Back up the encrypted notebooks…").count(), 0, "and none to back up");
+      await b.page.keyboard.press("Escape");
+
+      await newEncryptedNotebook(a, "Diary");
+      await a.typeAtEnd("The vault door code is 7391.\n");
+      await a.goto("Secrets:Plans");
+      await a.typeAtEnd("Meet at the old mill.\n");
+      await a.flush();
+      await a.openMenu();
+      assert(await item(a, "Back up the encrypted notebooks…").isVisible(), "once they are unlocked there is a way to back them up");
+      assertEqual(await item(a, "Restore encrypted notebooks from a backup…").count(), 0, "and none to restore (it is for where there are none)");
+      await item(a, "Back up the encrypted notebooks…").click();
+      const backing = vaultDialog(a.page, "Back up the encrypted notebooks");
+      assert((await backing.innerText()).includes("still encrypted"), "the dialog says what the file is");
+      const file = await a.download(() => backing.getByRole("button", { name: "Make the backup" }).click());
+      await noDialogs(a.page);
+      assert(/^encrypted-notebooks-\d{4}-\d{2}-\d{2}\.zimvault$/.test(file.name), `the file is named for what it is and the day: ${file.name}`);
+      assertEqual(file.bytes.subarray(0, 8).toString("latin1"), "ZIMVAULT", "it is a backup, by its first bytes");
+      for (const secret of ["Diary", "Secrets", "Plans", "7391", "old mill", PASSPHRASE]) assert(!file.bytes.includes(secret), `${JSON.stringify(secret)} can be read in the backup`);
+      assert((await a.status()).includes("Saved a backup"), `it says so: ${await a.status()}`);
+      assert(!(await a.status()).includes("not encrypted"), "and does not say that the copy is plain: it is not");
+      assertEqual(await a.notebookTitle(), "Diary", "the notebook is still open");
+      assert(await a.page.locator(".lock-button").isVisible(), "and unlocked");
+
+      // the other browser: what is not a backup is refused with the reason, and the backup is restored and then unlocked
+      const choose = async (name, buffer) => {
+        await b.openMenu();
+        const [chooser] = await Promise.all([b.page.waitForEvent("filechooser"), item(b, "Restore encrypted notebooks from a backup…").click()]);
+        await chooser.setFiles({ name, mimeType: "application/octet-stream", buffer });
+        const restoring = vaultDialog(b.page, "Restore encrypted notebooks");
+        await restoring.waitFor();
+        assert((await restoring.innerText()).includes(name), "the dialog says which file it is about");
+        return restoring;
+      };
+      const refused = await choose("notes.txt", Buffer.from("just some text, which is not a backup"));
+      await refused.getByRole("button", { name: "Restore", exact: true }).click();
+      await refused.locator(".dialog-error").filter({ hasText: /^That file is not a backup of encrypted notebooks\.$/ }).waitFor();
+      await refused.getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(b.page);
+      await b.openMenu();
+      assert(await item(b, "Restore encrypted notebooks from a backup…").isVisible(), "nothing was made of it: there is still no vault");
+      await b.page.keyboard.press("Escape");
+
+      const restoring = await choose(file.name, file.bytes);
+      await restoring.getByRole("button", { name: "Restore", exact: true }).click();
+      // (it asks for the passphrase at once; but a person may not want to: the vault is there all the same, and the browser knows it)
+      const asked = vaultDialog(b.page, "Unlock encrypted notebooks");
+      await asked.waitFor({ timeout: 20_000 });
+      await asked.getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(b.page);
+      await b.reload();
+      await b.openMenu();
+      assert(await item(b, "Unlock encrypted notebooks…").isVisible(), "a restored vault is unlocked from the menu");
+      assertEqual(await item(b, "Restore encrypted notebooks from a backup…").count(), 0, "and nothing is restored over it");
+      await item(b, "Unlock encrypted notebooks…").click();
+      const unlocking = vaultDialog(b.page, "Unlock encrypted notebooks");
+      await unlocking.waitFor();
+      await unlocking.getByLabel("Passphrase").fill("pale river stone lantern!");
+      await unlocking.getByRole("button", { name: "Unlock", exact: true }).click();
+      await unlocking.locator(".dialog-error").filter({ hasText: "not the passphrase" }).waitFor();
+      await unlocking.getByLabel("Passphrase").fill(PASSPHRASE);
+      await unlocking.getByRole("button", { name: "Unlock", exact: true }).click();
+      await noDialogs(b.page);
+      await b.openMenu();
+      assertEqual(await item(b, "Restore encrypted notebooks from a backup…").count(), 0, "there is a vault here now, and so nothing to restore into");
+      await b.menu().getByRole("menuitemradio", { name: /Diary/ }).click();
+      await isEncryptedOpen(b.page);
+      assertEqual(await b.notebookTitle(), "Diary", "the notebook is here");
+      assert((await b.pageText("Home")).includes("The vault door code is 7391."), "with its first page");
+      assert((await b.pageText("Secrets:Plans")).includes("Meet at the old mill."), "and the other");
+      // nothing of it is anywhere the browser keeps things for the page
+      const outside = await visibleOutside(b.page);
+      for (const secret of ["Diary", "Secrets", "Plans", "7391", "old mill", PASSPHRASE]) {
+        for (const [where, value] of Object.entries(outside)) assert(!value.includes(secret), `${JSON.stringify(secret)} is in the ${where} of the page: ${value.slice(0, 200)}`);
+      }
+      await b.page.locator(".lock-button").click();
+      await isOpenNotebook(b.page);
+      // and the browser knows it has a vault now: locked, after a reload, it offers to unlock it, and not to restore one
+      await b.reload();
+      await b.openMenu();
+      assert(await item(b, "Unlock encrypted notebooks…").isVisible(), "a restored vault is unlocked from the menu");
+      assertEqual(await item(b, "Restore encrypted notebooks from a backup…").count(), 0, "and nothing is restored over it");
+      await b.page.keyboard.press("Escape");
+      await a.page.locator(".lock-button").click();
+      await isOpenNotebook(a.page);
+    } finally {
+      await first.context.close();
+      await second.context.close();
+    }
   });
 
   await app("Back and Forward work in an encrypted notebook without the browser being told a page's name", {}, async (ui) => {

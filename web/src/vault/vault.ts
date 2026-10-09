@@ -4,6 +4,7 @@
 // keys and everything decrypted go with it.
 import { CoreClient, CoreError, WorkerTransport } from "./core-client";
 import type { CoreTransport } from "./core-client";
+import { base64ToBytes, bytesToBase64 } from "./base64";
 import type { Persistence } from "./protocol";
 
 /** The origin-private directory the vault's databases are kept in. */
@@ -49,7 +50,32 @@ export class VaultExistsError extends Error {
   }
 }
 
+/** The file is not a backup of encrypted notebooks (it does not start as one does). */
+export class NotABackupError extends Error {
+  constructor() {
+    super("That file is not a backup of encrypted notebooks.");
+    this.name = "NotABackupError";
+  }
+}
+
 export type VaultSupport = { ok: true } | { ok: false; reason: string };
+
+/** What a backup file starts with. */
+export const BACKUP_MAGIC = "ZIMVAULT";
+/** What a backup file is called by its name, and by its type. */
+export const BACKUP_EXTENSION = ".zimvault";
+export const BACKUP_TYPE = "application/octet-stream";
+/** The most a backup may be, to be restored: what the core takes (it holds all of it in memory while it restores). */
+export const MAX_BACKUP_BYTES = 1024 * 1024 * 1024;
+/** A backup goes between the page and the core in pieces of this many bytes (a piece is a message, which is made into text and back). */
+const BACKUP_PIECE_BYTES = 2 * 1024 * 1024;
+
+/** What restoring a backup put back: how many notebooks, pages (and the files of pages) it holds. */
+export interface RestoredBackup {
+  spaces: number;
+  notes: number;
+  files: number;
+}
 
 /** Whether this browser can keep a vault: the engine runs in a Worker, and the private files it keeps data in exist only on secure pages. */
 export function vaultSupport(): VaultSupport {
@@ -99,6 +125,14 @@ function hex(bytes: Uint8Array): string {
 /** What happens to a vault: it is `unlocked` or `locked` as asked, or `lost` when its engine dies on its own (and then it is locked too). */
 export type VaultEvent = { kind: "unlocked" } | { kind: "locked" } | { kind: "lost"; reason: string };
 
+/** What changing the passphrase did. */
+export interface PassphraseChange {
+  /** How many of the things the passphrase's key protects (the notebooks' keys, mostly) were protected with the key of the new passphrase. */
+  sealed: number;
+  /** How many could not be opened, and were left as they were (they were lost before: nothing opens them). */
+  unreadable: number;
+}
+
 export interface VaultOptions {
   /** Starts a core and says how to reach it. The default is the real thing: a Worker. */
   connect?: () => CoreTransport;
@@ -113,6 +147,7 @@ export class Vault {
   private readonly connect: () => CoreTransport;
   private readonly persistence: Persistence | null;
   private readonly listeners = new Set<(event: VaultEvent) => void>();
+  private readonly settledListeners = new Set<(finished: boolean) => void>();
   /** Whether the browser promised to keep the vault's data when it is short of room (null: not asked, or not told). Without that promise it may delete it. */
   persisted: boolean | null = null;
   private keptAnswer: Promise<boolean | null> = Promise.resolve(null);
@@ -142,6 +177,16 @@ export class Vault {
 
   private emit(event: VaultEvent): void {
     for (const listener of [...this.listeners]) listener(event);
+  }
+
+  /**
+   * Be told when unlocking settled a change of passphrase that had been stopped half way (the page was closed, the
+   * device lost power): `finished` is true when the vault now has the new passphrase, false when it kept the old one.
+   * Whichever was typed is the one that the vault has. Returns the function that stops it.
+   */
+  onSettled(listener: (finished: boolean) => void): () => void {
+    this.settledListeners.add(listener);
+    return () => this.settledListeners.delete(listener);
   }
 
   /** The vault is open on `client` from now on: and ends if the engine dies. */
@@ -206,15 +251,22 @@ export class Vault {
       if (this.client) return;
       const epoch = this.epoch;
       const client = await this.start();
+      // whether unlocking settled a change of passphrase that was stopped half way, and which way (see `onSettled`)
+      let settled: boolean | null = null;
       try {
         const accounts = await client.request<string[]>("user:local-accounts");
         const name = accounts[0];
         if (name === undefined) throw new NoVaultError();
+        const stopListening = client.onEvent((event) => {
+          if (event.e === "user:passphrase:settled") settled = (event.d as { finished?: unknown } | null)?.finished === true;
+        });
         try {
           await client.request("user:login", name, normalizePassphrase(passphrase));
         } catch (error) {
           if (error instanceof CoreError && error.kind === "api" && error.subtype === "Unauthorized") throw new WrongPassphraseError();
           throw error;
+        } finally {
+          stopListening();
         }
         this.assertNotLockedSince(epoch);
       } catch (error) {
@@ -225,6 +277,88 @@ export class Vault {
       this.starting.delete(client);
       this.adopt(client);
       this.askToKeep();
+      if (settled !== null) for (const listener of [...this.settledListeners]) listener(settled);
+    });
+  }
+
+  /**
+   * A backup of everything in the vault, as one file: still encrypted, exactly as it is kept, so that it opens with the
+   * passphrase the vault has now and holds no more than the browser's own files do. The vault has to be unlocked, and
+   * nothing is to be saved while it is made (a backup is a moment of the vault).
+   */
+  async exportBackup(): Promise<Blob> {
+    return this.exclusive(async () => {
+      const client = this.client;
+      if (!client) throw new Error("The encrypted notebooks are locked.");
+      const made = await client.request<{ size?: unknown } | null>("vault:backup:make");
+      const size = Number(made?.size);
+      if (!Number.isSafeInteger(size) || size < 0) throw new Error("The engine made a backup that has no size.");
+      const parts: Uint8Array[] = [];
+      try {
+        for (let offset = 0; offset < size; offset += BACKUP_PIECE_BYTES) {
+          parts.push(base64ToBytes(await client.request<string>("vault:backup:read", offset, Math.min(BACKUP_PIECE_BYTES, size - offset))));
+        }
+      } finally {
+        // (what the engine holds of it is let go of whichever way this ended)
+        await client.request("vault:backup:drop").catch(() => undefined);
+      }
+      const blob = new Blob(parts as BlobPart[], { type: BACKUP_TYPE });
+      if (blob.size !== size) throw new Error(`The backup came out ${blob.size} bytes, and the engine made ${size}.`);
+      return blob;
+    });
+  }
+
+  /**
+   * Put a backup back, where there is no vault: the notebooks in it are here again, locked, and open with the passphrase
+   * they had when the backup was made. The engine checks the whole file before it writes anything, and a restore that is
+   * stopped leaves no vault. Throws `VaultExistsError` if there are encrypted notebooks here already.
+   */
+  async restoreBackup(file: Blob): Promise<RestoredBackup> {
+    if (file.size > MAX_BACKUP_BYTES) throw new Error(`That file is more than ${MAX_BACKUP_BYTES / (1024 * 1024)} MiB: too big to be restored here.`);
+    const head = new TextDecoder().decode(await file.slice(0, BACKUP_MAGIC.length).arrayBuffer());
+    if (head !== BACKUP_MAGIC) throw new NotABackupError();
+    return this.exclusive(async () => {
+      if (this.client) throw new VaultExistsError();
+      const client = await this.start();
+      try {
+        if ((await client.request<string[]>("user:local-accounts")).length > 0) throw new VaultExistsError();
+        for (let offset = 0; offset < file.size; offset += BACKUP_PIECE_BYTES) {
+          const piece = new Uint8Array(await file.slice(offset, offset + BACKUP_PIECE_BYTES).arrayBuffer());
+          await client.request("vault:restore:write", offset, bytesToBase64(piece));
+        }
+        const done = await client.request<Partial<RestoredBackup> | null>("vault:restore:commit");
+        return { spaces: Number(done?.spaces ?? 0), notes: Number(done?.notes ?? 0), files: Number(done?.files ?? 0) };
+      } catch (error) {
+        await client.request("vault:restore:cancel").catch(() => undefined);
+        if (error instanceof CoreError && error.kind === "api" && error.subtype === "Conflict") throw new VaultExistsError();
+        throw error;
+      } finally {
+        this.starting.delete(client);
+        await client.close();
+      }
+    });
+  }
+
+  /**
+   * Change the passphrase of the vault, which is unlocked. The keys that protect the notebooks are protected again
+   * with the key that the new passphrase makes: a few seconds' work (the passphrase is made into a key twice),
+   * however much there is in the notebooks, which are not touched. Throws `WrongPassphraseError` if `current` is not
+   * the passphrase that unlocked the vault. If the page is closed in the middle, the passphrase typed at the next
+   * unlock, old or new, is the one the vault has.
+   */
+  async changePassphrase(current: string, next: string): Promise<PassphraseChange> {
+    const problem = checkPassphrase(next);
+    if (problem) throw new Error(problem);
+    return this.exclusive(async () => {
+      const client = this.client;
+      if (!client) throw new Error("The encrypted notebooks are locked.");
+      try {
+        const done = await client.request<{ sealed?: unknown; unreadable?: unknown } | null>("user:change-passphrase", normalizePassphrase(current), normalizePassphrase(next));
+        return { sealed: Number(done?.sealed ?? 0), unreadable: Number(done?.unreadable ?? 0) };
+      } catch (error) {
+        if (error instanceof CoreError && error.kind === "api" && error.subtype === "Unauthorized") throw new WrongPassphraseError();
+        throw error;
+      }
     });
   }
 

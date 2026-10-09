@@ -17,7 +17,7 @@ import { MemoryStore } from "../notebook/store";
 import type { FileInfo, NotebookInfo, NotebookStore } from "../notebook/store";
 import { isReadToImport, pagesFromFiles } from "../notebook/zim-files";
 import type { Imported, ImportedFile } from "../notebook/zim-files";
-import { NoVaultError, Vault, VaultBusyError, VaultExistsError, VaultUnavailableError, WrongPassphraseError, checkPassphrase, vaultSupport } from "../vault";
+import { BACKUP_EXTENSION, BACKUP_TYPE, CoreError, NoVaultError, NotABackupError, Vault, VaultBusyError, VaultExistsError, VaultUnavailableError, WrongPassphraseError, checkPassphrase, normalizePassphrase, vaultSupport } from "../vault";
 import type { VaultEvent } from "../vault";
 import { TurtlStore } from "../vault/turtl-store";
 import { createZip, readZip } from "../zip";
@@ -195,6 +195,7 @@ export class App {
     attachmentList: HTMLElement;
     folderInput: HTMLInputElement;
     zipInput: HTMLInputElement;
+    backupInput: HTMLInputElement;
   };
 
   private constructor(root: HTMLElement, store: NotebookStore, keptInMemory: boolean, vault: Vault) {
@@ -208,6 +209,7 @@ export class App {
     });
     this.els = this.build(root);
     vault.onChange((event) => this.onVaultChange(event));
+    vault.onSettled((finished) => void this.tellSettled(finished));
     // anything a person does counts as using the app, and the vault locks itself when nobody has for a while
     for (const type of ["keydown", "pointerdown", "wheel", "touchstart"]) document.addEventListener(type, () => this.restartAutoLock(), { capture: true, passive: true });
   }
@@ -255,6 +257,7 @@ export class App {
     const markup = h("input", { id: "markup", type: "checkbox", on: { change: () => { this.editor.setShowMarkup(markup.checked); prefs.set("markup", markup.checked ? "1" : "0"); } } });
     const folderInput = h("input", { type: "file", hidden: true, multiple: true, webkitdirectory: true, "aria-label": "Choose a notebook folder" });
     const zipInput = h("input", { type: "file", hidden: true, accept: ".zip,application/zip", "aria-label": "Choose a zip file" });
+    const backupInput = h("input", { type: "file", hidden: true, accept: `${BACKUP_EXTENSION},${BACKUP_TYPE}`, "aria-label": "Choose a backup of encrypted notebooks" });
 
     const breadcrumb = h("nav", { class: "breadcrumb", "aria-label": "Page path" });
     const rename = h("button", { type: "button", text: "Rename", on: { click: () => void this.renamePage() } });
@@ -300,6 +303,7 @@ export class App {
         h("footer", { class: "statusbar" }, status, saveState),
         folderInput,
         zipInput,
+        backupInput,
         attachInput,
       ),
     );
@@ -407,8 +411,9 @@ export class App {
 
     folderInput.addEventListener("change", () => void this.readPickedFiles(folderInput, "folder"));
     zipInput.addEventListener("change", () => void this.readPickedFiles(zipInput, "zip"));
+    backupInput.addEventListener("change", () => void this.restoreFromPickedBackup(backupInput));
 
-    return { root, page, sidebarToggle, notebookButton, notebookMenu, lock, search, searchResults, markup, breadcrumb, notice, updateBanner, updateText, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, attach, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput };
+    return { root, page, sidebarToggle, notebookButton, notebookMenu, lock, search, searchResults, markup, breadcrumb, notice, updateBanner, updateText, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, attach, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput, backupInput };
   }
 
   private toggleSidebar(): void {
@@ -553,8 +558,9 @@ export class App {
       for (const notebook of notebooks) {
         this.els.notebookMenu.append(item(notebook.title, () => void this.openNotebook(notebook.id).catch((error: unknown) => this.say(`Couldn't open ${notebook.title}: ${error instanceof Error ? error.message : String(error)}`)), { role: "menuitemradio", "aria-checked": String(notebook.id === this.session.info.id) }, notebook.kind === "encrypted" ? "encrypted" : undefined));
       }
-      if (this.vault.unlocked) this.els.notebookMenu.append(h("hr", {}), item("Lock encrypted notebooks", () => void this.lockVault()));
+      if (this.vault.unlocked) this.els.notebookMenu.append(h("hr", {}), item("Lock encrypted notebooks", () => void this.lockVault()), item("Change the passphrase…", () => void this.changePassphraseDialog()), item("Back up the encrypted notebooks…", () => void this.backupDialog()));
       else if (this.vaultKnown()) this.els.notebookMenu.append(h("hr", {}), item("Unlock encrypted notebooks…", () => void this.unlockFromMenu()));
+      else if (vaultSupport().ok) this.els.notebookMenu.append(h("hr", {}), item("Restore encrypted notebooks from a backup…", () => this.els.backupInput.click()));
       this.els.notebookMenu.append(
         h("hr", {}),
         item("New notebook…", () => void this.newNotebook()),
@@ -705,6 +711,11 @@ export class App {
   private downloadBlob(fileName: string, blob: Blob): void {
     // (a file saved from an encrypted notebook is a plain one: the person is told, and an export says more)
     if (this.isPrivate) this.say("Downloaded. That copy is not encrypted: keep it somewhere safe.");
+    this.saveFile(fileName, blob);
+  }
+
+  /** Hand a file to the browser to save, as it is. */
+  private saveFile(fileName: string, blob: Blob): void {
     const link = h("a", { href: URL.createObjectURL(blob), download: fileName });
     document.body.append(link);
     link.click();
@@ -872,6 +883,131 @@ export class App {
         prefs.set("vault", "1");
       },
     });
+  }
+
+  /** Make a backup of the encrypted notebooks, which are unlocked, and save it as a file (still encrypted: it opens with the passphrase they have now). */
+  private async backupDialog(): Promise<void> {
+    if (!this.vault.unlocked) return;
+    // (what was typed is in the vault before the backup is made: it is a moment of the vault, and nothing is typed while the dialog is open)
+    const kept = this.isPrivate ? await this.settle() : true;
+    let blob: Blob | null = null;
+    const made = await showDialog({
+      title: "Back up the encrypted notebooks",
+      body: [
+        "The backup is one file with everything in the encrypted notebooks: every notebook, page and attachment, still encrypted. Whoever has the file can't read it without the passphrase, but can try to guess it, so keep it as safe as you would the notebooks themselves.",
+        h("p", {}, "It opens with the passphrase the notebooks have now (a passphrase you change later does not change a backup), and it can be restored in another browser, which is also how to move encrypted notebooks to another computer. It is a copy of this moment: what you write afterwards is not in it."),
+        ...(kept ? [] : [h("p", {}, h("strong", { text: "What you typed last has not reached the encrypted notebook" }), ", so it is not in the backup.")]),
+      ],
+      confirm: "Make the backup",
+      working: "Making the backup…",
+      submit: async () => {
+        try {
+          blob = await this.vault.exportBackup();
+        } catch (error) {
+          return `The backup could not be made: ${error instanceof Error ? error.message : String(error)}`;
+        }
+      },
+    });
+    if (!made || !blob) return;
+    const day = new Date();
+    const stamp = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+    // (not `downloadBlob`: that one says the copy is a plain one, and a backup is not)
+    this.saveFile(`encrypted-notebooks-${stamp}${BACKUP_EXTENSION}`, blob);
+    this.say(`Saved a backup of the encrypted notebooks (${megabytes((blob as Blob).size)}). It is still encrypted, and opens with their passphrase.`);
+  }
+
+  /** A backup was chosen to be restored: ask once more, put it back, and unlock what was in it. */
+  private async restoreFromPickedBackup(input: HTMLInputElement): Promise<void> {
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    const restored = await showDialog({
+      title: "Restore encrypted notebooks",
+      body: [
+        `Put the encrypted notebooks in ${file.name} (${megabytes(file.size)}) back in this browser. They are locked, and open with the passphrase they had when the backup was made.`,
+        "This browser has no encrypted notebooks yet: a backup is restored where there are none, and nothing here is replaced.",
+      ],
+      confirm: "Restore",
+      working: "Restoring…",
+      submit: async () => {
+        try {
+          const done = await this.vault.restoreBackup(file);
+          prefs.set("vault", "1");
+          this.say(`Restored ${count(done.spaces, "encrypted notebook")} with ${count(done.notes, "page")}${done.files ? ` and ${count(done.files, "attachment")}` : ""}.`);
+        } catch (error) {
+          if (error instanceof VaultExistsError) {
+            // (what remembers that there is a vault was cleared, or this is not the browser it was thought to be)
+            prefs.set("vault", "1");
+            return "There are encrypted notebooks in this browser already: a backup is restored where there are none. Unlock them, or erase them first (from the unlock window: \"I forgot it…\").";
+          }
+          if (error instanceof NotABackupError || error instanceof VaultBusyError || error instanceof VaultUnavailableError) return error.message;
+          // (what the engine says is wrong with the file, as a sentence)
+          const message = error instanceof Error ? error.message : String(error);
+          return error instanceof CoreError ? `${message.charAt(0).toUpperCase()}${message.slice(1)}` : `The backup could not be restored: ${message}`;
+        }
+      },
+    });
+    if (restored) await this.unlockFromMenu();
+  }
+
+  /** Change the passphrase of the encrypted notebooks, which are unlocked: asks for the current one (anybody at an unlocked computer could otherwise change it) and the new one. */
+  private async changePassphraseDialog(): Promise<void> {
+    if (!this.vault.unlocked) return;
+    let unreadable = 0;
+    let underWay: Promise<unknown> | null = null;
+    const changed = await showDialog({
+      title: "Change the passphrase",
+      body: [
+        "The keys that protect your encrypted notebooks are protected again with a key made from the new passphrase. It takes a few seconds, and the encrypted notebooks stay unlocked.",
+        h("p", {}, h("strong", { text: "Nobody can recover the new passphrase for you either. " }), "If you forget it, the encrypted notebooks are lost for good."),
+        "A copy of these encrypted notebooks that was made before (a backup, a copy of this browser's files) still opens with the old passphrase: the notebooks' own keys do not change.",
+      ],
+      fields: [
+        { name: "current", label: "Current passphrase", type: "password", autocomplete: "current-password", validate: (v) => (v ? null : "Type the current passphrase.") },
+        {
+          name: "passphrase", label: "New passphrase", type: "password", autocomplete: "new-password", hint: "At least 10 characters. A few unrelated words make a good one.",
+          validate: (v, all) => (!v ? "Choose a new passphrase." : checkPassphrase(v) ?? (normalizePassphrase(v) === normalizePassphrase(all.current ?? "") ? "That is the passphrase it has now." : null)),
+        },
+        { name: "again", label: "New passphrase again", type: "password", autocomplete: "new-password", validate: (v, all) => (v === all.passphrase ? null : "The two passphrases are not the same.") },
+      ],
+      checks: [{ name: "understood", label: "I understand that a forgotten passphrase can't be recovered." }],
+      confirm: "Change the passphrase",
+      working: "Changing…",
+      submit: async (values) => {
+        if (!values.understood) return "Tick the box to say you understand that the passphrase can't be recovered.";
+        let done;
+        try {
+          const changing = this.vault.changePassphrase(String(values.current), String(values.passphrase));
+          underWay = changing;
+          done = await changing;
+        } catch (error) {
+          if (error instanceof WrongPassphraseError) return "That is not the current passphrase of the encrypted notebooks.";
+          return `The passphrase was not changed: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        unreadable = done.unreadable;
+      },
+    });
+    if (!changed) {
+      // (a lock closes questions, also one that is being answered: the change it was making is told of all the same, if it was made)
+      if (underWay && (await (underWay as Promise<unknown>).then(() => true, () => false))) {
+        // (after the lock is over: it closes the questions that are open when it ends)
+        for (let waited = 0; this.locking && waited < 60_000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+        await showMessage("The passphrase was changed", "The encrypted notebooks were locked while their passphrase was being changed, and it was changed: they open with the new passphrase now.");
+      }
+      return;
+    }
+    this.say("Changed the passphrase of the encrypted notebooks.");
+    if (unreadable > 0) await showMessage("Some keys could not be read", `The passphrase is changed. ${unreadable === 1 ? "One key" : `${unreadable} keys`} of the encrypted notebooks could not be read, so what it protected stays out of reach, as it was before.`);
+  }
+
+  /** Unlocking found a change of passphrase that had been stopped half way, and finished it or undid it: whichever passphrase was typed is the one the notebooks have. */
+  private async tellSettled(finished: boolean): Promise<void> {
+    await showMessage(
+      "A change of passphrase had been left unfinished",
+      finished
+        ? "Changing the passphrase of the encrypted notebooks was interrupted. It is finished now: they open with the new passphrase, the one you just typed."
+        : "Changing the passphrase of the encrypted notebooks was interrupted. It is undone now: they open with the old passphrase, the one you just typed. To change it, do it again.",
+    );
   }
 
   /** For a passphrase that is lost: the only way out is to erase what it protected and start again. */
