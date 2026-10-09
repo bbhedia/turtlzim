@@ -142,7 +142,8 @@ the name: it is the last part of the name, the name's last part starts with it, 
 it is somewhere in it; ties go to the page nearer the top of the notebook, then to the name. `+typed` looks only below
 `from` (named from there), `:typed` only for names that start with it, and a bracket in the text gets nothing (it can't be
 written in a link's target; a `#` or `|` is in no page's name, so it finds nothing by itself). A page is not offered a
-link to itself. Each answer comes with **the text to write**:
+link to itself, nor one whose name has a bracket in it (no link to it can be written: the link text would end where the
+bracket is), and such a page does not take the place of one that can be linked to. Each answer comes with **the text to write**:
 `link_to(from, page)`, the shortest link that leads there from `from`, checked and not guessed (`+Garden`, `Garden`,
 `Projects:Garden`, `:Full:Name`), so what is inserted always leads to the page that was chosen: a property test
 resolves every suggestion over random notebooks from random pages.

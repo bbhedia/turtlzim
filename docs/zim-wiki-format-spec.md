@@ -171,7 +171,12 @@ table, to draw it as a grid and to edit it, from the syntax Zim writes and reads
   writes the whole table again: every column as wide as its widest cell (at least three characters),
   text kept as written (escapes included), the alignment row only if the table had one or a column is
   aligned. Nothing but an edit does this: reading, drawing and moving a caret in a table leave its
-  bytes alone. The header can't be deleted, nor the only row below it, nor the only column.
+  bytes alone. The header can't be deleted, nor the only row below it, nor the only column. A first row below the
+  header that is only dashes, colons and blanks (`| - | - |`) would be read as the alignment row, so a table written
+  out with such a row gets the alignment row above it (found by the fuzz test below: an edit that deleted the row
+  above it made a table whose first row stopped being one). The reader is tested on 600,000 texts made to break it
+  (bars, backslashes, dashes, blanks of every kind, NUL, characters of one to four bytes): no panic, every cell where it
+  says it is, and what is written out is read back as the same table, after every edit at every place and past the end.
 
 ---
 

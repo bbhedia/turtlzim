@@ -220,31 +220,41 @@ impl Table {
     }
 
     /// The table written out, every column as wide as its widest cell, an alignment row below the header
-    /// (kept only if some column is aligned, or the table had one: `with_align_row`).
+    /// (kept only if some column is aligned, or the table had one: `with_align_row`). A first row below the
+    /// header that is only dashes, colons and blanks would be read as the alignment row, so then the alignment
+    /// row is written too, above it: what is written out always reads as the table it was written from.
     pub fn render(&self, with_align_row: bool) -> String {
         let columns = self.columns();
         let widths: Vec<usize> = (0..columns)
             .map(|c| self.rows.iter().map(|r| width(&r[c])).max().unwrap_or(0).max(MIN_WIDTH))
             .collect();
+        let lines: Vec<String> = self
+            .rows
+            .iter()
+            .map(|row| {
+                let mut line = String::from("|");
+                for c in 0..columns {
+                    let text = &row[c];
+                    let pad = widths[c] - width(text);
+                    let (left, right) = match self.aligns[c] {
+                        Align::Right => (pad, 0),
+                        Align::Center => (pad / 2, pad - pad / 2),
+                        _ => (0, pad),
+                    };
+                    line.push(' ');
+                    line.push_str(&" ".repeat(left));
+                    line.push_str(text);
+                    line.push_str(&" ".repeat(right));
+                    line.push_str(" |");
+                }
+                line
+            })
+            .collect();
+        let looks_like_the_alignment_row = lines.get(1).map_or(false, |line| is_align_line(line));
         let mut out = Vec::new();
-        for (i, row) in self.rows.iter().enumerate() {
-            let mut line = String::from("|");
-            for c in 0..columns {
-                let text = &row[c];
-                let pad = widths[c] - width(text);
-                let (left, right) = match self.aligns[c] {
-                    Align::Right => (pad, 0),
-                    Align::Center => (pad / 2, pad - pad / 2),
-                    _ => (0, pad),
-                };
-                line.push(' ');
-                line.push_str(&" ".repeat(left));
-                line.push_str(text);
-                line.push_str(&" ".repeat(right));
-                line.push_str(" |");
-            }
+        for (i, line) in lines.into_iter().enumerate() {
             out.push(line);
-            if i == 0 && (with_align_row || self.aligns.iter().any(|a| *a != Align::Normal)) {
+            if i == 0 && (with_align_row || looks_like_the_alignment_row || self.aligns.iter().any(|a| *a != Align::Normal)) {
                 let mut line = String::from("|");
                 for c in 0..columns {
                     let dashes = widths[c] + 2;
@@ -265,7 +275,7 @@ impl Table {
 
     /// A row of empty cells below row `after` (0 is the header; the new row is the first row if `after` is 0).
     pub fn add_row(&mut self, after: usize) {
-        let at = (after + 1).min(self.rows.len());
+        let at = after.saturating_add(1).min(self.rows.len());
         self.rows.insert(at, vec![String::new(); self.columns()]);
     }
 
@@ -281,7 +291,7 @@ impl Table {
     /// A column of empty cells after column `after` (the first column if there is none: `usize::MAX` for "at the end" is not
     /// special: it is clamped).
     pub fn add_column(&mut self, after: usize) {
-        let at = (after + 1).min(self.columns());
+        let at = after.saturating_add(1).min(self.columns());
         for (i, row) in self.rows.iter_mut().enumerate() {
             row.insert(at, if i == 0 { format!("Header {}", at + 1) } else { String::new() });
         }

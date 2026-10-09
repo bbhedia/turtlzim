@@ -131,7 +131,20 @@ fn what_is_not_a_name_gets_nothing() {
     let nb = notebook(&["Home", "a[b", "a]c", "ab"]);
     assert_eq!(pages(&nb.complete_link(&name("Home"), "a[", 20)), Vec::<String>::new());
     assert_eq!(pages(&nb.complete_link(&name("Home"), "a]", 20)), Vec::<String>::new());
-    assert_eq!(pages(&nb.complete_link(&name("Home"), "a", 20)).len(), 3);
+    // (and the pages that have a bracket are not offered at all: see the test of that below)
+    assert_eq!(pages(&nb.complete_link(&name("Home"), "a", 20)), ["ab"]);
+}
+
+#[test]
+fn a_page_with_a_bracket_in_its_name_is_not_offered_because_no_link_to_it_can_be_written() {
+    let nb = notebook(&["Home", "a]x", "ab", "a[c", "Projects:q]r", "Projects:Garden"]);
+    // (it would come first, and it does not take the place of one that can be written)
+    assert_eq!(pages(&nb.complete_link(&name("Home"), "a", 1)), ["ab"]);
+    let all = pages(&nb.complete_link(&name("Home"), "a", 20));
+    assert_eq!(all, ["ab", "Projects:Garden"], "the only others with an a in them");
+    // nor the section above one that only holds such pages... which is a name without a bracket, and is offered
+    assert_eq!(pages(&nb.complete_link(&name("Home"), "proj", 20)), ["Projects", "Projects:Garden"]);
+    assert_eq!(pages(&nb.complete_link(&name("Home"), "q", 20)), Vec::<String>::new());
 }
 
 #[test]

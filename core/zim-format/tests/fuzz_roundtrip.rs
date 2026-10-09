@@ -180,7 +180,9 @@ fn every_single_line_removed_or_doubled_round_trips() {
 #[test]
 fn hostile_pages_parse_in_bounded_time() {
     const BYTES: usize = 10_000;
-    const BUDGET: Duration = Duration::from_secs(5);
+    // (quadratic is a second or two here, in an unoptimized build; cubic is hours. The budget is wide because this runs beside
+    // other tests on two cores, and a busy machine has failed it at 5 seconds; the point is a blow-up, not a stopwatch.)
+    const BUDGET: Duration = Duration::from_secs(25);
     let units: &[&str] = &[
         "**",
         "//",
@@ -224,7 +226,17 @@ fn hostile_pages_parse_in_bounded_time() {
         let started = Instant::now();
         let page = zim_format::parse(&text);
         let again = page.serialize();
-        let took = started.elapsed();
+        let mut took = started.elapsed();
+        // (a busy machine slows a good parser too, and this has failed for that reason when other work was running: a
+        // parser that is worse than linear is slow every time, so a slow page is measured again, and the best time counts)
+        for _ in 0..2 {
+            if took < BUDGET {
+                break;
+            }
+            let started = Instant::now();
+            let _ = zim_format::parse(&text).serialize();
+            took = took.min(started.elapsed());
+        }
         assert_eq!(
             again,
             text,

@@ -88,6 +88,20 @@ fn a_colon_alone_in_the_alignment_row_is_the_left() {
 }
 
 #[test]
+fn a_row_that_looks_like_the_alignment_row_stays_a_row_when_it_is_written_out() {
+    // (a row of dashes under the header is by the format's own rule the alignment row, so the table is written with one above it)
+    let table = Table { rows: vec![vec!["Name".into(), "Count".into()], vec!["-".into(), ":-".into()], vec!["a".into(), "1".into()]], aligns: vec![Align::Normal; 2], wraps: vec![false; 2] };
+    let written = table.render(false);
+    assert_eq!(written, "| Name | Count |\n|------|-------|\n| -    | :-    |\n| a    | 1     |");
+    let layout = parse(&written).unwrap();
+    assert_eq!((layout.rows.len(), layout.align_line), (3, Some(1)));
+    assert_eq!(layout.table(), table);
+    // a table that has the dashes in a row further down is written as it is
+    let lower = Table { rows: vec![vec!["Name".into(), "Count".into()], vec!["a".into(), "1".into()], vec!["-".into(), "-".into()]], aligns: vec![Align::Normal; 2], wraps: vec![false; 2] };
+    assert_eq!(lower.render(false), "| Name | Count |\n| a    | 1     |\n| -    | -     |");
+}
+
+#[test]
 fn a_column_is_at_least_three_characters_wide() {
     let table = Table { rows: vec![vec!["a".into(), "b".into()], vec!["c".into(), "d".into()]], aligns: vec![Align::Normal; 2], wraps: vec![false; 2] };
     assert_eq!(table.render(false), "| a   | b   |\n| c   | d   |");
@@ -189,6 +203,9 @@ fn rows_and_columns_are_added_and_taken_away() {
     assert_eq!(table.rows[3], ["", ""]);
     table.add_row(99);
     assert_eq!(table.rows.len(), 6, "past the end is at the end");
+    table.add_row(usize::MAX);
+    assert_eq!(table.rows.len(), 7, "however far past: a number from outside (a JavaScript -1 is that) must not wrap round to the top");
+    assert!(table.delete_row(6));
     assert!(!table.delete_row(0), "not the header");
     assert!(!table.delete_row(99));
     assert!(table.delete_row(1) && table.delete_row(2));
@@ -200,6 +217,9 @@ fn rows_and_columns_are_added_and_taken_away() {
     assert_eq!(table.aligns, [Align::Left, Align::Normal, Align::Right]);
     table.add_column(99);
     assert_eq!(table.columns(), 4);
+    table.add_column(usize::MAX);
+    assert_eq!(table.columns(), 5, "and the same for a column");
+    assert!(table.delete_column(4));
     assert!(table.delete_column(1));
     assert_eq!(table.rows[0], ["a", "b", "Header 4"]);
     assert_eq!(table.aligns, [Align::Left, Align::Right, Align::Normal]);
@@ -271,6 +291,52 @@ fn what_is_written_is_read_back_whatever_is_in_the_cells() {
         let page = format!("before\n\n{text}\n\nafter\n");
         assert_eq!(zim_format::parse(&page).serialize(), page, "round {round}");
     }
+}
+
+/// Text that was made to break a reader of tables: bars, backslashes, dashes, colons and angle signs in every order, blanks of
+/// every kind, line breaks and carriage returns, a NUL, and characters of one, two, three and four bytes. Whatever it is
+/// (a table, or nothing like one), reading it and writing it out again never panics, every cell is where it says it is, and
+/// what is written out is read back as the same table.
+#[test]
+fn hostile_text_is_read_without_a_panic_and_every_place_it_names_is_in_the_text() {
+    const PIECES: &[&str] = &["|", "|", "||", " ", "\t", "-", "--", ":", "<", "\\", "\\|", "\n", "\r", "\u{0}", "a", "é", "日", "😀", "\u{200d}", "\u{2028}", "|-|", "|:-:|", "\n|", "|\n"];
+    let mut rng = Rng(0x4057_11e5_7e87_0042);
+    let (mut tables, mut texts) = (0usize, 0usize);
+    for round in 0..20_000 {
+        // (lines with a bar at each end, filled with the pieces, mostly: a text that is nothing like a table is not what breaks a reader of them)
+        let lines: Vec<String> = (0..1 + rng.below(5))
+            .map(|_| {
+                let inner: String = (0..rng.below(14)).map(|_| PIECES[rng.below(PIECES.len())]).collect();
+                if rng.below(10) == 0 { inner } else { format!("|{inner}|") }
+            })
+            .collect();
+        let text = lines.join("\n");
+        texts += 1;
+        let Some(layout) = parse(&text) else { continue };
+        tables += 1;
+        for row in &layout.rows {
+            assert!(text.get(row.start..row.end).is_some(), "round {round}: a row is not in the text: {text:?}");
+            for cell in &row.cells {
+                let written = text.get(cell.start..cell.end).unwrap_or_else(|| panic!("round {round}: a cell is not in the text: {text:?}"));
+                assert_eq!(written.trim(), cell.raw, "round {round}: {text:?}");
+            }
+        }
+        let table = layout.table();
+        let written = table.render(layout.align_line.is_some());
+        let again = parse(&written).unwrap_or_else(|| panic!("round {round}: {text:?} written out again is not a table: {written:?}"));
+        assert_eq!(again.table().rows, table.rows, "round {round}: {text:?}");
+        // every edit, at every place there is and past the end of it, leaves a table (or refuses)
+        for at in 0..=layout.columns + 1 {
+            let mut edited = table.clone();
+            edited.add_row(at);
+            edited.add_column(at);
+            assert!(parse(&edited.render(true)).is_some(), "round {round}: {text:?}");
+            let mut cut = table.clone();
+            let _ = (cut.delete_row(at), cut.delete_column(at), cut.set_align(at, Align::Center));
+            assert!(parse(&cut.render(false)).is_some(), "round {round}: {text:?}");
+        }
+    }
+    assert!(tables > 1_000, "only {tables} of {texts} texts were tables: the alphabet does not make tables");
 }
 
 #[test]

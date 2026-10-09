@@ -59,7 +59,7 @@ impl Notebook {
     /// page nearer the top of the notebook, then to the name. Case is ignored. `+typed` looks only below `from`
     /// (named from there), `:typed` only for a name that starts with it; nothing is offered for what has a bracket in it
     /// (it can't be written in a link's target; a `#` or `|` is in no page's name, so it finds nothing by itself). A page is
-    /// not offered a link to itself.
+    /// not offered a link to itself, nor is one whose name has a bracket in it (no link to it can be written).
     pub fn complete_link(&self, from: &PageName, typed: &str, limit: usize) -> Vec<LinkSuggestion> {
         let typed = typed.trim();
         if typed.contains(['[', ']']) {
@@ -85,8 +85,13 @@ impl Notebook {
         found.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
         found
             .into_iter()
+            .filter_map(|(_, _, _, node)| {
+                let link = self.link_to(from, &node.name);
+                // (a bracket can't be written in a link's target, so no link can be written to a page that has one in its
+                // name: it is not offered, and does not take the place of one that can be linked to)
+                (!link.contains(['[', ']'])).then(|| LinkSuggestion { link, has_page: node.has_page, page: node.name })
+            })
             .take(limit)
-            .map(|(_, _, _, node)| LinkSuggestion { link: self.link_to(from, &node.name), has_page: node.has_page, page: node.name })
             .collect()
     }
 }
