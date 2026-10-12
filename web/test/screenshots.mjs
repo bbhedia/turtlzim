@@ -39,6 +39,31 @@ async function open(viewport, colorScheme = "light") {
   return page;
 }
 const settle = (page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 60)))));
+/** A touch screen like a phone's. Its on-screen keyboard is made up: `window.__keyboard(height)` shrinks the visible area (what the real one does), and 0 takes it away. */
+async function openPhone(colorScheme = "light") {
+  const context = await browser.newContext({ viewport: { width: 390, height: 800 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2, colorScheme, serviceWorkers: "block" });
+  await context.addInitScript(() => {
+    window.__ZIM_TEST__ = true;
+    const listeners = { resize: [], scroll: [] };
+    let covered = 0;
+    const area = { get height() { return window.innerHeight - covered; }, get width() { return window.innerWidth; }, scale: 1, offsetTop: 0, addEventListener: (type, fn) => listeners[type]?.push(fn), removeEventListener: (type, fn) => { const at = listeners[type]?.indexOf(fn) ?? -1; if (at >= 0) listeners[type].splice(at, 1); } };
+    Object.defineProperty(window, "visualViewport", { value: area, configurable: true });
+    window.__keyboard = (height) => { covered = height; for (const fn of listeners.resize) fn(); };
+  });
+  const page = await context.newPage();
+  page.on("pageerror", (e) => console.log("[page error]", e.message));
+  page.on("console", (m) => m.type() === "error" && console.log("[console error]", m.text()));
+  await page.goto(`${origin}/`);
+  await page.waitForFunction(() => window.__zim !== undefined, null, { timeout: 30000 });
+  await settle(page);
+  return page;
+}
+const tap = async (page, locator) => {
+  await locator.scrollIntoViewIfNeeded();
+  const box = await locator.boundingBox();
+  await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 2);
+};
+
 const shot = async (page, name) => {
   await settle(page);
   await page.screenshot({ path: join(out, `${name}.png`) });
@@ -77,6 +102,38 @@ await page.locator(".icon-button").click();
 await shot(page, "8-phone-tree");
 await page.locator("details.tags summary").click();
 await shot(page, "8a-phone-tree-with-the-lists");
+await page.close();
+
+console.log("phone, editing");
+page = await openPhone();
+await goTo(page, "Projects:Garden");
+await shot(page, "31a-phone-reading");
+await tap(page, page.locator(".cm-line", { hasText: "beans" }).first());
+await page.evaluate(() => window.__keyboard(330));
+await shot(page, "31-phone-editing-with-the-bar");
+await tap(page, page.getByRole("button", { name: "Make the line a heading, or plain text again" }));
+await shot(page, "32-phone-headings-row");
+await tap(page, page.getByRole("button", { name: "Heading 2", exact: true }));
+await page.evaluate(() => window.__keyboard(0));
+await goTo(page, "Help:Tables");
+await tap(page, page.locator(".cm-zim-grid td", { hasText: "pears" }));
+await page.evaluate(() => window.__keyboard(330));
+await shot(page, "33-phone-table-being-edited");
+await page.close();
+page = await openPhone("dark");
+await goTo(page, "Projects:Garden");
+await tap(page, page.locator(".cm-line", { hasText: "beans" }).first());
+await page.evaluate(() => window.__keyboard(330));
+await shot(page, "34-phone-dark-editing");
+await page.close();
+
+console.log("desktop, the formatting bar asked for");
+page = await open({ width: 1280, height: 820 });
+await goTo(page, "Projects:Garden");
+await page.locator(".notebook-button").click();
+await page.getByRole("menuitem", { name: "Show the formatting bar" }).click();
+await page.locator(".cm-line", { hasText: "beans" }).first().click();
+await shot(page, "35-desktop-with-the-formatting-bar");
 await page.close();
 
 console.log("tables, the journal, tags, completing a link");

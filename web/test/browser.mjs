@@ -95,13 +95,55 @@ const exposeApp = () => {
 };
 
 /**
+ * A phone's screen: small, touched, and with an on-screen keyboard that is made up (no browser here has a real one): `__keyboard(height)`
+ * makes what can be seen that much shorter, as the real one does (the visual viewport shrinks and the layout viewport does not), and 0
+ * takes it away; `__pan(top)` is a browser moving what can be seen down the page, as one does to show the field that has the focus.
+ */
+const madeUpKeyboard = () => {
+  const listeners = { resize: [], scroll: [] };
+  let covered = 0;
+  let panned = 0;
+  // (the size of the screen is asked for each time: a page that is just opening has not got its size yet)
+  const area = {
+    get height() {
+      return window.innerHeight - covered;
+    },
+    get width() {
+      return window.innerWidth;
+    },
+    get offsetTop() {
+      return panned;
+    },
+    scale: 1,
+    addEventListener: (type, fn) => listeners[type]?.push(fn),
+    removeEventListener: (type, fn) => {
+      const at = listeners[type]?.indexOf(fn) ?? -1;
+      if (at >= 0) listeners[type].splice(at, 1);
+    },
+  };
+  Object.defineProperty(window, "visualViewport", { value: area, configurable: true });
+  window.__keyboard = (height) => {
+    covered = height;
+    for (const fn of listeners.resize) fn();
+  };
+  window.__pan = (top) => {
+    panned = top;
+    for (const fn of listeners.scroll) fn();
+  };
+};
+const phone = { viewport: { width: 390, height: 800 }, hasTouch: true, isMobile: true, beforeLoad: madeUpKeyboard };
+
+/**
  * A fresh browser profile (so a fresh IndexedDB: the sample notebook, nothing else) with the app
  * open. `beforeLoad`, if given, is a function that runs in the page before any of its own scripts.
+ * `fixedTime` is the time that the page's clock shows (a scenario about days of a calendar says which
+ * day it is: with the real clock it would only pass on the day it was written).
  */
-async function openApp({ beforeLoad, at = origin, ...options } = {}) {
+async function openApp({ beforeLoad, at = origin, fixedTime, ...options } = {}) {
   // (a service worker keeps the app in a cache of its own: the scenarios that are about that ask for it with `serviceWorkers: "allow"`)
   const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1100, height: 900 }, serviceWorkers: "block", ...options });
   context.setDefaultTimeout(10_000);
+  if (fixedTime) await context.clock.setFixedTime(fixedTime);
   await context.addInitScript(exposeApp);
   if (beforeLoad) await context.addInitScript(beforeLoad);
   const page = await context.newPage();
@@ -1001,6 +1043,14 @@ try {
     await ui.waitCurrent("Projects:Garden");
     // a Ctrl-click on a tag in the page does the same, and a plain click is only a click
     const tag = page.locator(".cm-zim-tag", { hasText: "@garden" });
+    // (a mouse is not a finger: a plain click does not follow, also when the page was not being written in)
+    await page.evaluate(() => document.activeElement?.blur());
+    assertEqual(await page.evaluate(() => window.__zim.editor.view.hasFocus), false, "(the page is not being written in)");
+    await tag.click();
+    assert(await page.locator("#search-results").isHidden(), "a plain click on a tag shows nothing, whether or not the page was being written in");
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.locator(".cm-zim-link", { hasText: "plan" }).click();
+    assertEqual(await ui.current(), "Projects:Garden", "nor does a plain click on a link");
     await tag.click();
     assert(await page.locator("#search-results").isHidden(), "a plain click on a tag shows nothing");
     await tag.click({ modifiers: ["Control"] });
@@ -2307,12 +2357,335 @@ try {
     // and what is drawn in the page fits it: a table's toolbar wraps, a wide table scrolls by itself
     await ui.goto("Help:Tables");
     await page.locator(".cm-zim-grid td", { hasText: "pears" }).click();
-    for (const button of await page.locator(".cm-zim-table-toolbar button").all()) {
+    for (const button of await page.locator(".cm-zim-table-toolbar button:not([hidden])").all()) {
       const box = await button.boundingBox();
       assert(box && box.x >= 0 && box.x + box.width <= 390, `a button of the toolbar is on the screen (${JSON.stringify(box)})`);
     }
     const after = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     assert(after <= 0, `the page with a table in it does not scroll sideways (${after}px too wide)`);
+  });
+
+  // ==========================================================================================
+  // A phone: a small screen that is touched, with an on-screen keyboard (made up: see madeUpKeyboard)
+  // ==========================================================================================
+  const hasFocus = (page) => page.evaluate(() => window.__zim.editor.view.hasFocus);
+  const shown = (page, selector) => page.locator(selector).first().isVisible();
+  const picked = (page) =>
+    page.evaluate(() => {
+      const { state } = window.__zim.editor.view;
+      const r = state.selection.main;
+      return state.sliceDoc(r.from, r.to);
+    });
+  const barButton = (page, id) => page.locator(`.format-bar .format-button[data-id="${id}"]`);
+  /** A tap at a place in something (its top left corner and `dx`, `dy` from it), once it has stopped moving (a keyboard coming up moves the page), and after it the time that the editor takes to place the caret. */
+  const tapIn = async (page, locator, dx, dy) => {
+    await locator.scrollIntoViewIfNeeded();
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 150)));
+    const box = await locator.boundingBox();
+    await page.touchscreen.tap(box.x + dx, box.y + dy);
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 250)));
+  };
+  const pressed = async (page, id) => (await barButton(page, id).getAttribute("aria-pressed")) === "true";
+  const page_ = "Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== Scratch ======\n";
+
+  await app("on a phone the formatting bar comes with the keyboard, above it, and goes with it; the page keeps the room, and the caret is in view", phone, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    assert(!(await shown(page, ".format-bar")), "while a page is read there is no bar");
+    assert(await shown(page, ".search"), "and the search is there");
+    await page.locator(".cm-line", { hasText: "Plant the beans" }).tap();
+    assert(await hasFocus(page), "a tap in the text puts the caret there");
+    assert(await shown(page, ".format-bar"), "and brings the bar");
+    assert(!(await shown(page, ".search")), "and takes the room of the search, which is not wanted while typing");
+    await page.evaluate(() => window.__keyboard(330));
+    await ui.settle();
+    const area = await page.evaluate(() => ({ property: document.documentElement.style.getPropertyValue("--visible-height"), app: document.querySelector(".app").getBoundingClientRect().height }));
+    assertEqual(area.property, "470px", "the app is as tall as what can be seen");
+    assertEqual(Math.round(area.app), 470, "...and is so");
+    assert(await page.locator(".app").evaluate((el) => el.classList.contains("keyboard")), "(and says that the keyboard is up)");
+    const bar = await page.locator(".format-bar").boundingBox();
+    assert(bar.y + bar.height <= 470.5, `the bar is above the keyboard (its bottom is at ${bar.y + bar.height}, the keyboard starts at 470)`);
+    const caret = await page.evaluate(() => {
+      const v = window.__zim.editor.view;
+      const c = v.coordsAtPos(v.state.selection.main.head);
+      return { top: c.top, bottom: c.bottom };
+    });
+    assert(caret.top >= 0 && caret.bottom <= bar.y, `the caret is in view, above the bar (${JSON.stringify(caret)}, the bar at ${bar.y})`);
+    // the caret at the end of a long page: the keyboard coming up does not leave it behind
+    await page.evaluate(() => window.__keyboard(0));
+    await ui.setText(`${page_}\n${"a line of text\n\n".repeat(60)}the last line`);
+    await ui.caretTo((await ui.text()).length);
+    await page.evaluate(() => window.__keyboard(330));
+    await ui.settle();
+    const end = await page.evaluate(() => {
+      const v = window.__zim.editor.view;
+      const c = v.coordsAtPos(v.state.selection.main.head);
+      return { bottom: c.bottom, bar: document.querySelector(".format-bar").getBoundingClientRect().top };
+    });
+    assert(end.bottom <= end.bar, `the last line is above the bar when the keyboard comes up (${JSON.stringify(end)})`);
+    // the keyboard put away ends the typing: the page is read again
+    await page.evaluate(() => window.__keyboard(0));
+    await ui.settle();
+    assert(!(await hasFocus(page)), "the keyboard put away takes the focus from the text");
+    assert(!(await shown(page, ".format-bar")), "and the bar goes");
+    assert(await shown(page, ".search"), "and the search comes back");
+    assertEqual(await page.evaluate(() => document.documentElement.style.getPropertyValue("--visible-height")), "800px", "(the app is as tall as the screen)");
+    // a tap outside the text ends it too
+    await page.locator(".cm-line", { hasText: "a line of text" }).first().tap();
+    await page.evaluate(() => window.__keyboard(330));
+    assert(await shown(page, ".format-bar"), "(typing again)");
+    await page.locator(".topbar").tap({ position: { x: 190, y: 3 } });
+    assert(!(await hasFocus(page)), "a tap beside the text ends the typing");
+    assert(!(await shown(page, ".format-bar")), "and the bar goes");
+  });
+
+  await app("a browser that moves what can be seen down the page is followed: the app goes with it", phone, async (ui) => {
+    const { page } = ui;
+    await page.evaluate(() => window.__keyboard(330));
+    await page.evaluate(() => window.__pan(140));
+    await ui.settle();
+    assertEqual(await page.evaluate(() => document.documentElement.getAttribute("data-panned")), "", "the page says that it was moved");
+    const top = await page.locator(".app").evaluate((el) => ({ box: el.getBoundingClientRect().top, translate: getComputedStyle(el).translate }));
+    assertEqual(Math.round(top.box), 140, `the app starts where what can be seen starts (${JSON.stringify(top)})`);
+    await page.evaluate(() => window.__pan(0));
+    await ui.settle();
+    assertEqual(await page.evaluate(() => document.documentElement.hasAttribute("data-panned")), false, "and comes back");
+    assertEqual(Math.round(await page.locator(".app").evaluate((el) => el.getBoundingClientRect().top)), 0, "to the top");
+  });
+
+  await app("on a phone each button of the bar does what it says, the text keeps the focus (and the keyboard stays), and the bar shows what the caret is in", phone, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Scratch");
+    const start = `${page_}\nsome words here\nanother line\n`;
+    await ui.setText(start);
+    const tapped = async (id, what) => {
+      await barButton(page, id).tap();
+      assert(await ui.inText(), `the focus is in the text after the ${what} button`);
+      await page.evaluate(() => window.__keyboard(330));
+    };
+    const at = async (word) => (await ui.text()).indexOf(word);
+    // the styles: on over the selection, shown pressed, and off again
+    for (const [id, marks] of [["bold", "**"], ["italic", "//"], ["underline", "__"], ["strike", "~~"], ["code", "''"]]) {
+      await ui.select(await at("words"), (await at("words")) + 5);
+      assert(!(await pressed(page, id)), `${id} is not pressed outside it`);
+      await tapped(id, id);
+      assertEqual(await ui.text(), start.replace("words", `${marks}words${marks}`), `${id} wraps the selection`);
+      assertEqual(await picked(page), "words", "(which is still the selection)");
+      assert(await pressed(page, id), `${id} is pressed inside it`);
+      await tapped(id, id);
+      assertEqual(await ui.text(), start, `and a second tap takes it off`);
+    }
+    // a heading: the button opens the levels, one is chosen, and the row closes
+    await ui.caretTo((await at("another")) + 3);
+    assert(!(await shown(page, ".format-headings")), "the levels are out of the way");
+    await tapped("headings", "heading");
+    assert(await shown(page, ".format-headings"), "the heading button shows the levels");
+    await page.locator('.format-headings [data-level="2"]').tap();
+    assert(await ui.inText(), "a level is chosen with the focus in the text");
+    assert((await ui.text()).includes("\n===== another line =====\n"), `the line is a heading of the second level (saw ${JSON.stringify((await ui.text()).slice(-40))})`);
+    assert(!(await shown(page, ".format-headings")), "and the levels close");
+    assert(await pressed(page, "headings"), "and the heading button says that the line is one");
+    await tapped("headings", "heading");
+    await page.locator('.format-headings [data-level="0"]').tap();
+    assertEqual(await ui.text(), start, "Plain makes it text again");
+    // lists
+    for (const [id, written] of [["bullet", "* another line"], ["number", "1. another line"], ["checkbox", "[ ] another line"]]) {
+      await ui.caretTo((await at("another")) + 3);
+      await tapped(id, id);
+      assertEqual(await ui.text(), start.replace("another line", written), `${id} makes the line an item`);
+      assert(await pressed(page, id), `${id} is pressed on an item of that list`);
+      for (const other of ["bullet", "number", "checkbox"]) if (other !== id) assert(!(await pressed(page, other)), `(${other} is not)`);
+      await tapped(id, id);
+      assertEqual(await ui.text(), start, `a second tap makes it text again`);
+    }
+    // indent and outdent: on an item, and outdent only where there is a level to come out of
+    await ui.caretTo((await at("another")) + 3);
+    await tapped("bullet", "bullet");
+    assert(await barButton(page, "outdent").isDisabled(), "an item at the top can't come out");
+    await tapped("indent", "indent");
+    assert((await ui.text()).includes("\n\t* another line\n"), "indent moves the item in");
+    assert(!(await barButton(page, "outdent").isDisabled()), "and now it can come out");
+    await tapped("outdent", "outdent");
+    assert((await ui.text()).includes("\n* another line\n"), "outdent moves it out");
+    await ui.replaceText(start);
+    // undo and redo: dimmed until there is something to do
+    await ui.setText(start);
+    await ui.caretTo((await ui.text()).length);
+    assert(await barButton(page, "undo").isDisabled(), "undo is dimmed on a page that has not been changed");
+    assert(await barButton(page, "redo").isDisabled(), "and so is redo");
+    await page.keyboard.type("x");
+    assert(!(await barButton(page, "undo").isDisabled()), "a change makes undo possible");
+    await tapped("undo", "undo");
+    assertEqual(await ui.text(), start, "undo takes the change back");
+    assert(!(await barButton(page, "redo").isDisabled()), "and redo is possible");
+    await tapped("redo", "redo");
+    assertEqual(await ui.text(), `${start}x`, "and does it again");
+    // a link: made round the selection, and while the caret is in it the bar offers to open it instead
+    await ui.setText(`${page_}\nsee Projects:Garden now\n`);
+    assert(!(await barButton(page, "open").isVisible()), "(no Open button where there is no link)");
+    await ui.select(await at("Projects"), (await at("Projects")) + "Projects:Garden".length);
+    await tapped("link", "link");
+    assert((await ui.text()).includes("see [[Projects:Garden]] now"), "the selection is made a link");
+    assert(await barButton(page, "open").isVisible(), "and Open is there, in the place of Link");
+    assert(!(await barButton(page, "link").isVisible()), "(Link is not)");
+    await barButton(page, "open").tap();
+    await ui.waitCurrent("Projects:Garden");
+    // a table, and a picture or file from the camera or the phone
+    await ui.goto("Scratch");
+    await ui.setText(`${page_}\ntext\n`);
+    await ui.caretTo((await ui.text()).length);
+    await tapped("table", "table");
+    assert((await ui.text()).includes("| Header 1 | Header 2 | Header 3 |"), "the table button makes a table");
+    const [chooser] = await Promise.all([page.waitForEvent("filechooser"), barButton(page, "attach").tap()]);
+    assert(chooser.isMultiple(), "the attach button opens the chooser of files");
+  });
+
+  await app("on a phone a tap on a link or a tag follows it while a page is read, and places the caret while it is written; Open follows the link the caret is in", phone, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    // reading
+    await page.locator(".cm-zim-link", { hasText: "plan" }).tap();
+    await ui.waitCurrent("Projects:Garden:Plan");
+    assert(!(await hasFocus(page)), "a tap on a link follows it, and the keyboard did not come");
+    await ui.goto("Projects:Garden");
+    await page.locator(".cm-zim-tag", { hasText: "@spring" }).tap();
+    assert(await page.locator("#search-results").isVisible(), "a tap on a tag shows the pages that have it");
+    assertEqual(await ui.current(), "Projects:Garden", "(without leaving the page)");
+    assert(!(await hasFocus(page)), "and no keyboard");
+    await page.locator("#search").evaluate((el) => el.blur());
+    // writing: the same tap places the caret
+    await ui.goto("Projects:Garden");
+    await page.locator(".cm-line", { hasText: "Plant the beans" }).tap();
+    await page.evaluate(() => window.__keyboard(330));
+    assert(await hasFocus(page), "(writing)");
+    await tapIn(page, page.locator(".cm-zim-link", { hasText: "plan" }), 5, 8);
+    assertEqual(await ui.current(), "Projects:Garden", "a tap on a link while writing leaves the page where it is");
+    assert(await hasFocus(page), "and the caret is where the finger was");
+    const where = await page.evaluate(() => {
+      const { state } = window.__zim.editor.view;
+      const head = state.selection.main.head;
+      const line = state.doc.lineAt(head);
+      return { before: state.sliceDoc(line.from, head).slice(-12), line: line.text.slice(0, 30) };
+    });
+    assert(where.line.startsWith("See the [[+Plan|plan]]"), `in the line of the link (saw ${JSON.stringify(where)})`);
+    assert(await barButton(page, "open").isVisible(), "the bar offers to open the link that the caret is in");
+    await barButton(page, "open").tap();
+    await ui.waitCurrent("Projects:Garden:Plan");
+    // the end of a line that is a link can be reached to go on writing after it
+    await ui.setText(`${page_}\n* [[Projects:Garden]]\n`);
+    await page.locator(".cm-line", { hasText: "Projects:Garden" }).tap({ position: { x: 5, y: 8 } });
+    await page.evaluate(() => window.__keyboard(330));
+    await ui.settle();
+    await tapIn(page, page.locator(".cm-line", { hasText: "Projects:Garden" }), 300, 8);
+    assertEqual(await ui.current(), "Projects:Garden:Plan", "a tap at the end of a line that is a link does not follow it, while writing");
+    assertEqual(await picked(page), "", "and the caret is there");
+    assertEqual((await page.evaluate(() => { const { state } = window.__zim.editor.view; return state.doc.lineAt(state.selection.main.head).text; })), "* [[Projects:Garden]]", "at the end of that line");
+  });
+
+  await app("on a phone what is tapped is big enough, and the page fits the screen", phone, async (ui) => {
+    const { page } = ui;
+    const noSideways = async (what) => {
+      const over = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      assert(over <= 0, `${what} does not scroll sideways (${over}px too wide)`);
+    };
+    const tooSmall = async (selector, min, what) => {
+      const sizes = await page.locator(selector).evaluateAll((els) => els.filter((el) => el.getBoundingClientRect().width > 0).map((el) => { const b = el.getBoundingClientRect(); return [Math.round(b.width), Math.round(b.height), el.textContent.trim().slice(0, 14)]; }));
+      assert(sizes.length > 0, `there is something to measure for ${what}`);
+      const small = sizes.filter(([w, h]) => w < min[0] || h < min[1]);
+      assert(small.length === 0, `${what} is at least ${min[0]} by ${min[1]}: too small ${JSON.stringify(small)}`);
+    };
+    await ui.goto("Projects:Garden");
+    await noSideways("a page");
+    await page.locator(".cm-line", { hasText: "Plant the beans" }).tap();
+    await page.evaluate(() => window.__keyboard(330));
+    await ui.settle();
+    await noSideways("a page being written");
+    await tooSmall(".format-bar .format-button:not([hidden])", [44, 44], "the buttons of the bar");
+    await tooSmall(".topbar button", [40, 40], "the buttons at the top");
+    await page.evaluate(() => window.__keyboard(0));
+    await page.locator(".icon-button").tap();
+    await tooSmall(".tree .row", [100, 44], "the rows of the tree");
+    await tooSmall(".tree .chevron:not(.spacer)", [44, 44], "the arrows that open the tree");
+    await page.locator("details.tags summary").tap();
+    await tooSmall(".calendar-day:not([hidden])", [36, 36], "the days of the calendar");
+    await tooSmall(".tags-list .link-button", [20, 30], "the tags");
+    await noSideways("the drawer");
+    await page.locator(".icon-button").tap();
+    // a table: the buttons over it are as big, and the ones that move between cells are there
+    await ui.goto("Help:Tables");
+    await page.locator(".cm-zim-grid td", { hasText: "pears" }).tap();
+    await page.evaluate(() => window.__keyboard(330));
+    await ui.settle();
+    await tooSmall(".cm-zim-table-toolbar button:not([hidden])", [44, 44], "the buttons of a table");
+    assertEqual(await page.locator(".cm-zim-table-toolbar button", { hasText: "Cell ›" }).isVisible(), true, "a table has buttons for the next cell and the one before");
+    await noSideways("a table");
+  });
+
+  await app("on a phone a table can be written: a tap on a cell, the buttons for the next cell and a row, and typing", phone, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Scratch");
+    await ui.setText(`${page_}\n| a | b |\n|---|---|\n| c | d |\n\nafter\n`);
+    await ui.caretTo((await ui.text()).length);
+    await page.evaluate(() => window.__keyboard(330));
+    await ui.settle();
+    const cell = page.locator(".cm-zim-grid td", { hasText: "c" });
+    await cell.tap();
+    assert(await hasFocus(page), "a tap on a cell of the grid puts the caret in the table (and the keyboard comes)");
+    assertEqual(await page.locator(".cm-zim-grid").count(), 0, "the table is its text, with its buttons");
+    const button = (name) => page.locator(".cm-zim-table-toolbar").getByRole("button", { name });
+    await button("Go to the next cell (after the last one, to a new row)").tap();
+    assertEqual(await picked(page), "d", "the button goes to the next cell, with what it says selected");
+    assert(await ui.inText(), "(the keyboard stays: the focus is in the text)");
+    await page.keyboard.type("D");
+    await button("Go to the next cell (after the last one, to a new row)").tap();
+    assert((await ui.text()).includes("|     |     |"), "after the last cell the button makes a row");
+    await page.keyboard.type("new");
+    await button("Go to the cell before this one").tap();
+    await button("Add a row below this one").tap();
+    const text = await ui.text();
+    assert(text.includes("| a   | b   |\n|-----|-----|\n| c   | D   |\n|     |     |\n| new |     |\n"), `typing went in the cells, and the row came below the one the caret was in (saw ${JSON.stringify(text.slice(-120))})`);
+    await barButton(page, "table").tap();
+    assert(await ui.inText(), "the bar's Table button, too, leaves the focus in the text");
+  });
+
+  await app("the formatting bar is not shown to a mouse unless asked for: the menu has it shown or hidden, and that is what is remembered", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    await page.locator(".cm-line", { hasText: "Plant the beans" }).click();
+    assert(!(await shown(page, ".format-bar")), "a page written with a mouse has no bar");
+    await ui.openMenu();
+    assertEqual(await ui.menu().getByRole("menuitem", { name: /formatting bar/ }).innerText(), "Show the formatting bar", "the menu offers it");
+    await ui.menu().getByRole("menuitem", { name: "Show the formatting bar" }).click();
+    assert(await shown(page, ".format-bar"), "and it is shown");
+    assert(await page.locator(".format-bar").evaluate((el) => getComputedStyle(el).display !== "none"), "...drawn");
+    // a button acts at the caret, and the keyboard is not needed for that
+    await ui.select((await ui.text()).indexOf("beans"), (await ui.text()).indexOf("beans") + 5);
+    await barButton(page, "bold").click();
+    assert((await ui.text()).includes("Plant the **beans**"), "a click on a button does what it says");
+    assert(await ui.inText(), "and the focus is in the text");
+    // asked for: remembered, with nothing else of the page
+    const kept = await page.evaluate(() => Object.fromEntries(Object.keys(localStorage).filter((k) => k.includes("formatbar")).map((k) => [k, localStorage.getItem(k)])));
+    assertDeepEqual(kept, { "zim:formatbar": "on" }, "what is kept is that it is wanted");
+    await ui.reload();
+    assert(await shown(page, ".format-bar"), "it is there after a reload");
+    await ui.openMenu();
+    await ui.menu().getByRole("menuitem", { name: "Hide the formatting bar" }).click();
+    assert(!(await shown(page, ".format-bar")), "and hidden again");
+    assertDeepEqual(await page.evaluate(() => localStorage.getItem("zim:formatbar")), "off", "(remembered as asked)");
+  });
+
+  await app("a touch screen has the bar while writing unless it was hidden from the menu, which a phone can do too", phone, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    await page.locator(".cm-line", { hasText: "Plant the beans" }).tap();
+    assert(await shown(page, ".format-bar"), "(the bar is there while writing)");
+    await page.locator(".notebook-button").tap();
+    await page.locator(".notebook-menu .menu").getByRole("menuitem", { name: "Hide the formatting bar" }).tap();
+    await page.locator(".cm-line", { hasText: "Plant the beans" }).tap();
+    assert(!(await shown(page, ".format-bar")), "hidden from the menu: no bar while writing");
+    await page.locator(".notebook-button").tap();
+    await page.locator(".notebook-menu .menu").getByRole("menuitem", { name: "Show the formatting bar" }).tap();
+    assert(await shown(page, ".format-bar"), "and shown again");
   });
 
   // ==========================================================================================

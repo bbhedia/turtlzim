@@ -156,6 +156,77 @@ keys are the library's; an Enter in the first moments after the list opens is ty
 
 **Tags** are drawn as before; Ctrl/Cmd-click on one calls `onTag(name)` (the app shows the pages that have it).
 
+## Writing on a phone: the formatting bar, taps, and the keyboard
+
+A phone has no Ctrl, Tab or arrows, and the mobile app will reuse this editor, so the keys the editor is written
+around have buttons, and the layout is made for a small screen that a keyboard covers half of. None of it changes
+what a mouse and keyboard do.
+
+**The formatting bar** (`web/src/editor/format-bar.ts`, `createFormatBar`; the app puts it under the page). One row
+of real buttons, in the order of use on a phone (the first seven or eight are what 390 pixels show; the next is cut
+off at the edge, which says that the row moves sideways): Undo, Redo, **B**, *I*, Heading, Bullets, To do, Link, `1.`,
+Indent, Outdent, <u>U</u>, ~~S~~, `</>`, Table, Attach. Each runs the command its key runs (`toggleWrap`, `setHeading`,
+`toggleList`, `indentMore`, `insertLink`, `insertTable`, undo and redo of the history), so there is one rule for each and
+the same undo step. Heading opens a second row of 1 to 5 and Plain, which closes when one is chosen.
+
+* **It never takes the focus** (on a phone that would put the keyboard away at every press): the buttons cancel
+  `pointerdown` and `mousedown`, act on `click`, and give the focus back to the text (`view.focus()`).
+* **It says where the caret is**: a button is drawn pressed when the selection is in that style, list, or heading
+  (`styleActive`, `listKindHere`, `headingLevelHere`, from the span model; a link under the caret makes **Open**
+  take the place of Link, and Open calls the host's `follow`); Undo and Redo are dimmed when the history has nothing to
+  do (`undoDepth`, `redoDepth`), Outdent when no selected line is indented (`canOutdent`, the test `indentLess` uses).
+  Everything is dimmed in a page that can't be changed. `onUpdate` (document, selection or focus changed) redraws it.
+* **It is reached by keyboard too**: a toolbar (`role=toolbar`) with one stop for Tab and the arrows, Home and End
+  between its buttons; every button has a name for a screen reader (its title).
+
+**When it is shown.** `data-formatbar` on the app is `auto` (the default), `on` or `off`. `auto` shows it while the
+text is being written in (the editor or the bar has the focus, `.app.editing`) on a screen whose main pointer is coarse
+(`@media (pointer: coarse)`: a finger); a mouse and keyboard get none. The notebook menu has **Show the formatting bar** /
+**Hide the formatting bar** for either, and the choice is kept as `zim:formatbar` (`on` or `off`), which is all that is
+kept: nothing about a page, so an encrypted notebook is not touched by it.
+
+**Taps** (`followOnTap`, set by the app). A finger has no Ctrl key, so *how a link is followed depends on what the
+page is being used for*: while the editor does not have the focus (a page being read, no keyboard) a tap on a link, a
+picture or a tag follows it, as Ctrl-click does with a mouse, and the tap does not take the focus (a keyboard would
+come up and cover the page); while it has the focus (typing) a tap places the caret like any other, so that the text of
+a link, or the end of a line that is one, can be reached, and the bar's **Open** follows the link the caret is in.
+The pointer is known from `pointerdown` (`pointerType`, and whether the editor had the focus before this press gave
+it). A mouse is as before. On a touch screen a page that was opened by a tap (a link, a search result, a day of the
+calendar, a heading in the contents) is not given the focus either, except a page that is new: it is for writing.
+Putting the keyboard away (the visible area grows back) takes the focus from the editor, which ends the typing on
+a browser that would leave it there.
+
+**The keyboard** (`web/src/app/viewport.ts`). An on-screen keyboard shrinks the *visual* viewport and not the layout
+viewport, so a page as tall as the screen has its bottom (the bar, and the line being typed) under it. On a touch
+screen the app is `--visible-height` tall (`visualViewport.height`, unless the page is zoomed in), the bar is a row of
+the grid under the page, and the caret is scrolled into view when the keyboard comes. A keyboard is a loss of 120
+pixels or more against the tallest the area has been at that width (the address bar that hides as a page is scrolled
+is 60), and `.app.keyboard` says so (no room is kept for the device's bottom edge while it is up). A browser that pans the
+visual viewport down the page to show the focused field (`offsetTop`) gets the app moved with it
+(`html[data-panned]`, `--visible-top`). While typing on a phone the row with the search and *Show markup* is hidden:
+what is typed on gets the room. The tree and the page scroll by themselves and a pull at the top of the page does not
+reload the app (`overscroll-behavior`).
+
+**Touch targets.** Under `(pointer: coarse)`: buttons at least 40 pixels high, the bar's, the table toolbar's and the
+tree's rows and arrows 44, a day of the calendar 36 or more (seven to a row in a drawer 320 wide). The table
+toolbar has **‹ Cell** and **Cell ›** where a screen is touched (a keyboard has Tab and Shift-Tab): the cell before, and
+the next, or after the last a new row. Text is not enlarged by the browser (`text-size-adjust`).
+
+What verifies it: `web/test/format-bar.test.ts` (the queries the bar draws itself from, on states; the visible-area
+tracker with a made-up viewport, with 20 mutants checked), and in Chromium emulating a phone (`hasTouch`, `isMobile`,
+touch events; the keyboard is made up by `madeUpKeyboard` in `browser.mjs`, which shrinks `visualViewport` as the real one
+does): the scenarios "on a phone the formatting bar comes with the keyboard…", "…each button of the bar does what it
+says…", "…a tap on a link or a tag follows it while a page is read…", "…what is tapped is big enough, and the page fits
+the screen", "…a table can be written", "a browser that moves what can be seen…", "the formatting bar is not shown to a
+mouse unless asked for…" and "a touch screen has the bar…", and the pictures 31–35 of `npm run screenshots` (light, dark,
+the heading row, a table, the desktop with the bar).
+
+**Not verified on a device.** No browser here has a real on-screen keyboard, so the keyboard is made up, and WebKit
+(iPhone) is not installed: the panning of the visual viewport, a keyboard that resizes the layout viewport instead
+(`interactive-widget=resizes-content`), the focus after a keyboard is put away, and whether a tap on a button keeps the
+keyboard up (cancelling `pointerdown` and `mousedown` is what the libraries for this do) are what a real phone has to
+confirm. Selecting text by touch (long press, handles) is the platform's.
+
 ## Performance
 
 The whole page is re-parsed on every change and decorations are rebuilt on every change or caret move;
@@ -284,6 +355,9 @@ selection shows it directly.
 - [x] Encrypted notebooks (`zim-encrypted-notebooks.md`): the same editor over the Turtl core in a
       Worker; a notebook is open or encrypted, and an encrypted one is kept out of the address, the
       title and the browser's own storage.
+- [x] Writing on a phone: a formatting bar, taps that follow links while a page is read, a layout that follows
+      the part of the screen the keyboard leaves, touch-sized targets (the section above; checked in an emulated
+      phone, not on a device).
 
 
 ## Not done yet
@@ -306,7 +380,9 @@ selection shows it directly.
 - **Accessibility**: Tab is a list command (it traps keyboard focus, as most editors do; CodeMirror's
   tab-focus-mode toggle is not wired up), and the checkbox/bullet widgets have roles but no keyboard
   path other than the commands above.
-- **Mobile**: nothing touch-specific yet (long-press link follow, a formatting toolbar). The editor
-  itself is a plain CodeMirror view, which works with touch and IME input.
+- **Mobile**: the bar, taps and layout above, checked in an emulated phone only (see *Not verified on a
+  device*). Not done: a long press on a link for a menu (follow, edit, copy), dragging a row or a column of a
+  table, and a toolbar for the keys that are missing from a phone's keyboard other than the ones above (Escape,
+  Alt+F10 for the table toolbar: the toolbar is on the table itself there).
 - **The Zim parser's `{{{`/table support** (and any new inline kind) will need span kinds added in
   both `highlight.rs` and `web/src/kinds.ts`; `checkCodes` fails at load time if the two disagree.

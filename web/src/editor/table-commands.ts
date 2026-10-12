@@ -303,7 +303,7 @@ export const enterTableUp = intoTable(false);
 /** Alt-F10: to the toolbar of the table that the caret is in (Escape comes back). */
 export function focusToolbar(view: EditorView): boolean {
   const here = tableAt(view.state);
-  const first = here && view.dom.querySelector<HTMLElement>(".cm-zim-table-toolbar button:not(:disabled)");
+  const first = here && view.dom.querySelector<HTMLElement>(".cm-zim-table-toolbar button:not(:disabled):not([hidden])");
   if (!first) return false;
   first.focus();
   return true;

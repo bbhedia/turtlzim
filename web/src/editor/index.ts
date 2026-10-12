@@ -23,6 +23,8 @@ export { buildDecorations, decorationsField } from "./decorations";
 export * as commands from "./commands";
 export { zimKeymap } from "./keymap";
 export { applyLink, linkSource } from "./completion";
+export { createFormatBar } from "./format-bar";
+export type { FormatBar, FormatBarHost } from "./format-bar";
 export { addColumnRight, addRowBelow, alignColumn, deleteColumn, deleteRow, insertTable, nextCell, previousCell, tableAt, tableEnter, tidyTable } from "./table-commands";
 export { classifyLink, imageAt, linkAt, tagAt } from "./links";
 export type { LinkInfo, LinkKind, TagAt } from "./links";
@@ -36,6 +38,18 @@ export interface ZimEditorOptions {
   onNavigate?: (link: LinkInfo) => void;
   /** Called when the user follows a tag (Ctrl/Cmd-click, or any click in a read-only editor): the name, without its `@`. */
   onTag?: (tag: string) => void;
+  /**
+   * Called after a change of the document, a move of the selection, or the focus coming or going: what a bar of buttons
+   * that shows what the selection is in (see `createFormatBar`) draws itself from.
+   */
+  onUpdate?: (update: ViewUpdate) => void;
+  /**
+   * A tap with a finger on a link, a picture or a tag follows it, as Ctrl-click does with a mouse (a finger has no Ctrl key;
+   * the pointer that was used says which it is), while the editor does not have the focus: a page that is being read.
+   * While it has (a keyboard is up, and the person is typing) a tap places the caret like any other, so that the text of a
+   * link, or the end of a line that is one, can be reached; the bar's Open button follows the link the caret is in.
+   */
+  followOnTap?: boolean;
   /**
    * The pages that a link being typed (`[[Gar`) can lead to, best first, with what to write for each; without
    * this, links are not completed.
@@ -82,6 +96,26 @@ export interface ZimEditorOptions {
  * for such text (and only such text) `exactLineBreaks` makes "\n" the only line break.
  */
 export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
+  // The kind of pointer that pressed last ("mouse", "pen" or "touch") and whether the editor had the focus when it did (before
+  // that press gave it): a finger has no Ctrl key, so a tap is what follows a link, in a page that is being read.
+  let pointer = "mouse";
+  let focusedBefore = false;
+  const tapFollows = (): boolean => options.followOnTap === true && pointer === "touch" && !focusedBefore;
+  /** What a click is on that can be followed: a link, a picture (as itself, not as whatever touches it) or a tag (when the host takes tags). */
+  const followTarget = (view: EditorView, event: MouseEvent): { link?: LinkInfo; tag?: string; from: number; to: number } | null => {
+    const picture = (event.target as HTMLElement | null)?.closest?.(".cm-zim-image");
+    const pos = picture ? view.posAtDOM(picture) : view.posAtCoords({ x: event.clientX, y: event.clientY });
+    if (pos === null) return null;
+    const link = picture ? imageAt(view.state, pos) : linkAt(view.state, pos);
+    if (link) return { link, from: link.from, to: link.to };
+    const tag = picture || !options.onTag ? null : tagAt(view.state, pos);
+    return tag ? { tag: tag.name, from: tag.from, to: tag.to } : null;
+  };
+  /** A tap that follows something: on a link, picture or tag, in a page that is being read. */
+  const touchFollows = (view: EditorView, event: MouseEvent): boolean => {
+    if (!tapFollows() || event.button !== 0 || event.ctrlKey || event.metaKey || view.state.readOnly) return false;
+    return followTarget(view, event) !== null;
+  };
   return [
     ...(options.exactLineBreaks ? [EditorState.lineSeparator.of("\n")] : []),
     ...(options.onNavigate || options.onTag ? [followFacet.of({ ...(options.onNavigate ? { link: options.onNavigate } : {}), ...(options.onTag ? { tag: options.onTag } : {}) })] : []),
@@ -96,8 +130,18 @@ export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
     highlightSpecialChars(),
     EditorView.lineWrapping,
     EditorView.domEventHandlers({
+      pointerdown(event, view) {
+        pointer = event.pointerType;
+        focusedBefore = view.hasFocus;
+        return false;
+      },
       // A click on a checkbox widget toggles it (Shift-click: dropped instead of done).
       mousedown(event, view) {
+        // A tap on a link, a picture or a tag follows it, when the click comes: the caret must not move there first (a keyboard would open).
+        if (touchFollows(view, event)) {
+          event.preventDefault();
+          return true;
+        }
         // Double-clicking a picture selects its source, which brings the source back to be edited. (On the second
         // press, before the editor selects a word: that would already have swapped the picture for its source.)
         const picture = (event.target as HTMLElement | null)?.closest?.(".cm-zim-image");
@@ -118,19 +162,11 @@ export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
         return true;
       },
       click(event, view) {
-        if (event.button !== 0 || !(event.ctrlKey || event.metaKey || view.state.readOnly)) return false;
-        // A picture is followed as itself, not as whatever touches it.
-        const picture = (event.target as HTMLElement | null)?.closest?.(".cm-zim-image");
-        const pos = picture ? view.posAtDOM(picture) : view.posAtCoords({ x: event.clientX, y: event.clientY });
-        const link = pos === null ? null : picture ? imageAt(view.state, pos) : linkAt(view.state, pos);
-        if (link) {
-          options.onNavigate?.(link);
-          event.preventDefault();
-          return true;
-        }
-        const tag = pos === null || picture || !options.onTag ? null : tagAt(view.state, pos);
-        if (!tag) return false;
-        options.onTag?.(tag.name);
+        if (event.button !== 0 || !(event.ctrlKey || event.metaKey || view.state.readOnly || tapFollows())) return false;
+        const target = followTarget(view, event);
+        if (!target) return false;
+        if (target.link) options.onNavigate?.(target.link);
+        else if (target.tag !== undefined) options.onTag?.(target.tag);
         event.preventDefault();
         return true;
       },
@@ -140,6 +176,7 @@ export function zimExtensions(options: ZimEditorOptions = {}): Extension[] {
     ...(options.completeLink && !options.readOnly ? [linkCompletion(options.completeLink)] : []),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) options.onChange?.(update);
+      if (update.docChanged || update.selectionSet || update.focusChanged) options.onUpdate?.(update);
     }),
     ...(options.readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
     // The Zim keys come first so that Enter, Tab and Backspace reach the list commands before the defaults.
@@ -193,6 +230,8 @@ export interface ZimEditor {
    */
   goTo(position: number, options?: { focus?: boolean; scroll?: boolean }): void;
   focus(): void;
+  /** Scroll so that the caret is in view (the space it is in has become smaller: an on-screen keyboard came up). */
+  revealCaret(): void;
   /** A new table of `columns` columns and `rows` rows below its header, as a block of its own, with the first header selected to be written over. */
   insertTable(columns?: number, rows?: number): void;
   /**
@@ -229,6 +268,9 @@ export function createZimEditor(parent: HTMLElement, doc = "", options: ZimEdito
       if (goOptions.focus) view.focus();
     },
     focus: () => view.focus(),
+    revealCaret() {
+      view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: "nearest", yMargin: 32 }) });
+    },
     insertTable(columns, rows) {
       insertTable(columns, rows)(view);
       view.focus();

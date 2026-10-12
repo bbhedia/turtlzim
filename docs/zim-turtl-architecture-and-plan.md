@@ -132,7 +132,10 @@ reuse libsodium, never roll your own).
 the Zim format is in the core, the core runs as wasm in a Worker, and a notebook is open (plain
 pages in IndexedDB) or encrypted (ciphertext kept by the Turtl core, unlocked with a passphrase),
 on one device, with no server (`docs/zim-web-app.md`, `docs/zim-encrypted-notebooks.md`). Steps 5–7
-(desktop, mobile, sync and sharing) are not started.
+(desktop, mobile, sync and sharing) are not started. (Since: the editor and the app are made for a
+phone's screen, a finger and an on-screen keyboard — a formatting bar, taps, a layout that follows
+what the keyboard leaves — so the mobile shell will wrap an editor that already works there; that is
+checked in an emulated browser, not on a device: `docs/zim-editor-plan.md`, *Writing on a phone*.)
 
 ---
 

@@ -2,8 +2,8 @@
 // (new page, rename, delete, import, export), over a NotebookSession. The notebook's rules are the
 // Rust ones in wasm; the pages live in a store; this file is only the interface between a person and
 // those.
-import { createZimEditor } from "../editor";
-import type { ImageSource, LinkInfo, LinkStatus, ZimEditor } from "../editor";
+import { createFormatBar, createZimEditor } from "../editor";
+import type { FormatBar, ImageSource, LinkInfo, LinkStatus, ZimEditor } from "../editor";
 import { anchorsIn, checkPageName, classifyLink, journalDayOf, journalPage, pageKey, startingText, zimTimestamp } from "../notebook-core";
 import type { Backlink, JournalDay, SearchHit } from "../notebook-core";
 import { FileUrls } from "../notebook/file-urls";
@@ -28,6 +28,13 @@ import { ContentsPanel, headingsOf } from "./contents";
 import { clear, h, highlighted } from "./dom";
 import { TagsPanel } from "./tags";
 import { TreeView } from "./tree-view";
+import { trackVisibleHeight } from "./viewport";
+
+/** What was asked for about the formatting bar: "on", "off", or "auto" (shown while writing on a touch screen). */
+function formatBarSetting(): "on" | "off" | "auto" {
+  const asked = prefs.get("formatbar");
+  return asked === "on" || asked === "off" ? asked : "auto";
+}
 
 const prefs = {
   get(key: string): string | null {
@@ -158,6 +165,8 @@ export class App {
   private readonly contents: ContentsPanel;
   private readonly calendar: CalendarPanel;
   private readonly tagList: TagsPanel;
+  /** The buttons for what the keys do (shown on a touch screen while the page is being written in, or when asked for in the menu). */
+  private formatBar!: FormatBar;
   private contentsTimer: number | undefined;
   private readonly linkCache = new Map<string, LinkStatus>();
   /** Addresses for the pictures of the open notebook. */
@@ -223,7 +232,7 @@ export class App {
       onFoldChange: (folded) => !this.isPrivate && prefs.set(`folded:${this.session?.info.id}`, JSON.stringify([...folded])),
     });
     this.contents = new ContentsPanel((from) => {
-      this.editor.goTo(from, { focus: true });
+      this.editor.goTo(from, { focus: this.focusesOnOpen });
       this.closeSidebarIfNarrow();
     }, prefs.get("panel:contents") !== "closed");
     this.calendar = new CalendarPanel(
@@ -325,14 +334,16 @@ export class App {
       h("div", { class: "side-panels" }, this.contents.element, this.calendar.element, this.tagList.element),
     );
     const page = h("main", { class: "page" }, h("div", { class: "pagebar" }, breadcrumb, h("div", { class: "page-actions" }, rename, subpage, attach, table, download, remove)), updateBanner, notice, editorHost, attachments, backlinks);
+    this.formatBar = createFormatBar(() => this.editor.view, { follow: (link) => void this.followLink(link), attach: () => attachInput.click() });
 
     root.append(
       h(
         "div",
-        { class: "app", "data-sidebar": window.matchMedia("(max-width: 48rem)").matches ? "closed" : prefs.get("sidebar") === "closed" ? "closed" : "open" },
+        { class: "app", "data-sidebar": window.matchMedia("(max-width: 48rem)").matches ? "closed" : prefs.get("sidebar") === "closed" ? "closed" : "open", "data-formatbar": formatBarSetting() },
         h("header", { class: "topbar" }, sidebarToggle, h("div", { class: "notebook-menu" }, notebookButton, notebookMenu), lock, h("div", { class: "search" }, search, searchResults), button("New page", { class: "primary", on: { click: () => void this.newPage(this.current?.name.includes(":") ? `${this.current.name.slice(0, this.current.name.lastIndexOf(":") + 1)}` : "") } }), h("label", { class: "check", for: "markup" }, markup, " Show markup")),
         sidebar,
         page,
+        this.formatBar.element,
         h("footer", { class: "statusbar" }, status, saveState),
         folderInput,
         zipInput,
@@ -351,6 +362,28 @@ export class App {
       onNavigate: (link) => void this.followLink(link),
       onTag: (tag) => this.showTag(tag),
       completeLink: (typed) => (this.session && this.current ? this.session.completeLink(this.current.name, typed) : []),
+      followOnTap: true,
+      onUpdate: (update) => this.formatBar.refresh(update.state),
+    });
+    this.formatBar.refresh(this.editor.view.state);
+    // The bar is there for as long as the text has the focus (on a touch screen: when the keyboard is up); the buttons never take the focus.
+    const app = root.querySelector<HTMLElement>(".app")!;
+    const typing = (on: boolean) => app.classList.toggle("editing", on);
+    for (const part of [editorHost, this.formatBar.element]) {
+      part.addEventListener("focusin", () => typing(true));
+      part.addEventListener("focusout", (event) => {
+        const to = (event as FocusEvent).relatedTarget as Node | null;
+        if (!to || !(editorHost.contains(to) || this.formatBar.element.contains(to))) typing(false);
+      });
+    }
+    // An on-screen keyboard makes what can be seen smaller: the app is as tall as that, so its bottom (the bar) is above the keyboard, and the caret is kept in view.
+    let keyboardWasUp = false;
+    trackVisibleHeight(document.documentElement, ({ keyboard }) => {
+      app.classList.toggle("keyboard", keyboard);
+      // The keyboard put away is the end of typing (a browser may leave the focus where it was): a page that is read, again, where a tap follows a link.
+      if (keyboardWasUp && !keyboard && this.editor.view.hasFocus) this.editor.view.contentDOM.blur();
+      keyboardWasUp = keyboard;
+      if (keyboard && app.classList.contains("editing")) this.editor.revealCaret();
     });
     sidebarToggle.setAttribute("aria-expanded", String(root.querySelector(".app")?.getAttribute("data-sidebar") === "open"));
 
@@ -457,6 +490,19 @@ export class App {
     app.dataset.sidebar = open ? "open" : "closed";
     this.els.sidebarToggle.setAttribute("aria-expanded", String(open));
     if (!window.matchMedia("(max-width: 48rem)").matches) prefs.set("sidebar", open ? "open" : "closed");
+  }
+
+  /** Whether the formatting bar is shown (when the text is being written in) by what was asked for, or by default on a touch screen. */
+  private formatBarShown(): boolean {
+    const asked = this.els.root.querySelector<HTMLElement>(".app")?.dataset.formatbar ?? "auto";
+    return asked === "on" || (asked !== "off" && window.matchMedia("(pointer: coarse)").matches);
+  }
+
+  /** Show or hide the formatting bar, and remember which (a setting of the app, as whether the sidebar is open). */
+  private setFormatBar(show: boolean): void {
+    const asked = show ? "on" : "off";
+    prefs.set("formatbar", asked);
+    this.els.root.querySelector<HTMLElement>(".app")!.dataset.formatbar = asked;
   }
 
   private closeSidebarIfNarrow(): void {
@@ -607,6 +653,7 @@ export class App {
       this.els.notebookMenu.append(
         h("hr", {}),
         item("Today's journal", () => this.openDay(localToday())),
+        item(this.formatBarShown() ? "Hide the formatting bar" : "Show the formatting bar", () => this.setFormatBar(!this.formatBarShown())),
         item("New notebook…", () => void this.newNotebook()),
         item("Rename notebook…", () => void this.renameNotebook()),
         item("Import a folder…", () => this.els.folderInput.click()),
@@ -1375,9 +1422,15 @@ export class App {
     this.renderNotice();
     this.setSaveState("");
     if (options.anchor) this.scrollToAnchor(options.anchor);
-    if (options.focus) this.editor.focus();
+    // (a page that was pointed at with a finger is read, and a keyboard would cover it: only a page that is new, to be written, takes the focus there)
+    if (options.focus && (this.focusesOnOpen || !exists)) this.editor.focus();
     if (options.closeSidebar) this.closeSidebarIfNarrow();
     this.say("");
+  }
+
+  /** Whether a page that is opened takes the focus, for typing: not on a touch screen, where the keyboard that comes with it would cover the page that was opened to be read. */
+  private get focusesOnOpen(): boolean {
+    return !window.matchMedia("(pointer: coarse)").matches;
   }
 
   private renderBreadcrumb(): void {
@@ -1628,7 +1681,7 @@ export class App {
     const anchors = anchorsIn(this.editor.getText());
     const wanted = id.trim();
     const found = anchors.find((a) => a.id === wanted) ?? anchors.find((a) => a.id.toLowerCase() === wanted.toLowerCase());
-    if (found) this.editor.goTo(found.at, { focus: true });
+    if (found) this.editor.goTo(found.at, { focus: this.focusesOnOpen });
     else this.say(`There is no heading or anchor called #${wanted} on this page.`);
   }
 

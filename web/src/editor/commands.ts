@@ -268,6 +268,37 @@ export const insertLink: StateCommand = ({ state, dispatch }) => {
 };
 
 // ---------------------------------------------------------------------------------------------
+// What the selection is in (for a bar of buttons to show what is on, and what can be done)
+
+/** Whether the selection is inside a construct of `kind` (a bold span, say): what a toggle of that style would take off. */
+export function styleActive(state: EditorState, kind: number): boolean {
+  const { from, to } = state.selection.main;
+  return enclosingConstruct(state, kind, from, to) >= 0;
+}
+
+/** The level (1 to 5) of the heading that the caret's line is, or 0 if it is not one. */
+export function headingLevelHere(state: EditorState): number {
+  const spans = spansOf(state);
+  const line = state.doc.lineAt(state.selection.main.head);
+  for (let i = 0; i < spans.length && spans.start(i) <= line.from; i++) {
+    if (spans.kind(i) === Kind.Heading && spans.start(i) === line.from) return spans.detail(i);
+  }
+  return 0;
+}
+
+/** What kind of list item the caret's line is (a numbered one counts digits and letters; a checkbox any state of one), or null. */
+export function listKindHere(state: EditorState): ListKind | null {
+  const item = itemAt(state, state.doc.lineAt(state.selection.main.head));
+  if (!item) return null;
+  return item.marker === ListMarker.BULLET ? "bullet" : isCheckboxMarker(item.marker) ? "checkbox" : "number";
+}
+
+/** Whether Shift-Tab would take a line of the selection out one level. */
+export function canOutdent(state: EditorState): boolean {
+  return selectedLines(state).some((line) => state.sliceDoc(line.from, line.from + 1) === "\t");
+}
+
+// ---------------------------------------------------------------------------------------------
 // Headings
 
 /** Make the selected lines headings of `level` (1 to 5); a line that already is one of that level becomes plain text again. `0` clears headings. */

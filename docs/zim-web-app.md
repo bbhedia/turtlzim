@@ -36,6 +36,11 @@ yet (CLAUDE.md, Open issues #5).
   leads there from the page you are on (`zim-editor-plan.md`).
 * **Tables**: drawn as a grid, written as lines with a toolbar while the caret is in them; the **Table**
   button makes one (`zim-editor-plan.md`).
+* **Formatting bar** (under the page): buttons for what the keys do (bold, lists, headings, links, tables, undo,
+  attach), shown while writing on a touch screen, or from the notebook menu (*Show the formatting bar*) on any.
+  On a phone the layout follows the part of the screen that the keyboard leaves, a tap follows a link while a page is
+  read and places the caret while it is written, and what is tapped is 44 pixels or more (`zim-editor-plan.md`,
+  *Writing on a phone*).
 * **Backlinks** under every page: the pages whose links lead to it, with the line the first one is on.
 * **Search** (`/` focuses it): every word has to be in the page's name or in its text *as a person
   reads it* (and every `@tag` in the query has to be written, exactly): `**bold**` is searched as `bold`, `[[Projects:Garden|the garden]]` as `the garden`, a
@@ -54,9 +59,11 @@ yet (CLAUDE.md, Open issues #5).
 * **Encrypted notebooks.** New notebook (or Import) can make one; they are listed with the open ones
   and behave the same, but are kept as ciphertext, need a passphrase, and are locked away with the
   Lock button (see `zim-encrypted-notebooks.md` for how, what it protects, and its limits).
-* **A phone-sized screen** gets the tree (with the lists below it) as a drawer, and the top bar wraps.
+* **A phone-sized screen** gets the tree (with the lists below it) as a drawer, and the top bar wraps; while the
+  text is being written in, on a touch screen, the search row goes (the room is for the text).
 * **What is remembered** about the lists: whether Contents, Calendar and Tags are open (`zim:panel:*` in
-  `localStorage`: a setting of the app, not of a notebook). In an encrypted notebook the lists show its
+  `localStorage`: a setting of the app, not of a notebook), and whether the formatting bar was asked for or put away
+  (`zim:formatbar`). In an encrypted notebook the lists show its
   headings, days and tags while it is open and are emptied when it is locked, like everything else on the screen
   (`isPrivate`; the scan of the browser's files covers a heading, a table cell, a day's page and its text, a tag and
   a link being completed).
@@ -206,9 +213,10 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
 | Encrypted notebooks | `zim-encrypted-notebooks.md` (what verifies what); `web/test/{vault,engine-failures,cut-off,turtl-store,routed-store}.test.ts`, `store.test.ts` (the shared contract), `vault-browser.mjs` (`npm run test:vault`) |
 | Contents, calendar, tags, link completion | `cargo test -p zim-notebook` (`tags`, `journal`, `complete`), `web/test/zim-features.test.ts` (the shapes across wasm, the calendar against the browser's own dates for every day of two centuries, headings as people read them, the completion source and what choosing writes), and in Chromium the scenarios "the contents list…", "the calendar marks…", "tags are listed…", "a link is completed…" |
 | Tables | `cargo test -p zim-format` (`tests/table.rs`: reading, escapes, every edit, byte-exact round trip), `web/test/tables.test.ts` (where the caret is, each edit and where the caret goes, Tab/Enter/arrows, insert, how a table is drawn and when), and in Chromium "a table is drawn as a grid…", "in a table Tab…", "the toolbar of a table…", "the Table button…" |
+| Writing on a phone | `web/test/format-bar.test.ts` (what the bar asks of the editor; the tracker of the visible area, with a made-up `visualViewport`), and in Chromium, emulating a phone with touch events and a made-up keyboard, the scenarios "on a phone …" (the bar with the keyboard, each button, taps on links and tags, touch targets and no sideways scroll, a table), "a browser that moves what can be seen…", "the formatting bar is not shown to a mouse…", "a touch screen has the bar…". Not on a device: `zim-editor-plan.md`, *Writing on a phone* |
 | Pictures | `web/test/editor.test.ts` (images with a host: pictures, chips and why, caret and selection rules, Ctrl-click), `commands.test.ts` (where a reference goes), `file-urls.test.ts` (loading, stale addresses, failures not retried) |
 | **The app in Chromium** | `web/test/browser.mjs`: the scenarios below, on the built app, served by the same server `npm run serve` runs |
-| How it looks | `npm run screenshots <dir>`: screenshots (light, dark, phone, dialogs, search, menu, pictures, the viewer, tables as a grid and as text, the journal and tags, completing a link) to look at |
+| How it looks | `npm run screenshots <dir>`: screenshots (light, dark, phone, a phone with the keyboard up and the bar, dialogs, search, menu, pictures, the viewer, tables as a grid and as text, the journal and tags, completing a link) to look at |
 
 The browser scenarios, each in a fresh profile (so a fresh IndexedDB): the editor (rendering, markup
 shown where the caret is, typing, undo, checkbox clicks, shortcuts, list editing, carriage returns,

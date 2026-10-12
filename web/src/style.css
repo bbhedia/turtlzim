@@ -45,6 +45,9 @@
 
 html, body { height: 100%; }
 
+/* (a finger: no zoom by a double tap, which would also wait for the second tap; and no pull of the page that reloads it) */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; touch-action: manipulation; overscroll-behavior-y: none; }
+
 body {
   margin: 0;
   background: var(--zim-bg);
@@ -76,10 +79,11 @@ button.secondary { background: transparent; }
 
 .app {
   display: grid;
-  height: 100dvh;
+  /* (as tall as what can be seen: on a phone the keyboard takes the bottom of it away: app/viewport.ts) */
+  height: var(--visible-height, 100dvh);
   grid-template-columns: 18rem minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  grid-template-areas: "top top" "side page" "status status";
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-areas: "top top" "side page" "side bar" "status status";
 }
 .app[data-sidebar="closed"] { grid-template-columns: 0 minmax(0, 1fr); }
 /* while encrypted notebooks are being locked (or the page is away), nothing of them is on the screen */
@@ -221,7 +225,8 @@ mark { background: rgba(255, 213, 0, 0.35); color: inherit; border-radius: 2px; 
 
 /* ---- the page ---------------------------------------------------------------------------- */
 
-.page { grid-area: page; overflow: auto; min-width: 0; display: flex; flex-direction: column; }
+/* (a pull down at the top of a page must not reload the app) */
+.page { grid-area: page; overflow: auto; overscroll-behavior-y: contain; min-width: 0; display: flex; flex-direction: column; }
 .pagebar, .notice, .update-banner, .editor-host, .attachments, .backlinks { width: 100%; max-width: 54rem; margin-inline: auto; }
 .pagebar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.7rem 1rem 0.3rem; }
 .breadcrumb { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem; min-width: 0; }
@@ -290,10 +295,59 @@ dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
 .viewer-actions { display: flex; justify-content: flex-end; }
 .skipped { margin: 0; padding-left: 1.2rem; font-size: 0.85rem; color: var(--zim-muted); overflow-wrap: anywhere; }
 
+/* ---- the formatting bar: what the keys do, as buttons (shown while writing on a touch screen, or when asked for) ---- */
+
+.format-bar {
+  grid-area: bar;
+  display: none;
+  min-width: 0;
+  padding: 0.3rem 0.5rem calc(0.3rem + env(safe-area-inset-bottom, 0px));
+  background: var(--bar-bg);
+  border-top: 1px solid var(--zim-border);
+}
+.app[data-formatbar="on"] .format-bar { display: block; }
+@media (pointer: coarse) {
+  .app[data-formatbar="auto"].editing .format-bar { display: block; }
+}
+/* (a row that is longer than the screen is moved sideways with a finger, and a button that is cut off at its edge says so) */
+.format-row { display: flex; gap: 0.25rem; overflow-x: auto; scrollbar-width: none; overscroll-behavior-x: contain; }
+.format-row::-webkit-scrollbar { display: none; }
+.format-headings { margin-bottom: 0.25rem; }
+.format-headings[hidden], .format-button[hidden] { display: none; }
+.format-button { flex: none; display: inline-grid; place-items: center; min-width: 2.1rem; min-height: 2.1rem; padding: 0 0.5rem; font-weight: 600; }
+.format-button[aria-pressed="true"] { background: var(--zim-selection); border-color: var(--zim-muted); }
+.format-drawing { width: 1.2rem; height: 1.2rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.format-bold { font-weight: 800; }
+.format-italic { font-style: italic; }
+.format-underline { text-decoration: underline; }
+.format-strike { text-decoration: line-through; }
+.format-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
+
+/* ---- a finger is bigger than a pointer: what is tapped is at least as big as a thumb -------- */
+
+@media (pointer: coarse) {
+  button { min-height: 2.5rem; }
+  .icon-button { min-width: 2.75rem; }
+  .format-button { min-width: 2.75rem; min-height: 2.75rem; padding: 0 0.4rem; }
+  .format-drawing { width: 1.45rem; height: 1.45rem; }
+  .cm-zim-table-toolbar button { min-width: 2.75rem; min-height: 2.75rem; }
+  /* the keyboard is where the bottom of the screen was: nothing of the device's own edge is under the bar */
+  .app.keyboard .format-bar { padding-bottom: 0.3rem; }
+  .row { min-height: 2.75rem; }
+  .chevron { width: 2.75rem; height: 2.75rem; }
+  .calendar-day { min-height: 2.4rem; }
+  .calendar-step { min-width: 2.75rem; }
+  .panel > summary { padding: 0.45rem 0; }
+  .panel-list .link-button { padding: 0.45rem 0; }
+  .tags-list { gap: 0 1.1rem; }
+  .menu-item { min-height: 2.75rem; }
+  .result { padding-block: 0.7rem; }
+}
+
 /* ---- narrow screens: the tree is an overlay, and the top bar takes two rows -------------------- */
 
 @media (max-width: 48rem) {
-  .app, .app[data-sidebar="closed"] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "page" "status"; }
+  .app, .app[data-sidebar="closed"] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "page" "bar" "status"; }
   /* the tree sits over the page, in the page's own cell, so nothing depends on how tall the top bar is */
   .sidebar { grid-area: page; z-index: 30; width: min(20rem, 88vw); box-shadow: var(--shadow); }
   .app[data-sidebar="closed"] .sidebar { display: none; }
@@ -307,3 +361,11 @@ dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
   .pagebar { padding-inline: 0.6rem; }
   .page-actions { width: 100%; }
 }
+
+/* (what is typed on gets the room: the search and Show markup are for when the keyboard is away) */
+@media (max-width: 48rem) and (pointer: coarse) {
+  .app.editing .search, .app.editing .check { display: none; }
+}
+
+/* (a browser that has moved what can be seen down the page: the app goes with it) */
+html[data-panned] .app { translate: 0 var(--visible-top); }

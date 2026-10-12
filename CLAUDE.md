@@ -132,7 +132,7 @@ scripts/setup-browser.sh            # once: Chromium + libraries + a font, no ro
 npm run test:browser                # the built app in a real browser (ZIM_GOLDEN_DIR=... adds the real Zim manual; ONLY=text picks scenarios)
 npm run test:vault                  # the encrypted-notebook vault in a real browser: Worker, OPFS, reload, crash mid-write (five moments), a passphrase change and a restore cut off, backup and restore between browsers, every byte of the file system tried with the old key, one tab at a time, the Worker's network cut-off, heartbeat and silent death
 npm run measure:unlock -- [pages ...]      # what unlocking costs as a vault grows (a real browser; numbers in docs/zim-encrypted-notebooks.md)
-npm run screenshots <dir>           # pictures of the app to look at (light, dark, phone, dialogs, pictures, tables, the journal and tags, completing a link)
+npm run screenshots <dir>           # pictures of the app to look at (light, dark, phone, a phone writing with the keyboard up, dialogs, pictures, tables, the journal and tags, completing a link)
 scripts/serve.sh start --host :: --port 8080   # serve web/dist in the background (see docs/zim-editor-plan.md: trying it from another machine)
 scripts/serve.sh start --host :: --port 8443 --tls --name ADDRESS   # https for encrypted notebooks from another machine (docs/zim-pwa.md: trusting its certificate)
 
@@ -194,6 +194,12 @@ docker compose up                   # Postgres + server (define compose file)
   each, one undo) and holds no table rules; drawing or moving in a table never rewrites its text.
   A UI change is not done until it has been looked at (`npm run screenshots`) and driven in the real
   browser test (`npm run test:browser`); the unit tests cannot see layout, focus or timing.
+- **Writing on a phone** (`docs/zim-editor-plan.md`, *Writing on a phone*): the formatting bar runs the commands the keys
+  run (no second rule for anything), never takes the focus from the text (a press that did would put the keyboard
+  away), and keeps nothing but whether it is wanted (`zim:formatbar`). On a touch screen a tap follows a link only while the
+  editor does not have the focus, a page opened by a tap is not given the focus, and the app is as tall as
+  `visualViewport` (`web/src/app/viewport.ts`). The browser tests emulate a phone with touch events and a made-up
+  keyboard; no real device has been tried, and the docs say what that leaves open.
 
 ---
 

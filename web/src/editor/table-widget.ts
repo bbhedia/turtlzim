@@ -7,7 +7,7 @@ import type { EditorView } from "@codemirror/view";
 import { Kind } from "../kinds";
 import { highlight } from "../zim";
 import type { Align, TableLayout } from "../table";
-import { addColumnRight, addRowBelow, alignColumn, cachedLayout, caretToCell, deleteColumn, deleteRow, tidyTable } from "./table-commands";
+import { addColumnRight, addRowBelow, alignColumn, cachedLayout, caretToCell, deleteColumn, deleteRow, nextCell, previousCell, tidyTable } from "./table-commands";
 import { linkStatusFacet } from "./syntax";
 import type { LinkStatus } from "./syntax";
 
@@ -190,9 +190,14 @@ interface ToolbarButton {
   can?: (state: ToolbarState) => boolean;
   /** Pressed when this says it is what the column has now. */
   pressed?: (state: ToolbarState) => boolean;
+  /** Only on a screen that is touched: a keyboard has keys for it. */
+  touchOnly?: boolean;
 }
 
 const BUTTONS: ToolbarButton[] = [
+  // (a keyboard has Tab and Shift+Tab for these; a phone has these)
+  { label: "‹ Cell", title: "Go to the cell before this one", run: (v) => previousCell(v), touchOnly: true },
+  { label: "Cell ›", title: "Go to the next cell (after the last one, to a new row)", run: (v) => nextCell(v), touchOnly: true },
   { label: "+ Row", title: "Add a row below this one", run: (v) => addRowBelow(v) },
   { label: "− Row", title: "Delete this row", run: (v) => deleteRow(v), can: (s) => s.canDeleteRow },
   { label: "+ Column", title: "Add a column after this one", run: (v) => addColumnRight(v) },
@@ -221,15 +226,18 @@ export class TableToolbar extends WidgetType {
     bar.className = "cm-zim-table-toolbar";
     bar.setAttribute("role", "toolbar");
     bar.setAttribute("aria-label", "Table");
+    const touched = typeof matchMedia === "function" && matchMedia("(any-pointer: coarse)").matches;
     for (const spec of BUTTONS) {
       const button = document.createElement("button");
       button.type = "button";
       button.textContent = spec.label;
       button.title = spec.title;
       button.setAttribute("aria-label", spec.title);
+      if (spec.touchOnly && !touched) button.hidden = true;
       if (spec.can && !spec.can(this.state)) button.disabled = true;
       if (spec.pressed) button.setAttribute("aria-pressed", String(spec.pressed(this.state)));
-      // (a press must not take the caret out of the table: the buttons act on where it is)
+      // (a press must not take the caret out of the table: the buttons act on where it is; and a finger's press must not take the keyboard down)
+      button.addEventListener("pointerdown", (event) => event.preventDefault());
       button.addEventListener("mousedown", (event) => event.preventDefault());
       button.addEventListener("click", () => {
         spec.run(view);
@@ -238,7 +246,7 @@ export class TableToolbar extends WidgetType {
       bar.append(button);
     }
     bar.addEventListener("keydown", (event) => {
-      const buttons = [...bar.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+      const buttons = [...bar.querySelectorAll<HTMLButtonElement>("button:not(:disabled):not([hidden])")];
       const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
       if (event.key === "Escape") {
         view.focus();
