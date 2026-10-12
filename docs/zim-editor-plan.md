@@ -205,10 +205,13 @@ is 60), and `.app.keyboard` says so (no room is kept for the device's bottom edg
 visual viewport down the page to show the focused field (`offsetTop`) gets the app moved with it
 (`html[data-panned]`, `--visible-top`). While typing on a phone the row with the search and *Show markup* is hidden:
 what is typed on gets the room. A phone on its side (landscape, 512 pixels or less tall) with the keyboard up has 25 to 65
-pixels of text left under the top bar, the bar and the status line, so there the top bar and the status line go too, until
-the keyboard is put away (`.app.keyboard`), and the tree starts closed there (it would take a third of the width: a short touch
+pixels of text left under the top bar, the bar and the status line, so there the top bar and the status line go too while the
+*text* has the keyboard (`.app.editing.keyboard`; with the keyboard up for the search the box stays, or the keyboard it opened
+would close with it), and the tree starts closed there (it would take a third of the width: a short touch
 screen on its side counts as a narrow one for it). The tree and the page scroll by themselves and a pull at the top of the page does
-not reload the app (`overscroll-behavior`). Measured with made-up keyboards at 320×568, 390×844, 412×915, 568×320, 844×390,
+not reload the app (`overscroll-behavior`). A dialog (`dialog.dialog`) is placed in the part of the screen that can be seen
+(`--visible-top`, `--visible-height`) and the search results end above the keyboard: a dialog centred in the whole page had its
+buttons under the keyboard. Measured with made-up keyboards at 320×568, 390×844, 412×915, 568×320, 844×390,
 768×1024 and 1024×768: no sideways scroll, the bar above the keyboard, the caret in view (the scenario "on a small phone, and a
 phone on its side…").
 

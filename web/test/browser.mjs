@@ -2609,6 +2609,14 @@ try {
           await ui.waitCurrent("Ideas");
           assertEqual(await page.locator(".app").getAttribute("data-sidebar"), "closed", `${what}: and choosing a page puts it away`);
           await ui.goto("Projects:Garden");
+          // the keyboard up for the search is not the keyboard up for the text: the box that is typed in stays
+          await page.locator("#search").tap();
+          await page.evaluate((height) => window.__keyboard(height), keyboard);
+          await page.waitForTimeout(300);
+          assertEqual(await page.evaluate(() => document.activeElement?.id), "search", `${what}: the search box keeps the focus while it is typed in`);
+          assert(await page.locator("#search").isVisible(), `${what}: and is there (the top bar stays for it)`);
+          await page.evaluate(() => window.__keyboard(0));
+          await page.locator("#search").evaluate((el) => el.blur());
         } else if (viewport.width > 768) {
           assertEqual(await page.locator(".app").getAttribute("data-sidebar"), "open", `${what}: there is room for the tree beside the page, and it is there`);
         }
@@ -2643,6 +2651,40 @@ try {
         await context.close();
       }
     }
+  });
+
+  await app("on a phone a dialog and the search results are in the part of the screen that can be seen, above the keyboard", phone, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    const bottom = (selector) => page.evaluate((s) => { const b = document.querySelector(s)?.getBoundingClientRect(); return b ? { top: b.top, bottom: b.bottom } : null; }, selector);
+    const visible = () => page.evaluate(() => parseFloat(document.documentElement.style.getPropertyValue("--visible-height")));
+    // a dialog with a field: opened, then the keyboard comes up under it
+    await page.getByRole("button", { name: "New page", exact: true }).tap();
+    await page.locator("dialog.dialog").waitFor();
+    await page.evaluate(() => window.__keyboard(330));
+    await page.waitForTimeout(300);
+    const seen = await visible();
+    assertEqual(seen, 470, "(what can be seen)");
+    const dialog = await bottom("dialog.dialog");
+    assert(dialog.top >= 0 && dialog.bottom <= seen, `the dialog is in what can be seen (${JSON.stringify(dialog)} of ${seen})`);
+    for (const name of ["Cancel", "Create"]) {
+      const button = await page.locator("dialog.dialog").getByRole("button", { name, exact: true }).boundingBox();
+      assert(button.y + button.height <= seen, `the ${name} button is above the keyboard (its bottom is at ${button.y + button.height})`);
+    }
+    await page.keyboard.type("Phone page");
+    await page.locator("dialog.dialog").getByRole("button", { name: "Create", exact: true }).tap();
+    await ui.waitCurrent("Projects:Phone page");
+    await page.evaluate(() => window.__keyboard(0));
+    // the search: the results end above the keyboard, and an entry is chosen with a tap
+    await page.locator("#search").tap();
+    await page.evaluate(() => window.__keyboard(330));
+    await page.keyboard.type("garden");
+    await page.locator("#search-results .result").first().waitFor();
+    const results = await bottom("#search-results");
+    assert(results.bottom <= seen, `the search results end above the keyboard (${JSON.stringify(results)} of ${seen})`);
+    assertEqual(await page.evaluate(() => document.activeElement?.id), "search", "(and the search box is where the focus is)");
+    await page.locator("#search-results .result").first().tap();
+    await page.waitForFunction(() => window.__zim.app.current?.name !== "Projects:Phone page");
   });
 
   await app("on a phone what is tapped is big enough, and the page fits the screen", phone, async (ui) => {

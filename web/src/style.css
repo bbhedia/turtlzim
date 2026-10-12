@@ -151,7 +151,8 @@ button.secondary { background: transparent; }
   left: 0;
   right: 0;
   z-index: 40;
-  max-height: 65vh;
+  /* (the results end above the keyboard, if one is up: what can be seen is --visible-height, and the top bar is 7rem of it) */
+  max-height: min(65vh, calc(var(--visible-height, 100dvh) - 7rem));
   overflow: auto;
   background: var(--zim-bg);
   border: 1px solid var(--zim-border);
@@ -331,6 +332,12 @@ dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
   .format-button { min-width: 2.75rem; min-height: 2.75rem; padding: 0 0.4rem; }
   .format-drawing { width: 1.45rem; height: 1.45rem; }
   .cm-zim-table-toolbar button { min-width: 2.75rem; min-height: 2.75rem; }
+  /* a dialog is in the part of the screen that can be seen: a keyboard that is up covers the middle of the page, and with it the buttons of a dialog that is centred in it */
+  dialog.dialog {
+    top: var(--visible-top, 0px);
+    bottom: max(0px, calc(100dvh - var(--visible-top, 0px) - var(--visible-height, 100dvh)));
+    max-height: calc(var(--visible-height, 100dvh) - 1rem);
+  }
   /* the keyboard is where the bottom of the screen was: nothing of the device's own edge is under the bar */
   .app.keyboard .format-bar { padding-bottom: 0.3rem; }
   .row { min-height: 2.75rem; }
@@ -367,9 +374,10 @@ dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
   .app.editing .search, .app.editing .check { display: none; }
 }
 
-/* (a phone on its side with the keyboard up has a few lines of screen left: the text and the bar are all that stay, until the keyboard is put away) */
+/* (a phone on its side with the keyboard up for the text has a few lines of screen left: the text and the bar are all that stay, until the keyboard
+   is put away; with the keyboard up for the search, the search stays: a box that goes when it is typed in closes the keyboard that opened it) */
 @media (orientation: landscape) and (max-height: 32rem) and (pointer: coarse) {
-  .app.keyboard .topbar, .app.keyboard .statusbar { display: none; }
+  .app.editing.keyboard .topbar, .app.editing.keyboard .statusbar { display: none; }
 }
 
 /* (a browser that has moved what can be seen down the page: the app goes with it) */
