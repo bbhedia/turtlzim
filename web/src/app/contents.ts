@@ -25,7 +25,8 @@ export function headingsOf(state: EditorState): Heading[] {
     let text = "";
     let at = from;
     for (let j = i + 1; j < spans.length && spans.start(j) < to; j++) {
-      const syntax = spans.kind(j) === Kind.Marker || (spans.kind(j) === Kind.LinkTarget && spans.detail(j) === 1);
+      // (an anchor in a heading is a place to link to, not a word of its title)
+      const syntax = spans.kind(j) === Kind.Marker || spans.kind(j) === Kind.Anchor || (spans.kind(j) === Kind.LinkTarget && spans.detail(j) === 1);
       if (!syntax) continue;
       if (spans.start(j) > at) text += state.sliceDoc(at, spans.start(j));
       at = Math.max(at, spans.end(j));

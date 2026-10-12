@@ -166,6 +166,10 @@ describe("the contents of a page", () => {
     expect(found.map((h) => h.text)).toEqual(["The bold and italic display and Other"]);
   });
 
+  it("say what a person reads: an anchor in a heading is a place to link to, not a word of the title", () => {
+    expect(headings("====== Title {{id: my-anchor}} ======\n=== {{id: first}}Start ===\n").map((h) => h.text)).toEqual(["Title", "Start"]);
+  });
+
   it("say what a person reads: a run of blanks is one space, and the heading's own edges are not part of it", () => {
     expect(headings("======   A   spaced \t title   ======\n").map((h) => h.text)).toEqual(["A spaced title"]);
   });

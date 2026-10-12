@@ -1034,6 +1034,21 @@ try {
     assertEqual(await page.locator("#search-results .result").count(), 30, "a tag shows all its pages");
     await search.fill("page");
     assertEqual(await page.locator("#search-results .result").count(), 20, "and a word, twenty");
+    // the list is not drawn again when a save changed none of it (that would take the focus from a person who is on a tag)
+    const first = await page.locator(".tags-list .link-button").first().elementHandle();
+    await page.evaluate(async () => {
+      await window.__zim.app.session.save("Many:Page 00", "text @manytag 0 and more words\n");
+    });
+    assert(await first.evaluate((el) => el.isConnected), "a save that changes no tag leaves the list as it is");
+    // and it is bounded: a page can write thousands of tags, and the list would be drawn again at every save
+    await page.evaluate(async () => {
+      await window.__zim.app.session.save("Bulk", `${Array.from({ length: 1200 }, (_, i) => `@bulk${i}`).join(" ")}\n`);
+    });
+    assertEqual(await page.locator("details.tags summary .count").innerText(), "(1204)", "the count is of all of them");
+    assertEqual(await page.locator(".tags-list .link-button").count(), 500, "but only the first five hundred are listed");
+    assertEqual(await page.locator(".tags-list .none").innerText(), "704 more: search for @ and the tag to find its pages.", "and the list says so");
+    await search.fill("@bulk1199");
+    assertDeepEqual(await results(), ["Bulk"], "(a tag that is not listed is found by the search)");
   });
 
   await app("a link is completed from the pages of the notebook: the best come first, Enter writes the shortest link, Escape leaves the text alone", {}, async (ui) => {
@@ -1202,6 +1217,54 @@ try {
     assert(!(await ui.text()).includes("\\n"), "and can be undone");
   });
 
+  await app("a row with fewer cells than the table: Tab and a click go into a cell that is made, and what is typed there stays in the table; after an undo and a redo of a table edit the caret still types", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Scratch");
+    const selected = () => page.evaluate(() => { const { state } = window.__zim.editor.view; const r = state.selection.main; return state.sliceDoc(r.from, r.to); });
+    const text = async () => (await ui.text()).trimEnd();
+    const short = "| a | b | c |\n|---|---|---|\n| d | e |\n| f | g | h |\n\nend\n";
+    // Tab from the second cell of the short row goes to a third, which it has not: the table is written with it, and the caret is in it
+    await ui.setText(short);
+    await ui.caretTo((await ui.text()).indexOf("| d") + 3);
+    await page.keyboard.press("Tab");
+    assertEqual(await selected(), "e", "Tab goes on in the short row");
+    await page.keyboard.press("Tab");
+    assertEqual((await text()).split("\n")[2], "| d   | e   |     |", "Tab to the cell that the row had not made it: the row has three cells");
+    await page.keyboard.type("X");
+    assertEqual((await text()).split("\n")[2], "| d   | e   | X    |", "and what is typed there is in the cell, in the table");
+    assertEqual(await page.locator(".cm-zim-table-toolbar").count(), 1, "which is still a table, being edited");
+    await ui.caretTo((await ui.text()).length);
+    assertEqual(await page.locator(".cm-zim-grid tr").nth(1).locator("td").allInnerTexts().then((cells) => cells.join("|")), "d|e|X", "and a grid of three columns once the caret is out of it");
+    // a click in the grid, in a cell that the short row has not, does the same
+    await ui.setText(short);
+    await ui.caretTo((await ui.text()).length);
+    await page.locator(".cm-zim-grid tr").nth(1).locator("td").nth(2).click();
+    assertEqual(await page.locator(".cm-zim-table-toolbar").count(), 1, "the table is its text, with the caret in it");
+    await page.keyboard.type("Y");
+    assertEqual((await text()).split("\n")[2], "| d   | e   | Y    |", "a letter typed after a click in the cell that the row had not is in a cell, and the row is still a row");
+    // the Tab that makes a row, undone and done again: the selection that comes back is one that can be typed over
+    await ui.setText("| a | b |\n|---|---|\n| c | d |\n\nend\n");
+    await ui.caretTo((await ui.text()).indexOf("| c") + 3);
+    await page.keyboard.press("Tab");
+    assertEqual(await selected(), "d", "(the last cell is selected)");
+    await page.keyboard.press("Tab");
+    assertEqual((await text()).split("\n").length, 6, "a row was made");
+    await page.keyboard.press("Control+z");
+    assertEqual((await text()).split("\n").length, 5, "and went with an undo");
+    await page.keyboard.press("Control+Shift+z");
+    assertEqual((await text()).split("\n").length, 6, "and came back with a redo");
+    const range = await page.evaluate(() => { const r = window.__zim.editor.view.state.selection.main; return { from: r.from, to: r.to, length: window.__zim.editor.getText().length }; });
+    assert(range.from <= range.to && range.to <= range.length, `the selection after the redo is in order (saw ${JSON.stringify(range)})`);
+    assert(range.to - range.from < range.length - 1, "and is not the whole page");
+    await page.keyboard.type("Z");
+    assert((await ui.text()).includes("Z"), "a key typed after the redo is typed");
+    await page.keyboard.press("Control+z");
+    await page.keyboard.press("Control+z");
+    await page.keyboard.press("Control+Shift+z");
+    await page.keyboard.type("W");
+    assert((await ui.text()).includes("W"), "and after more undos and redos");
+  });
+
   await app("the toolbar of a table adds and removes rows and columns, aligns a column and tidies the table, where the caret is, and the caret stays", {}, async (ui) => {
     const { page } = ui;
     await ui.goto("Scratch");
@@ -1288,6 +1351,13 @@ try {
     assert(after.startsWith("Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n"), "the header of the page is as it was: a table put there would have broken it");
     assertEqual(after.indexOf("| Header 1"), after.lastIndexOf("| Header 1"), "...");
     assert(after.indexOf("| Header 1") > after.indexOf("| apple"), "the new table is below the one that was there");
+    // in a block of code a table would only be text: it goes below the block
+    await ui.setText("Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== Scratch ======\n'''\ncode here\n'''\nafter\n");
+    await ui.caretTo((await ui.text()).indexOf("code here") + 4);
+    await page.getByRole("button", { name: "Table", exact: true }).click();
+    const code = await ui.text();
+    assert(code.includes("'''\ncode here\n'''\n\n| Header 1 |"), `the table is below the block of code (saw ${JSON.stringify(code.slice(-260))})`);
+    assert(code.endsWith("\n\nafter\n"), "and the text that followed is after it");
   });
 
   await app("what is typed is saved by itself, or at once with Ctrl+S, and is there after a reload", {}, async (ui) => {

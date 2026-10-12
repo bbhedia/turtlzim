@@ -2,6 +2,7 @@
 
 mod common;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 use common::{name, Rng};
 use zim_notebook::{tag_key, tags_in, Notebook};
@@ -246,4 +247,43 @@ fn the_index_agrees_with_a_plain_scan_through_any_run_of_changes() {
             }
         }
     }
+}
+
+/// The notebook of one page that writes `n` different tags (and each of the first few again, spelled in another case).
+fn page_of_many_tags(n: usize) -> Notebook {
+    let mut text: String = (0..n).map(|i| format!("@t{i} ")).collect();
+    text.push_str("@T0 @T1 @T2\n");
+    notebook(&[("Many", &text)])
+}
+
+#[test]
+fn a_page_with_very_many_different_tags_is_indexed_in_time_that_grows_with_their_number() {
+    // `tags()` once looked each tag of a page up in the page's whole list of them: the time grew with the
+    // square of their number (six seconds for twenty thousand). A page that is a long list of tags is not rare
+    // enough to freeze the sidebar, so what matters is how the time grows: eight times the tags may take about
+    // eight times as long, and the square would be sixty-four times.
+    fn best_of_three(nb: &Notebook, n: usize) -> Duration {
+        (0..3)
+            .map(|_| {
+                let started = Instant::now();
+                let tags = nb.tags();
+                let took = started.elapsed();
+                assert_eq!(tags.len(), n);
+                assert_eq!(tags[0].name, "t0", "the first spelling the page writes, not the later `@T0`");
+                assert_eq!(names(tags[0].pages.clone()), ["Many"]);
+                took
+            })
+            .min()
+            .unwrap()
+    }
+    let few = best_of_three(&page_of_many_tags(1_000), 1_000);
+    let many = best_of_three(&page_of_many_tags(8_000), 8_000);
+    assert!(many < few * 24 + Duration::from_millis(20), "1 000 tags took {few:?}, 8 000 took {many:?}");
+    // and the other questions about such a page are as quick
+    let nb = page_of_many_tags(8_000);
+    let started = Instant::now();
+    assert_eq!(nb.tags_of(&name("Many")).len(), 8_000);
+    assert_eq!(names(nb.pages_with_tag("T7999")), ["Many"]);
+    assert_eq!(nb.search("@t7999", 10).len(), 1);
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
 }

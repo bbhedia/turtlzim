@@ -122,6 +122,12 @@ and **`search` takes `@tag` words**: `@garden beans` is the pages that write exa
 `@gardening`: a part of a tag is no tag) and have the word `beans`; a tag found scores above a word, and its
 snippet is cut where the tag is. A bare `@` is an ordinary word.
 
+A page keeps its tags twice over: in the order written (`tags_of`) and as a map from each tag's key to the way the page
+first writes it, which is what the index and the searches read. Listing the index is linear in the tags: it once looked
+each tag up in the page's list of them, and a page of 20 000 different tags took six seconds
+(`a_page_with_very_many_different_tags_is_indexed_in_time_that_grows_with_their_number` measures how the time grows,
+not how long it takes).
+
 ## The journal (`journal.rs`)
 
 A day of the journal is the page `Journal:YYYY:MM:DD` (four, two and two digits, zero-filled, a day that exists,

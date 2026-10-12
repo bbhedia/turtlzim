@@ -2,7 +2,7 @@
 // table. A table is the text of its block (see core/zim-format's `table`, which does the reading and every
 // edit): an edit here is the block's new text, put in as one change, and the caret put in the cell it belongs.
 import { EditorSelection } from "@codemirror/state";
-import type { EditorState, SelectionRange, StateCommand, TransactionSpec } from "@codemirror/state";
+import type { EditorState, SelectionRange, StateCommand, Transaction, TransactionSpec } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { Kind, Opaque } from "../kinds";
 import { tableAddColumn, tableAddRow, tableDeleteColumn, tableDeleteRow, tableFormat, tableLayout, tableNew, tableSetAlign } from "../table";
@@ -112,13 +112,32 @@ function editable(state: EditorState): TableHere | null {
   return here && main.from >= here.from && main.to <= here.to ? here : null;
 }
 
+/**
+ * Dispatch `spec`, which may rewrite the table's block. CodeMirror keeps the selection from before a change (undo and redo
+ * restore it from there) and maps it through the change; a range of text that lies inside a stretch that is replaced comes
+ * out the other side with its end before its start, and the redo would select the page backwards (and the next key typed
+ * would fail). A table's edits replace its whole block, and Tab selects what a cell says, so such a selection is made a caret
+ * first (a step of its own that adds nothing to the undo history).
+ */
+function dispatchEdit(state: EditorState, dispatch: (tr: Transaction) => void, spec: TransactionSpec): void {
+  const main = state.selection.main;
+  const rewrites = spec.changes !== undefined && !(Array.isArray(spec.changes) && spec.changes.length === 0);
+  let from = state;
+  if (rewrites && !main.empty) {
+    const collapsed = state.update({ selection: EditorSelection.cursor(main.head), userEvent: "select" });
+    dispatch(collapsed);
+    from = collapsed.state;
+  }
+  dispatch(from.update(spec));
+}
+
 const tableCommand =
   (make: (here: TableHere) => TransactionSpec | null): StateCommand =>
   ({ state, dispatch }) => {
     const here = editable(state);
     const spec = here && make(here);
     if (!spec) return false;
-    dispatch(state.update(spec));
+    dispatchEdit(state, dispatch, spec);
     return true;
   };
 
@@ -145,8 +164,37 @@ export function whatCanGo(here: TableHere): { row: boolean; column: boolean } {
   return { row: here.row > 0 && here.layout.rows.length > 2, column: here.layout.columns > 1 };
 }
 
-function moveTo(state: EditorState, here: TableHere, row: number, column: number): TransactionSpec {
-  return { selection: EditorSelection.create([inCell(here.from, here.text, here.layout, row, column)]), scrollIntoView: true, userEvent: "select" };
+/**
+ * Where the caret goes to be in the cell (`row`, `column`): in what it says (so that typing replaces it) or, with `caret`,
+ * at the end of it. A row can have fewer cells than the table has, and then the text has no such cell: the end of the row
+ * is after its last pipe, and a letter typed there would break the row off the table. So the table is written out in full
+ * first (every row with all its cells, as any edit of a table writes it) and the caret goes into the cell that this makes.
+ */
+export function goToCell(here: TableHere, row: number, column: number, userEvent: string, caret = false): TransactionSpec {
+  const r = Math.max(0, Math.min(row, here.layout.rows.length - 1));
+  const c = Math.max(0, Math.min(column, here.layout.columns - 1));
+  let text = here.text;
+  let layout = here.layout;
+  let changes: TransactionSpec["changes"];
+  if (c >= layout.rows[r]!.cells.length) {
+    const whole = tableFormat(here.text);
+    const read = whole === undefined ? undefined : cachedLayout(whole);
+    if (whole !== undefined && read) {
+      text = whole;
+      layout = read;
+      changes = { from: here.from, to: here.to, insert: whole };
+    }
+  }
+  const cell = inCell(here.from, text, layout, r, c);
+  return { ...(changes ? { changes, userEvent: "input.table" } : { userEvent }), selection: caret ? EditorSelection.cursor(cell.to) : EditorSelection.create([cell]), scrollIntoView: true };
+}
+
+/** A click in a cell of the grid (the table that starts at `from`): the caret goes to the end of what the cell says, and the table is its text from then on. */
+export function caretToCell(view: EditorView, from: number, row: number, column: number): boolean {
+  const here = tableAt(view.state, from);
+  if (!here) return false;
+  dispatchEdit(view.state, (tr) => view.dispatch(tr), goToCell(here, row, column, "select.pointer", true));
+  return true;
 }
 
 /** Tab: on to the next cell, with what is in it selected; after the last cell, to a row of its own. */
@@ -160,9 +208,9 @@ export const nextCell: StateCommand = ({ state, dispatch }) => {
     row += 1;
   }
   const rows = here.layout.rows.length;
-  const spec = row >= rows ? replaced(here, tableAddRow(here.text, rows - 1), rows, 0) : moveTo(state, here, row, column);
+  const spec = row >= rows ? replaced(here, tableAddRow(here.text, rows - 1), rows, 0) : goToCell(here, row, column, "select");
   if (!spec) return false;
-  dispatch(state.update(spec));
+  dispatchEdit(state, dispatch, spec);
   return true;
 };
 
@@ -177,7 +225,7 @@ export const previousCell: StateCommand = ({ state, dispatch }) => {
     row -= 1;
   }
   if (row < 0) return true;
-  dispatch(state.update(moveTo(state, here, row, column)));
+  dispatchEdit(state, dispatch, goToCell(here, row, column, "select"));
   return true;
 };
 
@@ -190,28 +238,33 @@ export const tableEnter: StateCommand = ({ state, dispatch }) => {
   if (!here) return false;
   const rows = here.layout.rows.length;
   if (here.row < rows - 1) {
-    dispatch(state.update(moveTo(state, here, here.row + 1, here.column)));
+    dispatchEdit(state, dispatch, goToCell(here, here.row + 1, here.column, "select"));
     return true;
   }
   const empty = here.layout.rows[here.row]!.cells.every((cell) => cell.raw === "");
   if (!empty) return addRowBelow({ state, dispatch });
   const text = rows > 2 ? (tableDeleteRow(here.text, here.row) ?? here.text) : here.text;
   // (a line of its own after the table, whatever follows it: the spacing there is left as it was)
-  dispatch(
-    state.update({
-      changes: text === here.text ? { from: here.to, insert: "\n" } : { from: here.from, to: here.to, insert: `${text}\n` },
-      selection: EditorSelection.cursor(here.from + text.length + 1),
-      scrollIntoView: true,
-      userEvent: "input.table",
-    }),
-  );
+  dispatchEdit(state, dispatch, {
+    changes: text === here.text ? { from: here.to, insert: "\n" } : { from: here.from, to: here.to, insert: `${text}\n` },
+    selection: EditorSelection.cursor(here.from + text.length + 1),
+    scrollIntoView: true,
+    userEvent: "input.table",
+  });
   return true;
 };
 
-/** Shift-Enter: a line break in the cell (written `\n`, as a table holds it). */
+/**
+ * Shift-Enter: a line break in the cell (written `\n`, as a table holds it). After a backslash that stands for itself (an odd
+ * number of them in a row: the last has no partner) the break's own backslash would be taken as that one's partner, and what
+ * is written would read as a backslash and an n; so the lone backslash is given a partner first.
+ */
 export const tableLineBreak: StateCommand = ({ state, dispatch }) => {
   if (!editable(state)) return false;
-  dispatch(state.update({ ...state.replaceSelection("\\n"), scrollIntoView: true, userEvent: "input" }));
+  const at = state.selection.main.from;
+  let run = 0;
+  while (run < at && state.sliceDoc(at - run - 1, at - run) === "\\") run++;
+  dispatch(state.update({ ...state.replaceSelection(run % 2 === 1 ? "\\\\n" : "\\n"), scrollIntoView: true, userEvent: "input" }));
   return true;
 };
 
@@ -256,6 +309,16 @@ export function focusToolbar(view: EditorView): boolean {
   return true;
 }
 
+/** Where the block ends (a table, an object, verbatim text) that `pos` is in, or null if it is in none of them. */
+function blockEndAt(state: EditorState, pos: number): number | null {
+  const spans = spansOf(state);
+  for (let i = 0; i < spans.length && spans.start(i) <= pos; i++) {
+    const kind = spans.kind(i);
+    if ((kind === Kind.Opaque || kind === Kind.VerbatimBlock) && spans.end(i) >= pos) return spans.end(i);
+  }
+  return null;
+}
+
 /** A new table, of `columns` columns and `rows` rows below its header, as a block of its own, with the first cell's text selected. */
 export function insertTable(columns = 3, rows = 2): StateCommand {
   return ({ state, dispatch }) => {
@@ -264,9 +327,8 @@ export function insertTable(columns = 3, rows = 2): StateCommand {
     const doc = state.doc;
     // the page is written below its header: a caret in the header, or at the top of an empty page, is no place
     const head = state.selection.main.head;
-    // (a caret in a table is below that table: another one in the middle of it would cut it in two)
-    const inTable = tableAt(state);
-    const line = head < pageBodyStart(state) || (head === 0 && doc.length === 0) ? doc.line(doc.lines) : doc.lineAt(inTable ? inTable.to : head);
+    // (a caret in a block is below that block: a table in the middle of a table would cut it in two, and in verbatim text it would not be one)
+    const line = head < pageBodyStart(state) || (head === 0 && doc.length === 0) ? doc.line(doc.lines) : doc.lineAt(blockEndAt(state, head) ?? head);
     const before = line.number > 1 ? doc.line(line.number - 1) : null;
     const after = line.number < doc.lines ? doc.line(line.number + 1) : null;
     // (what comes after ends the table's last line if there is a next line, and the table is followed by an empty line if that one is not)

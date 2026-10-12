@@ -25,9 +25,9 @@ struct Entry {
     links: Vec<LinkRef>,
     /// The `{{images}}` in `text`.
     images: Vec<ImageRef>,
-    /// The `@tags` in `text`, and the keys of them (see `tag_key`).
+    /// The `@tags` in `text`, and each tag (by its key: see `tag_key`) with the way the page first writes it.
     tags: Vec<TagRef>,
-    tag_keys: HashSet<String>,
+    tag_spellings: HashMap<String, String>,
     /// What the page reads as with its markup tidied away (see `zim_format::plain_text`), and that in
     /// lower case: what a search looks through.
     plain: String,
@@ -36,7 +36,7 @@ struct Entry {
 
 impl Entry {
     fn new(name: PageName, text: String) -> Entry {
-        let mut entry = Entry { name, text: String::new(), links: Vec::new(), images: Vec::new(), tags: Vec::new(), tag_keys: HashSet::new(), plain: String::new(), plain_lower: String::new() };
+        let mut entry = Entry { name, text: String::new(), links: Vec::new(), images: Vec::new(), tags: Vec::new(), tag_spellings: HashMap::new(), plain: String::new(), plain_lower: String::new() };
         entry.set_text(text);
         entry
     }
@@ -45,7 +45,10 @@ impl Entry {
         self.links = links_in(&text);
         self.images = images_in(&text);
         self.tags = tags_in(&text);
-        self.tag_keys = self.tags.iter().map(|t| tag_key(&t.name)).collect();
+        self.tag_spellings.clear();
+        for tag in &self.tags {
+            self.tag_spellings.entry(tag_key(&tag.name)).or_insert_with(|| tag.name.clone());
+        }
         self.plain = plain_text(&text);
         self.plain_lower = self.plain.to_lowercase();
         self.text = text;
@@ -252,9 +255,8 @@ impl Notebook {
     pub fn tags(&self) -> Vec<TagInfo> {
         let mut found: BTreeMap<String, TagInfo> = BTreeMap::new();
         for entry in self.pages.values() {
-            for key in &entry.tag_keys {
-                let spelled = entry.tags.iter().find(|t| &tag_key(&t.name) == key).map_or(key.as_str(), |t| t.name.as_str());
-                found.entry(key.clone()).or_insert_with(|| TagInfo { name: spelled.to_string(), pages: Vec::new() }).pages.push(entry.name.clone());
+            for (key, spelled) in &entry.tag_spellings {
+                found.entry(key.clone()).or_insert_with(|| TagInfo { name: spelled.clone(), pages: Vec::new() }).pages.push(entry.name.clone());
             }
         }
         found.into_values().collect()
@@ -263,7 +265,7 @@ impl Notebook {
     /// The pages that write the tag `tag` (with or without its `@`, in any case), in name order.
     pub fn pages_with_tag(&self, tag: &str) -> Vec<PageName> {
         let key = tag_key(tag);
-        self.pages.values().filter(|e| e.tag_keys.contains(&key)).map(|e| e.name.clone()).collect()
+        self.pages.values().filter(|e| e.tag_spellings.contains_key(&key)).map(|e| e.name.clone()).collect()
     }
 
     /// The tags a page writes, each once, in the order they first appear, as written there.
@@ -550,7 +552,7 @@ impl Notebook {
             }
             if matches_all {
                 for tag in &wanted_tags {
-                    if !entry.tag_keys.contains(tag) {
+                    if !entry.tag_spellings.contains_key(tag) {
                         matches_all = false;
                         break;
                     }

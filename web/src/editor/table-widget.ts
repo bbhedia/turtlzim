@@ -7,7 +7,7 @@ import type { EditorView } from "@codemirror/view";
 import { Kind } from "../kinds";
 import { highlight } from "../zim";
 import type { Align, TableLayout } from "../table";
-import { addColumnRight, addRowBelow, alignColumn, cachedLayout, cellContent, deleteColumn, deleteRow, tidyTable } from "./table-commands";
+import { addColumnRight, addRowBelow, alignColumn, cachedLayout, caretToCell, deleteColumn, deleteRow, tidyTable } from "./table-commands";
 import { linkStatusFacet } from "./syntax";
 import type { LinkStatus } from "./syntax";
 
@@ -148,11 +148,11 @@ export class TableWidget extends WidgetType {
       table.append(tr);
     });
     wrap.append(table);
-    wrap.addEventListener("mousedown", (event) => this.pressed(event, view, wrap, layout));
+    wrap.addEventListener("mousedown", (event) => this.pressed(event, view, wrap));
     return wrap;
   }
 
-  private pressed(event: MouseEvent, view: EditorView, wrap: HTMLElement, layout: TableLayout): void {
+  private pressed(event: MouseEvent, view: EditorView, wrap: HTMLElement): void {
     if (event.button !== 0) return;
     // (the page's own text takes the caret; the grid never takes a selection of its own, or the focus)
     event.preventDefault();
@@ -166,13 +166,8 @@ export class TableWidget extends WidgetType {
       if (tag?.dataset.tag !== undefined && this.host.followTag) return this.host.followTag(tag.dataset.tag);
       if (link?.dataset.link !== undefined && this.host.followLink) return this.host.followLink(link.dataset.link, from, from + this.text.length);
     }
-    const row = layout.rows[Number(cell?.dataset.row ?? 0)];
-    const at = row?.cells[Number(cell?.dataset.column ?? 0)];
-    let anchor: number;
-    if (!row) anchor = from;
-    else if (!at) anchor = from + row.end;
-    else anchor = from + cellContent(this.text, at)[1]; // the end of what the cell says: where a person goes on typing
-    view.dispatch({ selection: { anchor }, scrollIntoView: true, userEvent: "select.pointer" });
+    // (the caret goes to the end of what the cell says, where a person goes on typing; a cell that its row does not have is made)
+    if (!caretToCell(view, from, Number(cell?.dataset.row ?? 0), Number(cell?.dataset.column ?? 0))) view.dispatch({ selection: { anchor: from }, scrollIntoView: true, userEvent: "select.pointer" });
     view.focus();
   }
 }

@@ -124,7 +124,27 @@ with the caret in the cell where the person goes on. The toolbar: `+ Row`, `− 
 the only row below it, the only column). A button acts where the caret is and gives the focus back to the page. **Insert
 table** (`ZimEditor.insertTable`, the app's **Table** button): a block of its own below the line the caret is on (or on its
 empty line, with an empty line each side, and never in the header of the page), with the first header selected to be
-written over.
+written over. With the caret in a block that is not text of the page (another table, an object, verbatim text) it goes
+*below that block*: in the middle of a table it would cut it in two, and in code it would only be code.
+
+Three edges that a review found, with what is done about each (all have tests, `web/test/tables-edges.test.ts` and the
+browser scenario "a row with fewer cells than the table"):
+
+* **A row with fewer cells than the table.** Tab, Shift-Tab, Enter or a click that lands in a cell the row does not have
+  would put the caret after the row's last pipe, where a letter typed breaks the row off the table. The table is written
+  out in full first (every row with all its cells, as every edit of a table writes it), as one change, and the caret goes
+  into the cell that this makes (`goToCell`; `caretToCell` is the grid's click). That is the one case where moving in a
+  table rewrites its text, and it is one that is already not as a table is written.
+* **Undo and redo after an edit with a range selected.** An edit of a table replaces the whole block, and Tab selects what a
+  cell says. CodeMirror keeps the selection from before a change for undo and redo and maps it through the change, and
+  a range that lies *inside* a replaced stretch comes out with its end before its start (`SelectionRange.map`: the start
+  is mapped to the end of the replacement, the end to its start): after the redo the page was selected backwards, and the
+  next key typed threw. `dispatchEdit` makes such a selection a caret first (a selection-only step, which adds no undo step);
+  undo and redo then restore a caret in the cell. (Seen in the real browser: after Tab, Ctrl+Z, Ctrl+Shift+Z the selection
+  was `{from: 55, to: 0}`.)
+* **A line break after a backslash.** A cell is written with `\n` for a line break and `\\` for a backslash; a cell that ends
+  in one lone backslash, with `\n` typed after it, read as a backslash and an `n`. Shift-Enter writes an extra backslash
+  when an odd number of them come before the caret.
 
 **Completing a link** (`completion.ts`, `@codemirror/autocomplete`): after `[[` and one key, the host's `completeLink(typed)`
 is asked (in the app it is `complete_link` of `core/zim-notebook`: `zim-notebook.md`). The list is in the host's order

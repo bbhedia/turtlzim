@@ -29,7 +29,9 @@ yet (CLAUDE.md, Open issues #5).
   menu, open today's.
 * **Tags** (a list in the sidebar, closed until opened): every `@tag` of the notebook with the number of pages
   that write it. A click on one, or a Ctrl-click on a tag in a page, shows the pages that have it as search
-  results; the search takes `@tag` words (a tag exactly) together with ordinary ones.
+  results; the search takes `@tag` words (a tag exactly) together with ordinary ones. The list shows the first
+  500 (a page can write thousands, and the list is drawn again when a save changed it) and says how many more
+  there are; those are found by the search. It is not drawn again when a save changed none of it.
 * **Completing a link**: type `[[` and a letter or two of a page's name; Enter writes the shortest link that
   leads there from the page you are on (`zim-editor-plan.md`).
 * **Tables**: drawn as a grid, written as lines with a toolbar while the caret is in them; the **Table**
