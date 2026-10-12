@@ -72,8 +72,11 @@ async function failureShot() {
   await livePage.screenshot({ path: join(process.env.SCREENSHOTS, file) }).catch(() => {});
 }
 
+/** Whether a scenario is asked for: ONLY is a piece of its name, or (with a `|` in it) several: `ONLY="a phone|a calendar"`; SKIP leaves out the ones that match it in the same way. */
+const asked = (name) => (!process.env.ONLY || process.env.ONLY.split("|").some((piece) => name.includes(piece))) && !(process.env.SKIP && process.env.SKIP.split("|").some((piece) => name.includes(piece)));
+
 async function scenario(name, run) {
-  if (process.env.ONLY && !name.includes(process.env.ONLY)) return;
+  if (!asked(name)) return;
   currentScenario = name;
   problems = [];
   const started = Date.now();
@@ -4089,6 +4092,12 @@ try {
       // The browser makes a waiting worker the active one when the last tab it controls is closed. (Done here,
       // as the browser does it, with the tab still open: DevTools' skipWaiting.) The new worker is the one that
       // answers now, and it goes on answering with the version that was approved.
+      // (The worker that is made the active one claims this page, and a page that finds the worker that answers it changed starts
+      // again by itself: that reload and the one below would meet half way, one aborting the other, in about half the runs.
+      // So this page is left to be reloaded from here, which asks the same of the worker.)
+      await page.evaluate(() => {
+        window.__zim.app.pwa.restart = () => false;
+      });
       const devtools = await context.newCDPSession(page);
       await devtools.send("ServiceWorker.enable");
       await devtools.send("ServiceWorker.skipWaiting", { scopeURL: `${site.origin}/` });
