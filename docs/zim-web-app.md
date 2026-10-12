@@ -60,7 +60,9 @@ yet (CLAUDE.md, Open issues #5).
   and behave the same, but are kept as ciphertext, need a passphrase, and are locked away with the
   Lock button (see `zim-encrypted-notebooks.md` for how, what it protects, and its limits).
 * **A phone-sized screen** gets the tree (with the lists below it) as a drawer, and the top bar wraps; while the
-  text is being written in, on a touch screen, the search row goes (the room is for the text).
+  text is being written in, on a touch screen, the search row goes (the room is for the text). A touch screen on its
+  side and short (512 pixels or less: a phone) starts with the tree closed, puts it away when a page is chosen, and
+  with the keyboard up shows only the text and the formatting bar (`compactScreen` in `app.ts`).
 * **What is remembered** about the lists: whether Contents, Calendar and Tags are open (`zim:panel:*` in
   `localStorage`: a setting of the app, not of a notebook), and whether the formatting bar was asked for or put away
   (`zim:formatbar`). In an encrypted notebook the lists show its

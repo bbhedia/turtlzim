@@ -204,8 +204,13 @@ pixels or more against the tallest the area has been at that width (the address 
 is 60), and `.app.keyboard` says so (no room is kept for the device's bottom edge while it is up). A browser that pans the
 visual viewport down the page to show the focused field (`offsetTop`) gets the app moved with it
 (`html[data-panned]`, `--visible-top`). While typing on a phone the row with the search and *Show markup* is hidden:
-what is typed on gets the room. The tree and the page scroll by themselves and a pull at the top of the page does not
-reload the app (`overscroll-behavior`).
+what is typed on gets the room. A phone on its side (landscape, 512 pixels or less tall) with the keyboard up has 25 to 65
+pixels of text left under the top bar, the bar and the status line, so there the top bar and the status line go too, until
+the keyboard is put away (`.app.keyboard`), and the tree starts closed there (it would take a third of the width: a short touch
+screen on its side counts as a narrow one for it). The tree and the page scroll by themselves and a pull at the top of the page does
+not reload the app (`overscroll-behavior`). Measured with made-up keyboards at 320×568, 390×844, 412×915, 568×320, 844×390,
+768×1024 and 1024×768: no sideways scroll, the bar above the keyboard, the caret in view (the scenario "on a small phone, and a
+phone on its side…").
 
 **Touch targets.** Under `(pointer: coarse)`: buttons at least 40 pixels high, the bar's, the table toolbar's and the
 tree's rows and arrows 44, a day of the calendar 36 or more (seven to a row in a drawer 320 wide). The table

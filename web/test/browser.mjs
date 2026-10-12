@@ -2585,6 +2585,66 @@ try {
     assertEqual((await page.evaluate(() => { const { state } = window.__zim.editor.view; return state.doc.lineAt(state.selection.main.head).text; })), "* [[Projects:Garden]]", "at the end of that line");
   });
 
+  await scenario("on a small phone, and a phone on its side, the page fits and the text has room, with the keyboard up", async () => {
+    for (const [what, viewport, keyboard] of [
+      ["a small phone", { width: 320, height: 568 }, 260],
+      ["a phone on its side", { width: 844, height: 390 }, 200],
+      ["a small phone on its side", { width: 568, height: 320 }, 170],
+      ["a tablet", { width: 768, height: 1024 }, 380],
+      ["a tablet on its side", { width: 1024, height: 768 }, 340],
+    ]) {
+      const { context, ui } = await openApp({ ...phone, viewport });
+      try {
+        const { page } = ui;
+        const onItsSide = viewport.width > viewport.height && viewport.height < 512;
+        await ui.goto("Projects:Garden");
+        const sideways = () => page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+        assert((await sideways()) <= 0, `${what}: a page that is read does not scroll sideways`);
+        if (onItsSide) {
+          assertEqual(await page.locator(".app").getAttribute("data-sidebar"), "closed", `${what}: the tree starts closed (there is no room for it beside the page)`);
+          assert((await page.locator(".page").boundingBox()).width >= viewport.width - 1, `${what}: and the page has the whole width`);
+          await page.locator(".icon-button").tap();
+          assert(await page.locator("#sidebar").isVisible(), `${what}: the button opens the tree`);
+          await page.locator('.row[data-name="Ideas"] .label').tap();
+          await ui.waitCurrent("Ideas");
+          assertEqual(await page.locator(".app").getAttribute("data-sidebar"), "closed", `${what}: and choosing a page puts it away`);
+          await ui.goto("Projects:Garden");
+        } else if (viewport.width > 768) {
+          assertEqual(await page.locator(".app").getAttribute("data-sidebar"), "open", `${what}: there is room for the tree beside the page, and it is there`);
+        }
+        await page.locator(".cm-line", { hasText: "Plant the beans" }).tap();
+        await page.evaluate((height) => window.__keyboard(height), keyboard);
+        await ui.settle();
+        await page.waitForTimeout(300);
+        const seen = await page.evaluate(() => {
+          const box = (selector) => {
+            const el = document.querySelector(selector);
+            const b = el?.getBoundingClientRect();
+            return b && b.width > 0 ? { top: b.top, bottom: b.bottom, height: b.height } : null;
+          };
+          const view = window.__zim.editor.view;
+          const caret = view.coordsAtPos(view.state.selection.main.head);
+          return { visible: parseFloat(document.documentElement.style.getPropertyValue("--visible-height")), page: box(".page"), bar: box(".format-bar"), top: box(".topbar"), status: box(".statusbar"), caret, over: document.documentElement.scrollWidth - window.innerWidth };
+        });
+        assert(seen.over <= 0, `${what}: a page that is written in does not scroll sideways`);
+        assert(seen.bar && seen.bar.bottom <= seen.visible + 0.5, `${what}: the bar is above the keyboard (${JSON.stringify(seen.bar)}, the keyboard starts at ${seen.visible})`);
+        assert(seen.caret.top >= seen.page.top - 1 && seen.caret.bottom <= seen.bar.top + 1, `${what}: the caret is in view, above the bar (${JSON.stringify(seen.caret)}, the page ${JSON.stringify(seen.page)})`);
+        if (onItsSide) {
+          assert(seen.top === null && seen.status === null, `${what}: only the text and the bar stay (${JSON.stringify({ top: seen.top, status: seen.status })})`);
+          assert(seen.page.height >= seen.visible - seen.bar.height - 2, `${what}: all the rest is the text's (${seen.page.height} of ${seen.visible}, the bar ${seen.bar.height})`);
+        } else {
+          assert(seen.top !== null, `${what}: the top bar stays`);
+        }
+        assert(seen.page.height >= 90, `${what}: there is room for lines of text (${Math.round(seen.page.height)} pixels)`);
+        await page.evaluate(() => window.__keyboard(0));
+        await ui.settle();
+        assert(await page.locator(".topbar").isVisible(), `${what}: the top bar is back when the keyboard is put away`);
+      } finally {
+        await context.close();
+      }
+    }
+  });
+
   await app("on a phone what is tapped is big enough, and the page fits the screen", phone, async (ui) => {
     const { page } = ui;
     const noSideways = async (what) => {

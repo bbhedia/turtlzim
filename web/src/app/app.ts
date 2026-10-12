@@ -30,6 +30,14 @@ import { TagsPanel } from "./tags";
 import { TreeView } from "./tree-view";
 import { trackVisibleHeight } from "./viewport";
 
+/**
+ * A screen with no room for a tree beside the page: a narrow one (the tree is a drawer over the page), or a touch screen that is
+ * short (a phone on its side: the tree starts closed, and is put away when a page is chosen, as on a narrow one).
+ */
+function compactScreen(): boolean {
+  return window.matchMedia("(max-width: 48rem), (orientation: landscape) and (max-height: 32rem) and (pointer: coarse)").matches;
+}
+
 /** What was asked for about the formatting bar: "on", "off", or "auto" (shown while writing on a touch screen). */
 function formatBarSetting(): "on" | "off" | "auto" {
   const asked = prefs.get("formatbar");
@@ -339,7 +347,7 @@ export class App {
     root.append(
       h(
         "div",
-        { class: "app", "data-sidebar": window.matchMedia("(max-width: 48rem)").matches ? "closed" : prefs.get("sidebar") === "closed" ? "closed" : "open", "data-formatbar": formatBarSetting() },
+        { class: "app", "data-sidebar": compactScreen() ? "closed" : prefs.get("sidebar") === "closed" ? "closed" : "open", "data-formatbar": formatBarSetting() },
         h("header", { class: "topbar" }, sidebarToggle, h("div", { class: "notebook-menu" }, notebookButton, notebookMenu), lock, h("div", { class: "search" }, search, searchResults), button("New page", { class: "primary", on: { click: () => void this.newPage(this.current?.name.includes(":") ? `${this.current.name.slice(0, this.current.name.lastIndexOf(":") + 1)}` : "") } }), h("label", { class: "check", for: "markup" }, markup, " Show markup")),
         sidebar,
         page,
@@ -489,7 +497,7 @@ export class App {
     const open = app.dataset.sidebar !== "open";
     app.dataset.sidebar = open ? "open" : "closed";
     this.els.sidebarToggle.setAttribute("aria-expanded", String(open));
-    if (!window.matchMedia("(max-width: 48rem)").matches) prefs.set("sidebar", open ? "open" : "closed");
+    if (!compactScreen()) prefs.set("sidebar", open ? "open" : "closed");
   }
 
   /** Whether the formatting bar is shown (when the text is being written in) by what was asked for, or by default on a touch screen. */
@@ -506,7 +514,7 @@ export class App {
   }
 
   private closeSidebarIfNarrow(): void {
-    if (window.matchMedia("(max-width: 48rem)").matches) {
+    if (compactScreen()) {
       this.els.root.querySelector<HTMLElement>(".app")!.dataset.sidebar = "closed";
       this.els.sidebarToggle.setAttribute("aria-expanded", "false");
     }

@@ -40,8 +40,8 @@ async function open(viewport, colorScheme = "light") {
 }
 const settle = (page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 60)))));
 /** A touch screen like a phone's. Its on-screen keyboard is made up: `window.__keyboard(height)` shrinks the visible area (what the real one does), and 0 takes it away. */
-async function openPhone(colorScheme = "light") {
-  const context = await browser.newContext({ viewport: { width: 390, height: 800 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2, colorScheme, serviceWorkers: "block" });
+async function openPhone(colorScheme = "light", viewport = { width: 390, height: 800 }) {
+  const context = await browser.newContext({ viewport, isMobile: true, hasTouch: true, deviceScaleFactor: 2, colorScheme, serviceWorkers: "block" });
   await context.addInitScript(() => {
     window.__ZIM_TEST__ = true;
     const listeners = { resize: [], scroll: [] };
@@ -125,6 +125,14 @@ await goTo(page, "Projects:Garden");
 await tap(page, page.locator(".cm-line", { hasText: "beans" }).first());
 await page.evaluate(() => window.__keyboard(330));
 await shot(page, "34-phone-dark-editing");
+await page.close();
+
+console.log("phone on its side");
+page = await openPhone("light", { width: 844, height: 390 });
+await goTo(page, "Projects:Garden");
+await tap(page, page.locator(".cm-line", { hasText: "beans" }).first());
+await page.evaluate(() => window.__keyboard(200));
+await shot(page, "36-phone-on-its-side-editing");
 await page.close();
 
 console.log("desktop, the formatting bar asked for");

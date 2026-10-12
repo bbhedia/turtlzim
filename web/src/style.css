@@ -367,5 +367,10 @@ dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
   .app.editing .search, .app.editing .check { display: none; }
 }
 
+/* (a phone on its side with the keyboard up has a few lines of screen left: the text and the bar are all that stay, until the keyboard is put away) */
+@media (orientation: landscape) and (max-height: 32rem) and (pointer: coarse) {
+  .app.keyboard .topbar, .app.keyboard .statusbar { display: none; }
+}
+
 /* (a browser that has moved what can be seen down the page: the app goes with it) */
 html[data-panned] .app { translate: 0 var(--visible-top); }
