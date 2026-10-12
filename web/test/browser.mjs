@@ -2461,6 +2461,7 @@ try {
     await ui.goto("Scratch");
     const start = `${page_}\nsome words here\nanother line\n`;
     await ui.setText(start);
+    assertEqual(await page.locator(".format-bar").evaluate((el) => getComputedStyle(el).userSelect), "none", "a finger held on a button does not select its letter");
     const tapped = async (id, what) => {
       await barButton(page, id).tap();
       assert(await ui.inText(), `the focus is in the text after the ${what} button`);
@@ -2685,6 +2686,36 @@ try {
     assertEqual(await page.evaluate(() => document.activeElement?.id), "search", "(and the search box is where the focus is)");
     await page.locator("#search-results .result").first().tap();
     await page.waitForFunction(() => window.__zim.app.current?.name !== "Projects:Phone page");
+  });
+
+  // Browsers differ in what a keyboard takes: Chrome shrinks the visual viewport and leaves the layout alone (what madeUpKeyboard does), and some
+  // (Firefox, Samsung Internet) shrink the page itself. Here the window really shrinks, and the browser's own visualViewport says so.
+  await app("on a phone whose browser shrinks the page itself for the keyboard, the bar is above it and the caret in view, as with one that does not", { viewport: { width: 390, height: 800 }, hasTouch: true, isMobile: true }, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    assert(!(await shown(page, ".format-bar")), "while a page is read there is no bar");
+    await page.locator(".cm-line", { hasText: "Plant the beans" }).tap();
+    assert(await shown(page, ".format-bar"), "a tap in the text brings the bar");
+    await page.setViewportSize({ width: 390, height: 470 });
+    await ui.settle();
+    await page.waitForTimeout(300);
+    const seen = await page.evaluate(() => {
+      const view = window.__zim.editor.view;
+      const caret = view.coordsAtPos(view.state.selection.main.head);
+      const bar = document.querySelector(".format-bar").getBoundingClientRect();
+      return { height: innerHeight, visual: window.visualViewport.height, app: document.querySelector(".app").getBoundingClientRect().height, bar: { top: bar.top, bottom: bar.bottom }, caret: { top: caret.top, bottom: caret.bottom }, keyboard: document.querySelector(".app").classList.contains("keyboard") };
+    });
+    assertEqual(Math.round(seen.visual), 470, "the browser's own visualViewport says what is left");
+    assert(Math.abs(seen.app - 470) <= 1, `the app is as tall as that (${seen.app})`);
+    assert(seen.bar.bottom <= 470.5, `the bar is above the keyboard (${JSON.stringify(seen.bar)})`);
+    assert(seen.caret.top >= 0 && seen.caret.bottom <= seen.bar.top, `the caret is in view, above the bar (${JSON.stringify(seen.caret)})`);
+    assert(seen.keyboard, "and the app knows that a keyboard is up (it is 330 pixels shorter than it was)");
+    await page.setViewportSize({ width: 390, height: 800 });
+    await ui.settle();
+    await page.waitForTimeout(300);
+    assert(!(await hasFocus(page)), "the keyboard put away ends the typing");
+    assert(!(await shown(page, ".format-bar")), "and takes the bar");
+    assert(await shown(page, ".search"), "and the search comes back");
   });
 
   await app("on a phone what is tapped is big enough, and the page fits the screen", phone, async (ui) => {

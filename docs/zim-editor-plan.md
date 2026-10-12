@@ -229,9 +229,10 @@ the screen", "…a table can be written", "a browser that moves what can be seen
 mouse unless asked for…" and "a touch screen has the bar…", and the pictures 31–35 of `npm run screenshots` (light, dark,
 the heading row, a table, the desktop with the bar).
 
-**Not verified on a device.** No browser here has a real on-screen keyboard, so the keyboard is made up, and WebKit
-(iPhone) is not installed: the panning of the visual viewport, a keyboard that resizes the layout viewport instead
-(`interactive-widget=resizes-content`), the focus after a keyboard is put away, and whether a tap on a button keeps the
+**Not verified on a device.** No browser here has a real on-screen keyboard, so the keyboard is made up (and the other kind,
+a browser that shrinks the page itself, is made by resizing the window, which exercises the browser's own `visualViewport`:
+the scenario "…shrinks the page itself…"), and WebKit (iPhone) is not installed: the panning of the visual viewport, the
+focus after a keyboard is put away, and whether a tap on a button keeps the
 keyboard up (cancelling `pointerdown` and `mousedown` is what the libraries for this do) are what a real phone has to
 confirm. Selecting text by touch (long press, handles) is the platform's.
 

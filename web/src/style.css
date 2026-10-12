@@ -317,6 +317,10 @@ dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
 .format-headings[hidden], .format-button[hidden] { display: none; }
 .format-button { flex: none; display: inline-grid; place-items: center; min-width: 2.1rem; min-height: 2.1rem; padding: 0 0.5rem; font-weight: 600; }
 .format-button[aria-pressed="true"] { background: var(--zim-selection); border-color: var(--zim-muted); }
+/* (a finger that stays on a button must not select its letter or bring up the browser's own menu, and a press shows: a touch screen has no hover) */
+.format-bar, .cm-zim-table-toolbar { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.format-button:active:not(:disabled), .cm-zim-table-toolbar button:active:not(:disabled) { background: var(--zim-selection); }
+.format-button, .cm-zim-table-toolbar button { -webkit-tap-highlight-color: transparent; }
 .format-drawing { width: 1.2rem; height: 1.2rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .format-bold { font-weight: 800; }
 .format-italic { font-style: italic; }
