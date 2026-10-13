@@ -80,10 +80,15 @@ button.secondary { background: transparent; }
 .app {
   display: grid;
   /* (as tall as what can be seen: on a phone the keyboard takes the bottom of it away: app/viewport.ts) */
-  height: var(--visible-height, 100dvh);
+  height: var(--visible-height, 100vh);
   grid-template-columns: 18rem minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   grid-template-areas: "top top" "side page" "side bar" "status status";
+}
+
+/* (a browser that has no dvh, an iPhone's before 15.4, would take a height that holds a var() with it for nothing: so dvh is only used where it is known) */
+@supports (height: 100dvh) {
+  .app { height: var(--visible-height, 100dvh); }
 }
 .app[data-sidebar="closed"] { grid-template-columns: 0 minmax(0, 1fr); }
 /* while encrypted notebooks are being locked (or the page is away), nothing of them is on the screen */
