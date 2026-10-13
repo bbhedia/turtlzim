@@ -127,7 +127,11 @@ export function createFormatBar(view: () => EditorView, host: FormatBarHost = {}
   headingRow.setAttribute("aria-label", "Heading level");
   bar.append(headingRow, main);
 
-  /** Buttons never take the focus: the text keeps it (and on a phone the keyboard stays). The press acts on click. */
+  /**
+   * Buttons never take the focus: the text keeps it (and on a phone the keyboard stays). The press acts on click.
+   * It is `mousedown` that is cancelled, and not `pointerdown`: WebKit (an iPhone's browser) takes a cancelled `pointerdown` for
+   * a press that is not to be followed by a click, and the button does nothing.
+   */
   const make = (label: string, title: string, act: () => void, drawn?: string): HTMLButtonElement => {
     const button = document.createElement("button");
     button.type = "button";
@@ -137,7 +141,6 @@ export function createFormatBar(view: () => EditorView, host: FormatBarHost = {}
     button.title = title;
     button.setAttribute("aria-label", title);
     button.tabIndex = -1;
-    button.addEventListener("pointerdown", (event) => event.preventDefault());
     button.addEventListener("mousedown", (event) => event.preventDefault());
     button.addEventListener("click", () => {
       act();

@@ -178,7 +178,7 @@ try {
   });
 
   const SECRETS_FOR_BACKUP = {
-    notebook: "Zebra Journal", home: "Secret Plans Page", text: "the vault door code is 7391", other: "Hidden Sub Page Name",
+    notebook: "Zebra Journal", home: "Secret Plans Page", text: "the vault door code is 739104826", other: "Hidden Sub Page Name",
     path: "diagram-4417.png", bytes: "ATTACHMENT-BYTES-5529", type: "image/x-secret",
   };
   const madeNotebook = (page) =>
@@ -479,7 +479,7 @@ try {
   });
 
   const SECRETS = {
-    notebook: "Zebra Journal", home: "Secret Plans Page", text: "the vault door code is 7391", other: "Hidden Sub Page Name",
+    notebook: "Zebra Journal", home: "Secret Plans Page", text: "the vault door code is 739104826", other: "Hidden Sub Page Name",
     path: "diagram-4417.png", bytes: "ATTACHMENT-BYTES-5529", type: "image/x-secret",
   };
 

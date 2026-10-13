@@ -129,7 +129,9 @@ npm run build                       # typecheck + production build into web/dist
 npm run pwa:check                   # is dist/ what its sw.js was made for?  (node scripts/pwa.mjs --remote ADDRESS: what a server serves)
 npm test                            # Vitest: editor logic, headless (ZIM_GOLDEN_DIR=... adds real pages)
 scripts/setup-browser.sh            # once: Chromium + libraries + a font, no root
+scripts/setup-webkit.sh             # once, after that: WebKit (the engine of an iPhone's Safari) and the libraries it lacks, no root
 npm run test:browser                # the built app in a real browser (ZIM_GOLDEN_DIR=... adds the real Zim manual; ONLY=text or ONLY="a|b" picks scenarios, SKIP="a|b" leaves some out)
+npm run test:browser:webkit         # the same scenarios in WebKit (a profile folder per context; the service-worker and certificate ones, which drive Chromium's DevTools, are left out)
 npm run test:vault                  # the encrypted-notebook vault in a real browser: Worker, OPFS, reload, crash mid-write (five moments), a passphrase change and a restore cut off, backup and restore between browsers, every byte of the file system tried with the old key, one tab at a time, the Worker's network cut-off, heartbeat and silent death
 npm run measure:unlock -- [pages ...]      # what unlocking costs as a vault grows (a real browser; numbers in docs/zim-encrypted-notebooks.md)
 npm run screenshots <dir>           # pictures of the app to look at (light, dark, phone, a phone writing with the keyboard up, dialogs, pictures, tables, the journal and tags, completing a link)

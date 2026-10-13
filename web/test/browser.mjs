@@ -145,7 +145,8 @@ const phone = { viewport: { width: 390, height: 800 }, hasTouch: true, isMobile:
 async function openApp({ beforeLoad, at = origin, fixedTime, ...options } = {}) {
   // (a service worker keeps the app in a cache of its own: the scenarios that are about that ask for it with `serviceWorkers: "allow"`)
   const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1100, height: 900 }, serviceWorkers: "block", ...options });
-  context.setDefaultTimeout(10_000);
+  // (WebKit with a profile folder of its own for each context is slower at putting a file in IndexedDB: a full run waited 10 s in vain now and then)
+  context.setDefaultTimeout(process.env.ZIM_BROWSER === "webkit" ? 30_000 : 10_000);
   if (fixedTime) await context.clock.setFixedTime(fixedTime);
   await context.addInitScript(exposeApp);
   if (beforeLoad) await context.addInitScript(beforeLoad);
@@ -2462,6 +2463,17 @@ try {
     const start = `${page_}\nsome words here\nanother line\n`;
     await ui.setText(start);
     assertEqual(await page.locator(".format-bar").evaluate((el) => getComputedStyle(el).userSelect), "none", "a finger held on a button does not select its letter");
+    // WebKit (an iPhone's browser) delivers no click after a press whose pointerdown was cancelled, so no button cancels that one: only the mousedown, which keeps the focus where it is
+    const cancelled = await page.locator(".format-bar .format-button").evaluateAll((buttons) =>
+      buttons.map((button) => {
+        const pointer = new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "touch" });
+        const mouse = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+        button.dispatchEvent(pointer);
+        button.dispatchEvent(mouse);
+        return [pointer.defaultPrevented, mouse.defaultPrevented];
+      }),
+    );
+    assert(cancelled.length >= 16 && cancelled.every(([pointer, mouse]) => !pointer && mouse), `no button of the bar cancels a pointerdown, and each cancels its mousedown (${JSON.stringify(cancelled)})`);
     const tapped = async (id, what) => {
       await barButton(page, id).tap();
       assert(await ui.inText(), `the focus is in the text after the ${what} button`);
@@ -2675,6 +2687,8 @@ try {
     await page.keyboard.type("Phone page");
     await page.locator("dialog.dialog").getByRole("button", { name: "Create", exact: true }).tap();
     await ui.waitCurrent("Projects:Phone page");
+    // (a new page is for writing: it takes the focus once the dialog has closed, and that is when the keyboard goes away)
+    await page.waitForFunction(() => window.__zim.editor.view.hasFocus);
     await page.evaluate(() => window.__keyboard(0));
     // the search: the results end above the keyboard, and an entry is chosen with a tap
     await page.locator("#search").tap();
@@ -2769,6 +2783,16 @@ try {
     assert(await hasFocus(page), "a tap on a cell of the grid puts the caret in the table (and the keyboard comes)");
     assertEqual(await page.locator(".cm-zim-grid").count(), 0, "the table is its text, with its buttons");
     const button = (name) => page.locator(".cm-zim-table-toolbar").getByRole("button", { name });
+    const toolbarCancels = await page.locator(".cm-zim-table-toolbar button").evaluateAll((buttons) =>
+      buttons.map((b) => {
+        const pointer = new PointerEvent("pointerdown", { bubbles: true, cancelable: true, pointerType: "touch" });
+        const mouse = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+        b.dispatchEvent(pointer);
+        b.dispatchEvent(mouse);
+        return [pointer.defaultPrevented, mouse.defaultPrevented];
+      }),
+    );
+    assert(toolbarCancels.length >= 10 && toolbarCancels.every(([pointer, mouse]) => !pointer && mouse), `nor does a button of the table's toolbar (${JSON.stringify(toolbarCancels)})`);
     await button("Go to the next cell (after the last one, to a new row)").tap();
     assertEqual(await picked(page), "d", "the button goes to the next cell, with what it says selected");
     assert(await ui.inText(), "(the keyboard stays: the focus is in the text)");
@@ -2897,7 +2921,7 @@ try {
     assert(await page.locator(".lock-button").isVisible(), "the Lock button is there");
     assertEqual(await ui.current(), "Home", "it opens at its home page");
 
-    await ui.typeAtEnd("The vault door code is 7391.\n");
+    await ui.typeAtEnd("The vault door code is 739104826.\n");
     await ui.goto("Secrets:Plans");
     await ui.typeAtEnd("Meet at the old mill.\n====== Zebra Heading ======\nand a tag @zebratag\n");
     await ui.flush();
@@ -2913,7 +2937,7 @@ try {
     const outside = await visibleOutside(page);
     assertEqual(outside.title, "Encrypted notebook", "the tab says nothing of what is open");
     assertEqual(outside.hash, "#/", "neither does the address");
-    for (const secret of ["Diary", "Secrets", "Plans", "7391", "old mill", "Home"]) {
+    for (const secret of ["Diary", "Secrets", "Plans", "739104826", "old mill", "Home"]) {
       for (const [where, value] of Object.entries(outside)) assert(!value.includes(secret), `${JSON.stringify(secret)} is in the ${where} of the page: ${value.slice(0, 200)}`);
     }
 
@@ -2922,7 +2946,7 @@ try {
     await isOpenNotebook(page);
     await page.waitForFunction(() => document.querySelector(".lock-button").hidden);
     const shown = await page.evaluate(() => document.body.innerText + document.title);
-    for (const secret of ["Diary", "Plans", "7391", "old mill", "Zebra", "zebratag"]) assert(!shown.includes(secret), `${JSON.stringify(secret)} is still on the page after locking`);
+    for (const secret of ["Diary", "Plans", "739104826", "old mill", "Zebra", "zebratag"]) assert(!shown.includes(secret), `${JSON.stringify(secret)} is still on the page after locking`);
     assert(!(await page.locator(".contents-list, .tags-list, .calendar").evaluateAll((lists) => lists.map((l) => l.innerHTML).join(""))).includes("zebra"), "(nor in the lists beside the page: their markup too)");
     await ui.openMenu();
     assertDeepEqual(await ui.menu().getByRole("menuitem").allInnerTexts(), (await ui.menu().getByRole("menuitem").allInnerTexts()).filter((t) => !t.includes("Diary")), "no encrypted notebook is in the menu");
@@ -2943,7 +2967,7 @@ try {
     await noDialogs(page);
     await isEncryptedOpen(page);
     assertEqual(await ui.notebookTitle(), "Diary", "the encrypted notebook that was open is open again");
-    assert((await ui.pageText("Home")).includes("The vault door code is 7391."), "its first page is as it was");
+    assert((await ui.pageText("Home")).includes("The vault door code is 739104826."), "its first page is as it was");
     assert((await ui.pageText("Secrets:Plans")).includes("Meet at the old mill."), "and the other");
     await page.locator(".lock-button").click();
     await isOpenNotebook(page);
@@ -2953,7 +2977,7 @@ try {
     const { page } = ui;
     const NEXT = "a different passphrase, quite long";
     await newEncryptedNotebook(ui, "Diary");
-    await ui.typeAtEnd("The vault door code is 7391.\n");
+    await ui.typeAtEnd("The vault door code is 739104826.\n");
     await ui.flush();
 
     await ui.openMenu();
@@ -2995,7 +3019,7 @@ try {
 
     // nothing the browser keeps for the page has either passphrase in it, or anything of the notebook
     const outside = await visibleOutside(page);
-    for (const secret of [PASSPHRASE, NEXT, "Diary", "7391", "after the change"]) {
+    for (const secret of [PASSPHRASE, NEXT, "Diary", "739104826", "after the change"]) {
       for (const [where, value] of Object.entries(outside)) assert(!value.includes(secret), `${JSON.stringify(secret)} is in the ${where} of the page: ${value.slice(0, 200)}`);
     }
 
@@ -3013,7 +3037,7 @@ try {
     await noDialogs(page);
     await unlockFromMenu(ui, NEXT);
     assertEqual(await ui.notebookTitle(), "Diary", "the notebook that was open is open again");
-    assert((await ui.pageText("Home")).includes("The vault door code is 7391."), "its first page is as it was");
+    assert((await ui.pageText("Home")).includes("The vault door code is 739104826."), "its first page is as it was");
     assert((await ui.pageText("Home")).includes("A line after the change."), "and what was typed after the change is there");
     await page.locator(".lock-button").click();
     await isOpenNotebook(page);
@@ -3023,7 +3047,7 @@ try {
     const { page } = ui;
     const NEXT = "a different passphrase, quite long";
     await newEncryptedNotebook(ui, "Diary");
-    await ui.typeAtEnd("The vault door code is 7391.\n");
+    await ui.typeAtEnd("The vault door code is 739104826.\n");
     await ui.flush();
     await ui.openMenu();
     await ui.menu().getByRole("menuitem", { name: "Change the passphrase…" }).click();
@@ -3039,7 +3063,7 @@ try {
     await told.waitFor({ timeout: 20_000 });
     const text = await told.innerText();
     assert(text.includes("open with the new passphrase"), `it says which passphrase the notebooks have: ${text}`);
-    for (const secret of ["Diary", "7391", "Home"]) assert(!text.includes(secret), `it names nothing of the notebooks: ${text}`);
+    for (const secret of ["Diary", "739104826", "Home"]) assert(!text.includes(secret), `it names nothing of the notebooks: ${text}`);
     await told.getByRole("button", { name: "OK" }).click();
     await isOpenNotebook(page);
     await page.waitForFunction(() => document.querySelector(".lock-button").hidden);
@@ -3053,7 +3077,7 @@ try {
     await unlocking.getByRole("button", { name: "Cancel" }).click();
     await noDialogs(page);
     await unlockFromMenu(ui, NEXT);
-    assert((await ui.pageText("Home")).includes("The vault door code is 7391."), "and what is in them is there");
+    assert((await ui.pageText("Home")).includes("The vault door code is 739104826."), "and what is in them is there");
     await page.locator(".lock-button").click();
     await isOpenNotebook(page);
   });
@@ -3090,7 +3114,7 @@ try {
       await b.page.keyboard.press("Escape");
 
       await newEncryptedNotebook(a, "Diary");
-      await a.typeAtEnd("The vault door code is 7391.\n");
+      await a.typeAtEnd("The vault door code is 739104826.\n");
       await a.goto("Secrets:Plans");
       await a.typeAtEnd("Meet at the old mill.\n");
       await a.flush();
@@ -3104,7 +3128,7 @@ try {
       await noDialogs(a.page);
       assert(/^encrypted-notebooks-\d{4}-\d{2}-\d{2}\.zimvault$/.test(file.name), `the file is named for what it is and the day: ${file.name}`);
       assertEqual(file.bytes.subarray(0, 8).toString("latin1"), "ZIMVAULT", "it is a backup, by its first bytes");
-      for (const secret of ["Diary", "Secrets", "Plans", "7391", "old mill", PASSPHRASE]) assert(!file.bytes.includes(secret), `${JSON.stringify(secret)} can be read in the backup`);
+      for (const secret of ["Diary", "Secrets", "Plans", "739104826", "old mill", PASSPHRASE]) assert(!file.bytes.includes(secret), `${JSON.stringify(secret)} can be read in the backup`);
       assert((await a.status()).includes("Saved a backup"), `it says so: ${await a.status()}`);
       assert(!(await a.status()).includes("not encrypted"), "and does not say that the copy is plain: it is not");
       assertEqual(await a.notebookTitle(), "Diary", "the notebook is still open");
@@ -3154,11 +3178,11 @@ try {
       await b.menu().getByRole("menuitemradio", { name: /Diary/ }).click();
       await isEncryptedOpen(b.page);
       assertEqual(await b.notebookTitle(), "Diary", "the notebook is here");
-      assert((await b.pageText("Home")).includes("The vault door code is 7391."), "with its first page");
+      assert((await b.pageText("Home")).includes("The vault door code is 739104826."), "with its first page");
       assert((await b.pageText("Secrets:Plans")).includes("Meet at the old mill."), "and the other");
       // nothing of it is anywhere the browser keeps things for the page
       const outside = await visibleOutside(b.page);
-      for (const secret of ["Diary", "Secrets", "Plans", "7391", "old mill", PASSPHRASE]) {
+      for (const secret of ["Diary", "Secrets", "Plans", "739104826", "old mill", PASSPHRASE]) {
         for (const [where, value] of Object.entries(outside)) assert(!value.includes(secret), `${JSON.stringify(secret)} is in the ${where} of the page: ${value.slice(0, 200)}`);
       }
       await b.page.locator(".lock-button").click();
@@ -3403,7 +3427,7 @@ try {
   await app("nothing of an encrypted notebook is in anything the browser keeps: not IndexedDB, not the settings, not the private files", {}, async (ui) => {
     const { page } = ui;
     const secrets = {
-      notebook: "Zebra Journal", page: "Hidden Sub Page Name", text: "the vault door code is 7391", file: "diagram-4417.dat", bytes: "ATTACHMENT-BYTES-5529", tag: "@secrettag",
+      notebook: "Zebra Journal", page: "Hidden Sub Page Name", text: "the vault door code is 739104826", file: "diagram-4417.dat", bytes: "ATTACHMENT-BYTES-5529", tag: "@secrettag",
       // (not ASCII: the files keep it as UTF-8 bytes, the strings of the page as UTF-16, and the scan looks for both)
       accented: "K\u00e4sekuchen f\u00fcr Zo\u00eb", cjk: "\u79d8\u5bc6\u306e\u5408\u8a00\u8449", emoji: "\u{1F510} geheim", accentedPage: "Verborgene Seite f\u00fcr K\u00e4se",
       // (typed in places that are not a page, and then given up)
@@ -3411,6 +3435,7 @@ try {
       // (what the lists beside the page and the editor's own parts hold: a heading, the cell of a table, the page of a day, a link that was being completed)
       heading: "Heading Of The Zebra Vault", cell: "Cellsecret Quagga", dayText: "Planted the quagga seeds on a secret day",
     };
+    // (a needle of nine digits: one of four, the digits of a code, turned up by chance in a file now and then, inside the ids and the times that the vault keeps as numbers)
     await newEncryptedNotebook(ui, secrets.notebook);
     await ui.goto(`Hidden:${secrets.page}`);
     await ui.typeAtEnd(`${secrets.text} ${secrets.tag}\n${secrets.accented} ${secrets.cjk} ${secrets.emoji}\n`);
@@ -3489,7 +3514,7 @@ try {
     for (const [kind, secret] of Object.entries(secrets)) {
       assertDeepEqual(where(secret), [], `the ${kind} (${JSON.stringify(secret)}) is nowhere the browser keeps things`);
     }
-    for (const part of ["Hidden", "7391", "ATTACHMENT", "application/x-secret-type", "Zebra", "K\u00e4se", "geheim", "\u79d8\u5bc6", "Verborgene", "Quagga", "quagga"]) assertDeepEqual(where(part), [], `${JSON.stringify(part)} is nowhere the browser keeps things`);
+    for (const part of ["Hidden", "739104826", "ATTACHMENT", "application/x-secret-type", "Zebra", "K\u00e4se", "geheim", "\u79d8\u5bc6", "Verborgene", "Quagga", "quagga"]) assertDeepEqual(where(part), [], `${JSON.stringify(part)} is nowhere the browser keeps things`);
     assertDeepEqual(where(PASSPHRASE), [], "nor is the passphrase");
 
     // unlocked again, everything is back

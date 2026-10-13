@@ -2,10 +2,10 @@
 // scripts/setup-browser.sh installs, with the libraries and the font that script put in place.
 // The old-style headless shell the core's tests use is not good enough for an editor: it mishandles
 // keyboard input (and, on a machine with no fonts at all, so does any browser: see that script).
-import { existsSync, readdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { chromium } from "playwright-core";
+import { chromium, webkit } from "playwright-core";
 
 export function findChrome() {
   if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
@@ -33,7 +33,34 @@ function fontConfig() {
   return existsSync(file) ? { FONTCONFIG_FILE: file } : {};
 }
 
+/**
+ * The browser the tests run in: Chromium, or with ZIM_BROWSER=webkit Playwright's WebKit (the engine of an iPhone's Safari; set up
+ * by scripts/setup-browser.sh webkit). The scenarios that drive Chromium's DevTools (the app saved by a service worker) are Chromium's.
+ */
 export function launchBrowser(extraArguments = []) {
+  if (process.env.ZIM_BROWSER === "webkit") {
+    // (its libraries are in its own folder: the launcher sets the library path itself)
+    process.env.PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "1";
+    // A WebKit context that is not persistent keeps everything in memory: no OPFS, and no Blobs in IndexedDB (a put fails). So each
+    // "context" is a browser of its own with a profile folder, which goes when it is closed.
+    return Promise.resolve({
+      newContext: async (options = {}) => {
+        const profile = mkdtempSync(join(process.env.TMPDIR || tmpdir(), "zim-webkit-"));
+        const context = await webkit.launchPersistentContext(profile, { ...options, env: { ...process.env, ...fontConfig() } });
+        const close = context.close.bind(context);
+        context.close = async (...args) => {
+          try {
+            return await close(...args);
+          } finally {
+            rmSync(profile, { recursive: true, force: true });
+          }
+        };
+        return context;
+      },
+      close: async () => undefined,
+      version: () => "webkit",
+    });
+  }
   return chromium.launch({
     executablePath: findChrome(),
     args: ["--no-sandbox", ...extraArguments],

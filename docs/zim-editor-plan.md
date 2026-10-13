@@ -229,12 +229,20 @@ the screen", "…a table can be written", "a browser that moves what can be seen
 mouse unless asked for…" and "a touch screen has the bar…", and the pictures 31–35 of `npm run screenshots` (light, dark,
 the heading row, a table, the desktop with the bar).
 
-**Not verified on a device.** No browser here has a real on-screen keyboard, so the keyboard is made up (and the other kind,
-a browser that shrinks the page itself, is made by resizing the window, which exercises the browser's own `visualViewport`:
-the scenario "…shrinks the page itself…"), and WebKit (iPhone) is not installed: the panning of the visual viewport, the
-focus after a keyboard is put away, and whether a tap on a button keeps the
-keyboard up (cancelling `pointerdown` and `mousedown` is what the libraries for this do) are what a real phone has to
-confirm. Selecting text by touch (long press, handles) is the platform's.
+**Other engines.** The scenarios also run in **WebKit**, the engine of an iPhone's Safari (`scripts/setup-webkit.sh` once, then
+`npm run test:browser:webkit`; Playwright's WebKit for Linux, so not Safari itself). It found a bug that Chromium never shows: the
+bar's and the table toolbar's buttons cancelled `pointerdown` (to keep the focus in the text), and **WebKit then delivers no
+`mousedown` and no `click`**, so every button was dead. They cancel `mousedown` only, which keeps the focus in Chromium and WebKit
+alike, and a Chromium check fails if one cancels a `pointerdown`. WebKit with no profile folder has no OPFS and cannot put a Blob in
+IndexedDB, so the run gives each context a profile folder of its own. What is left out of the WebKit run: the service worker and
+certificate scenarios (they drive Chromium's DevTools), the one that opens a `blob:` address as a page, and two that replace
+`navigator.storage.persist` (WebKit goes on answering for itself).
+
+**Not verified on a device.** No browser here has a real on-screen keyboard, so the keyboard is made up (and the other kind, a
+browser that shrinks the page itself, is made by resizing the window, which exercises the browser's own `visualViewport`: the
+scenario "…shrinks the page itself…"). What a real phone has to confirm: the panning of the visual viewport that iOS does to show
+the focused field, the focus after a keyboard is put away, and that a tap on a button leaves the keyboard up (it does in Chromium
+and WebKit here, with `mousedown` cancelled). Selecting text by touch (long press, handles) is the platform's.
 
 ## Performance
 

@@ -236,8 +236,8 @@ export class TableToolbar extends WidgetType {
       if (spec.touchOnly && !touched) button.hidden = true;
       if (spec.can && !spec.can(this.state)) button.disabled = true;
       if (spec.pressed) button.setAttribute("aria-pressed", String(spec.pressed(this.state)));
-      // (a press must not take the caret out of the table: the buttons act on where it is; and a finger's press must not take the keyboard down)
-      button.addEventListener("pointerdown", (event) => event.preventDefault());
+      // (a press must not take the caret out of the table: the buttons act on where it is, and a finger's must not take the keyboard down;
+      // `mousedown`, not `pointerdown`: WebKit takes a cancelled `pointerdown` for a press with no click after it)
       button.addEventListener("mousedown", (event) => event.preventDefault());
       button.addEventListener("click", () => {
         spec.run(view);
