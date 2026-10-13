@@ -2732,6 +2732,41 @@ try {
     assert(await shown(page, ".search"), "and the search comes back");
   });
 
+  await app("the screen and keyboard details say what the browser reports, live, do not get in the way of a tap, and name nothing of the page", phone, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    await page.locator(".notebook-button").tap();
+    await page.locator(".notebook-menu .menu").getByRole("menuitem", { name: "Screen and keyboard details" }).tap();
+    const panel = page.locator(".screen-details");
+    await panel.waitFor();
+    const said = async () => (await page.locator(".screen-details-text").innerText()).replace(/\s+/g, " ");
+    await page.waitForTimeout(150);
+    assert((await said()).includes("window 390×800") && (await said()).includes("visual 390×800"), `it says how big the screen is (${await said()})`);
+    assert((await said()).includes("coarse 1"), "and that the pointer is a finger");
+    // (a change too small to be a keyboard: nothing of the app changes with it, and the panel still says so)
+    await page.evaluate(() => window.__keyboard(60));
+    await page.waitForTimeout(250);
+    assert((await said()).includes("visual 390×740") && (await said()).includes("keyboard 0"), `it follows the screen when nothing else does (${await said()})`);
+    await page.evaluate(() => window.__keyboard(330));
+    await page.waitForTimeout(250);
+    assert((await said()).includes("visual 390×470") && (await said()).includes("--visible-height 470px") && (await said()).includes("keyboard 1"), `it follows a keyboard coming up (${await said()})`);
+    // a tap goes through it, to the text under it, and it is said what was touched, by kind
+    await page.locator(".cm-line", { hasText: "Plant the beans" }).tap();
+    await page.waitForTimeout(300);
+    const after = await said();
+    assert(await hasFocus(page), "a tap goes through the panel to the text");
+    assertEqual(await panel.evaluate((el) => getComputedStyle(el).pointerEvents), "none", "(the panel takes no touch of its own)");
+    assertEqual(await page.locator(".screen-details-button").first().evaluate((el) => getComputedStyle(el).pointerEvents), "auto", "(except at its buttons)");
+    assert(after.includes("pointerdown touch") && after.includes("focus div.cm-content") && after.includes("editing 1"), `and it says what was touched and what has the focus (${after})`);
+    assert(!/Garden|Plant|beans|Projects/.test(after), `it names nothing of the page (${after})`);
+    await panel.getByRole("button", { name: "bottom" }).tap();
+    assert(await panel.evaluate((el) => el.classList.contains("at-bottom")), "it can be moved to the bottom, for when the top is what is being looked at");
+    await page.locator(".screen-details-button", { hasText: "close" }).tap();
+    assertEqual(await page.locator(".screen-details").count(), 0, "and put away");
+    await page.locator(".notebook-button").tap();
+    await page.locator(".notebook-menu .menu").getByRole("menuitem", { name: "Screen and keyboard details" }).waitFor();
+  });
+
   await app("on a phone what is tapped is big enough, and the page fits the screen", phone, async (ui) => {
     const { page } = ui;
     const noSideways = async (what) => {

@@ -360,6 +360,27 @@ dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
   .result { padding-block: 0.7rem; }
 }
 
+/* ---- screen and keyboard details: a panel on top of the page that does not get in the way of it ------------ */
+
+.screen-details {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--visible-top, 0px);
+  z-index: 90;
+  pointer-events: none;
+  padding: 0.25rem 0.4rem 0.3rem;
+  background: var(--bar-bg);
+  color: var(--zim-fg);
+  border-bottom: 1px solid var(--zim-border);
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.screen-details.at-bottom { top: auto; bottom: max(0px, calc(100dvh - var(--visible-top, 0px) - var(--visible-height, 100dvh))); border-bottom: 0; border-top: 1px solid var(--zim-border); }
+.screen-details-bar { display: flex; align-items: center; gap: 0.4rem; }
+.screen-details-bar strong { flex: 1; }
+.screen-details-button { pointer-events: auto; min-height: 1.9rem; padding: 0 0.6rem; font: inherit; }
+.screen-details-text { margin: 0.2rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+
 /* ---- narrow screens: the tree is an overlay, and the top bar takes two rows -------------------- */
 
 @media (max-width: 48rem) {

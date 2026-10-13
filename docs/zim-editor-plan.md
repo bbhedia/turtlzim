@@ -229,6 +229,15 @@ the screen", "…a table can be written", "a browser that moves what can be seen
 mouse unless asked for…" and "a touch screen has the bar…", and the pictures 31–35 of `npm run screenshots` (light, dark,
 the heading row, a table, the desktop with the bar).
 
+**Screen and keyboard details** (`web/src/app/screen-details.ts`; the notebook menu's *Screen and keyboard details*). A small panel on
+top of the page, for a report of a phone that did something unexpected, since a description of a keyboard can't say what the browser
+reported: it shows, live, the platform part of the user agent, the window and the visual viewport (size, scale, `offsetTop`), the CSS
+variables the layout follows (`--visible-height`, `--visible-top`), the media queries that decide the phone layout (`coarse`, `hover`,
+`landscape`, installed, dark), the app's own state (`editing`, `keyboard`, the bar, the tree), what has the focus, and the last seven
+events (a touch, a focus, a resize of the visual viewport, a change of state). It takes no touch of its own (its two buttons, *bottom*
+and *close*, apart), shows only numbers and the *kinds* of elements (`div.cm-line`), never what they hold or the name of a page, and keeps
+nothing. A screenshot of it, taken while the thing that is wrong happens, is what is wanted.
+
 **Other engines.** The scenarios also run in **WebKit**, the engine of an iPhone's Safari (`scripts/setup-webkit.sh` once, then
 `npm run test:browser:webkit`; Playwright's WebKit for Linux, so not Safari itself). It found a bug that Chromium never shows: the
 bar's and the table toolbar's buttons cancelled `pointerdown` (to keep the focus in the text), and **WebKit then delivers no

@@ -127,6 +127,16 @@ await page.evaluate(() => window.__keyboard(330));
 await shot(page, "34-phone-dark-editing");
 await page.close();
 
+console.log("phone, the screen and keyboard details");
+page = await openPhone();
+await goTo(page, "Projects:Garden");
+await tap(page, page.locator(".notebook-button"));
+await tap(page, page.getByRole("menuitem", { name: "Screen and keyboard details" }));
+await tap(page, page.locator(".cm-line", { hasText: "beans" }).first());
+await page.evaluate(() => window.__keyboard(330));
+await shot(page, "37-phone-screen-details");
+await page.close();
+
 console.log("phone on its side");
 page = await openPhone("light", { width: 844, height: 390 });
 await goTo(page, "Projects:Garden");

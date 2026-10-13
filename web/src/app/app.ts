@@ -28,6 +28,8 @@ import { ContentsPanel, headingsOf } from "./contents";
 import { clear, h, highlighted } from "./dom";
 import { TagsPanel } from "./tags";
 import { TreeView } from "./tree-view";
+import { showScreenDetails } from "./screen-details";
+import type { ScreenDetails } from "./screen-details";
 import { trackVisibleHeight } from "./viewport";
 
 /**
@@ -175,6 +177,8 @@ export class App {
   private readonly tagList: TagsPanel;
   /** The buttons for what the keys do (shown on a touch screen while the page is being written in, or when asked for in the menu). */
   private formatBar!: FormatBar;
+  /** The panel that says what the browser reports about the screen and the keyboard, while it is up. */
+  private screenDetails: ScreenDetails | null = null;
   private contentsTimer: number | undefined;
   private readonly linkCache = new Map<string, LinkStatus>();
   /** Addresses for the pictures of the open notebook. */
@@ -506,6 +510,18 @@ export class App {
     return asked === "on" || (asked !== "off" && window.matchMedia("(pointer: coarse)").matches);
   }
 
+  /** Put up (or take away) the panel with what the browser says about the screen and the keyboard: for a report of a phone that did something unexpected. It names nothing of a notebook. */
+  private toggleScreenDetails(): void {
+    if (this.screenDetails) {
+      this.screenDetails.close();
+      return;
+    }
+    this.screenDetails = showScreenDetails(
+      () => this.els.root.querySelector<HTMLElement>(".app"),
+      () => (this.screenDetails = null),
+    );
+  }
+
   /** Show or hide the formatting bar, and remember which (a setting of the app, as whether the sidebar is open). */
   private setFormatBar(show: boolean): void {
     const asked = show ? "on" : "off";
@@ -662,6 +678,7 @@ export class App {
         h("hr", {}),
         item("Today's journal", () => this.openDay(localToday())),
         item(this.formatBarShown() ? "Hide the formatting bar" : "Show the formatting bar", () => this.setFormatBar(!this.formatBarShown())),
+        item(this.screenDetails ? "Hide the screen details" : "Screen and keyboard details", () => this.toggleScreenDetails()),
         item("New notebook…", () => void this.newNotebook()),
         item("Rename notebook…", () => void this.renameNotebook()),
         item("Import a folder…", () => this.els.folderInput.click()),
