@@ -79,6 +79,62 @@ export class RuleWidget extends WidgetType {
 }
 
 /**
+ * The page's header (`Content-Type`, `Wiki-Format`, `Creation-Date`: Zim's own lines, not text of the page) folded into one
+ * line, as Zim hides it, until the caret comes into it. A press puts the caret at the end of it, which unfolds it. The document is
+ * what it was: this only draws.
+ */
+/** What the folded header says: that it is there, and when the page was made (its `Creation-Date`, as a day) if it says. */
+export function headerLabel(text: string): string {
+  const created = /^Creation-Date:\s*(\d{4}-\d{2}-\d{2})/m.exec(text)?.[1];
+  return created ? `Page header · created ${created}` : "Page header";
+}
+
+export class HeaderWidget extends WidgetType {
+  constructor(readonly text: string) {
+    super();
+  }
+
+  eq(other: WidgetType): boolean {
+    return other instanceof HeaderWidget && other.text === this.text;
+  }
+
+  get estimatedHeight(): number {
+    return 34;
+  }
+
+  // (the widget takes its own press: the editor must not put the caret where the pointer is, which is nowhere in particular)
+  ignoreEvent(): boolean {
+    return true;
+  }
+
+  toDOM(view: EditorView): HTMLElement {
+    const label = headerLabel(this.text);
+    const el = document.createElement("div");
+    el.className = "cm-zim-header-chip";
+    el.setAttribute("role", "button");
+    el.tabIndex = 0;
+    el.title = "The page's header: Zim's own lines (the format, the date of creation). Press to edit them.";
+    el.setAttribute("aria-label", `${label.replace(" · ", ", ")}. Press to edit it.`);
+    el.textContent = label;
+    const open = (): void => {
+      const end = view.posAtDOM(el) + this.text.length;
+      view.dispatch({ selection: { anchor: end }, scrollIntoView: true, userEvent: "select.pointer" });
+      view.focus();
+    };
+    // (`mousedown` is only kept from moving the caret or taking the focus; the press is the click, which WebKit delivers after a tap)
+    el.addEventListener("mousedown", (event) => event.preventDefault());
+    el.addEventListener("click", open);
+    el.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        open();
+      }
+    });
+    return el;
+  }
+}
+
+/**
  * What an anchor looks like while its `{{id: ...}}` source is hidden, and what an image looks like
  * when it can't be drawn as a picture: `state` says why (`loading`, `missing`, `outside`,
  * `unsupported`), and `title` is the explanation shown on hover.

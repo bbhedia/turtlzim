@@ -345,7 +345,31 @@ export class App {
       h("div", { class: "side-main" }, h("div", { class: "sidebar-tools" }, button("Fold all", { on: { click: () => this.tree.foldAll(true) } }), button("Unfold all", { on: { click: () => this.tree.foldAll(false) } })), this.tree.element),
       h("div", { class: "side-panels" }, this.contents.element, this.calendar.element, this.tagList.element),
     );
-    const page = h("main", { class: "page" }, h("div", { class: "pagebar" }, breadcrumb, h("div", { class: "page-actions" }, rename, subpage, attach, table, download, remove)), updateBanner, notice, editorHost, attachments, backlinks);
+    // (on a narrow screen the page's actions are behind one button, `...`: six buttons are two rows of the first screen)
+    const actions = h("div", { class: "page-actions", id: "page-actions" }, rename, subpage, attach, table, download, remove);
+    const pagebar = h("div", { class: "pagebar", "data-actions": "closed" });
+    const actionsToggle = h("button", { type: "button", class: "actions-toggle", "aria-label": "Page actions", title: "Page actions", "aria-haspopup": "true", "aria-expanded": "false", "aria-controls": "page-actions", text: "\u22ef" });
+    const showActions = (open: boolean): void => {
+      pagebar.dataset.actions = open ? "open" : "closed";
+      actionsToggle.setAttribute("aria-expanded", String(open));
+    };
+    actionsToggle.addEventListener("click", () => showActions(pagebar.dataset.actions !== "open"));
+    // (an action chosen, Escape, or a press anywhere else puts them away again)
+    actions.addEventListener("click", (event) => {
+      if ((event.target as Element).closest("button")) showActions(false);
+    });
+    pagebar.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && pagebar.dataset.actions === "open") {
+        event.stopPropagation();
+        showActions(false);
+        actionsToggle.focus();
+      }
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (pagebar.dataset.actions === "open" && !pagebar.contains(event.target as Node)) showActions(false);
+    });
+    pagebar.append(breadcrumb, actionsToggle, actions);
+    const page = h("main", { class: "page" }, pagebar, updateBanner, notice, editorHost, attachments, backlinks);
     this.formatBar = createFormatBar(() => this.editor.view, { follow: (link) => void this.followLink(link), attach: () => attachInput.click() });
 
     root.append(
@@ -1434,7 +1458,8 @@ export class App {
     this.editor.setText(text);
     this.loading = false;
     this.dirty = false;
-    this.editor.goTo(exists ? 0 : text.length, { scroll: false });
+    // (a page that is opened to be written in has the caret at its body, not in its header, which is Zim's own lines and not the page)
+    this.editor.goTo(exists ? (options.focus ? this.editor.bodyStart() : 0) : text.length, { scroll: false });
     this.els.page.scrollTop = 0;
     this.locate(spelled, options.push && !(this.isPrivate && previous?.name === spelled) ? "push" : options.replace ? "replace" : "none");
     this.tree.setCurrent(spelled);

@@ -12,7 +12,7 @@ import { linkToFollow } from "./links";
 import { cachedLayout, placeIn, whatCanGo } from "./table-commands";
 import { TableToolbar, TableWidget } from "./table-widget";
 import type { GridHost } from "./table-widget";
-import { BulletWidget, CheckboxWidget, ChipWidget, ImageWidget, RuleWidget, isCheckbox } from "./widgets";
+import { BulletWidget, CheckboxWidget, ChipWidget, HeaderWidget, ImageWidget, RuleWidget, isCheckbox } from "./widgets";
 
 /** The decorations of a document, and the subset of them that hide text (the caret skips those). */
 export interface Decorated {
@@ -99,6 +99,13 @@ export function buildDecorations(state: EditorState, spans: Spans, showMarkup: b
 
     switch (kind) {
       case Kind.Header:
+        // Zim does not show it: one line, until the caret comes into it (and with Show markup, as written). A caret at the very start of
+        // the page does not unfold it: that is where a page is opened, before anyone has put the caret anywhere.
+        if (!(showMarkup || ranges.some((r) => r.to > from && r.from <= to))) {
+          all.push(Decoration.replace({ widget: new HeaderWidget(state.sliceDoc(from, to)), block: true }).range(from, to));
+          skipUntil = to;
+          break;
+        }
         eachLine(from, to, (line) => lineDeco(line.from, "cm-zim-header"));
         break;
 

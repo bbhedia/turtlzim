@@ -36,6 +36,9 @@ yet (CLAUDE.md, Open issues #5).
   leads there from the page you are on (`zim-editor-plan.md`).
 * **Tables**: drawn as a grid, written as lines with a toolbar while the caret is in them; the **Table**
   button makes one (`zim-editor-plan.md`).
+* **The page's header** (Zim's `Content-Type`, `Wiki-Format`, `Creation-Date` lines) is folded into one line, as Zim hides it; a press on the
+  line shows it. **On a narrow screen** the page's actions (Rename, New sub-page, Attach…, Table, Download, Delete) are behind one button (`⋯`) that opens
+  them over the page, which puts the page's title in the upper third of a phone's first screen instead of the middle.
 * **Formatting bar** (under the page): buttons for what the keys do (bold, lists, headings, links, tables, undo,
   attach), shown while writing on a touch screen, or from the notebook menu (*Show the formatting bar*) on any.
   On a phone the layout follows the part of the screen that the keyboard leaves, a tap follows a link while a page is

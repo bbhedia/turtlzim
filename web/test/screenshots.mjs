@@ -127,6 +127,14 @@ await page.evaluate(() => window.__keyboard(330));
 await shot(page, "34-phone-dark-editing");
 await page.close();
 
+console.log("phone, the first screen of a page, and its actions");
+page = await openPhone();
+await goTo(page, "Projects:Garden");
+await shot(page, "38-phone-first-screen");
+await tap(page, page.locator(".actions-toggle"));
+await shot(page, "39-phone-page-actions");
+await page.close();
+
 console.log("phone, the screen and keyboard details");
 page = await openPhone();
 await goTo(page, "Projects:Garden");

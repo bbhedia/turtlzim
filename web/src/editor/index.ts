@@ -6,7 +6,7 @@ import { EditorState, Prec } from "@codemirror/state";
 import type { Extension } from "@codemirror/state";
 import { EditorView, drawSelection, highlightSpecialChars, keymap } from "@codemirror/view";
 import type { ViewUpdate } from "@codemirror/view";
-import { insertReference, toggleCheckboxAt } from "./commands";
+import { insertReference, pageBodyStart, toggleCheckboxAt } from "./commands";
 import { followFacet } from "./follow";
 import { insertTable } from "./table-commands";
 import { linkCompletion } from "./completion";
@@ -230,6 +230,8 @@ export interface ZimEditor {
    */
   goTo(position: number, options?: { focus?: boolean; scroll?: boolean }): void;
   focus(): void;
+  /** Where the body of the page starts: below its header, which is folded while the caret is not in it (0 for a page that has none). */
+  bodyStart(): number;
   /** Scroll so that the caret is in view (the space it is in has become smaller: an on-screen keyboard came up). */
   revealCaret(): void;
   /** A new table of `columns` columns and `rows` rows below its header, as a block of its own, with the first header selected to be written over. */
@@ -268,6 +270,7 @@ export function createZimEditor(parent: HTMLElement, doc = "", options: ZimEdito
       if (goOptions.focus) view.focus();
     },
     focus: () => view.focus(),
+    bodyStart: () => pageBodyStart(view.state),
     revealCaret() {
       view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main.head, { y: "nearest", yMargin: 32 }) });
     },

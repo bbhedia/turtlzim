@@ -407,7 +407,13 @@ selection shows it directly.
   drag to resize or move a row or column (the toolbar adds, deletes and aligns), and a table in a list item or
   indented is not one (the parser's rule). Moving through a table is by Tab, Enter and the arrows; there is no
   selection of cells.
-- **The header block** is shown, dimmed. Zim hides it; folding it is a small follow-up.
+- **The header block** is folded into one line ("Page header · created 2026-10-06", `HeaderWidget`: a block that replaces its lines, as the
+  grid does a table) and unfolds when the caret comes into it, or with *Show markup*, or by a press (or Enter) on the line, which puts the
+  caret at the end of its last line. A caret at the very start of the page, where a page is opened, does not unfold it, and a page that is
+  opened to be written in (a link followed, a search result chosen) has the caret at the start of its body, which is where `pageBodyStart` says,
+  so that the first key typed is not typed into the header. The text is the file's, unchanged. Not done: a key typed with the caret at position 0 by
+  Ctrl+Home still lands before the header (as it did when the header was shown), and the line can't be reached by the arrow keys (the editor's
+  arrows go over a block).
 - **Accessibility**: Tab is a list command (it traps keyboard focus, as most editors do; CodeMirror's
   tab-focus-mode toggle is not wired up), and the checkbox/bullet widgets have roles but no keyboard
   path other than the commands above.

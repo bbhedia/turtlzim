@@ -136,6 +136,9 @@ const madeUpKeyboard = () => {
 };
 const phone = { viewport: { width: 390, height: 800 }, hasTouch: true, isMobile: true, beforeLoad: madeUpKeyboard };
 
+/** Whether the text of the page has the focus (a keyboard is up for it, on a phone). */
+const hasFocus = (page) => page.evaluate(() => window.__zim.editor.view.hasFocus);
+
 /**
  * A fresh browser profile (so a fresh IndexedDB: the sample notebook, nothing else) with the app
  * open. `beforeLoad`, if given, is a function that runs in the page before any of its own scripts.
@@ -633,8 +636,11 @@ try {
     assertEqual(await ui.current(), "Home", "a plain click does not follow the link");
     await link.click({ modifiers: ["Control"] });
     await ui.waitCurrent("Help:Editor");
-    assertEqual(await page.locator(".cm-zim-h1").first().innerText(), "The editor", "the page it leads to is shown");
+    // (the caret is at the start of its body, ready to write, and so the title shows its markers, as a line does that the caret is in: the header is folded, and is not where it would write)
+    assertEqual((await page.locator(".cm-zim-h1").first().innerText()).replace(/=/g, "").trim(), "The editor", "the page it leads to is shown");
     assert(await ui.inEditor(), "and the cursor is in it, ready to write");
+    assertEqual(await page.locator(".cm-zim-header-chip").count(), 1, "(its header is folded into one line)");
+    assertEqual(await page.evaluate(() => { const { state } = window.__zim.editor.view; return state.doc.lineAt(state.selection.main.head).text; }), "====== The editor ======", "and the caret is in the page, not in its header");
     await ui.goto("Home");
     await page.locator(".cm-zim-link", { hasText: "A day of the journal" }).click({ modifiers: ["Control"] });
     await ui.waitCurrent("Journal:2026:10:06");
@@ -1369,6 +1375,96 @@ try {
     assertEqual(await ui.inText(), false, "(the focus was in the toolbar)");
     await page.keyboard.press("Escape");
     assert(await ui.inText(), "Escape comes back to the text too");
+  });
+
+  await app("the header of a page is folded into one line that says it is there: a press or the keyboard unfolds it, Show markup and a caret in it show it as written, and the file is what it was", {}, async (ui) => {
+    const { page } = ui;
+    const header = "Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\nCreation-Date: 2026-10-06T09:00:00+00:00";
+    const chip = page.locator(".cm-zim-header-chip");
+    const head = () => page.evaluate(() => window.__zim.editor.view.state.selection.main.head);
+    await ui.goto("Projects:Garden");
+    assertEqual(await chip.count(), 1, "a page that has a header shows one line for it");
+    assertEqual(await chip.innerText(), "Page header · created 2026-10-06", "which says that it is the header, and when the page was made");
+    assertEqual(await page.locator(".cm-zim-header").count(), 0, "and none of its lines is drawn");
+    assert((await ui.text()).startsWith(`${header}\n\n`), "the text is the file's, with its header");
+    assertEqual(await head(), 0, "a page that is opened has the caret at its start, which does not unfold it");
+    // a press unfolds it, with the caret at the end of the last line
+    await chip.click();
+    assertEqual(await chip.count(), 0, "a press on the line shows the header's lines");
+    assertEqual(await page.locator(".cm-zim-header").count(), 3, "(three)");
+    assertEqual(await head(), header.length, "with the caret at the end of the last of them");
+    assert(await ui.inText(), "in the text of the page");
+    // the caret goes below, and it is folded again
+    await ui.caretTo(header.length + 4);
+    assertEqual(await chip.count(), 1, "the caret below the header folds it again");
+    // the keyboard: the line is a button
+    await chip.focus();
+    await page.keyboard.press("Enter");
+    assertEqual(await chip.count(), 0, "Enter on the line unfolds it");
+    assertEqual(await head(), header.length, "(the caret is where a press puts it)");
+    await ui.caretTo(header.length + 4);
+    // Show markup shows everything as written
+    await page.locator("#markup").check();
+    assertEqual(await chip.count(), 0, "with Show markup the header is as written");
+    assertEqual(await page.locator(".cm-zim-header").count(), 3, "(three lines)");
+    await page.locator("#markup").uncheck();
+    assertEqual(await chip.count(), 1, "and folded again without it");
+    // typing in the page and saving leaves the header as it was
+    await ui.typeAtEnd("a line more\n");
+    await ui.flush();
+    assert((await ui.pageText("Projects:Garden")).startsWith(`${header}\n\n====== Garden ======`), "what was saved begins with the header as it was");
+    // a page with no header has no line for it
+    await ui.goto("Scratch");
+    await ui.setText("====== Just a page ======\nsome text\n");
+    assertEqual(await chip.count(), 0, "a page that has none has no line for it");
+  });
+
+  await app("on a phone the page's actions are behind one button: it opens them over the page, a choice or Escape or a press elsewhere puts them away, and a wide screen has them in a row", phone, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    const toggle = page.locator(".actions-toggle");
+    assert(await toggle.isVisible(), "there is a button for the actions");
+    assertEqual(await toggle.getAttribute("aria-expanded"), "false", "(which says that they are not shown)");
+    for (const name of ["Rename", "New sub-page", "Attach…", "Table", "Download", "Delete"]) assert(!(await page.getByRole("button", { name, exact: true }).isVisible()), `${name} is not on the first screen`);
+    // the first screen is the page: its title is high up
+    const title = await page.locator(".cm-zim-h1").first().boundingBox();
+    assert(title.y < 250, `the title of the page is in the upper third of the screen (${Math.round(title.y)} pixels down of 800)`);
+    await toggle.tap();
+    assertEqual(await toggle.getAttribute("aria-expanded"), "true", "a tap opens them");
+    for (const name of ["Rename", "New sub-page", "Attach…", "Table", "Download", "Delete"]) {
+      const box = await page.getByRole("button", { name, exact: true }).boundingBox();
+      assert(box && box.x >= 0 && box.x + box.width <= 390 && box.height >= 40, `${name} is on the screen, big enough for a finger (${JSON.stringify(box)})`);
+    }
+    // a choice does it and puts them away
+    await page.getByRole("button", { name: "Rename", exact: true }).tap();
+    await ui.dialog().waitFor();
+    await ui.dialog().getByRole("button", { name: "Cancel" }).tap();
+    await ui.dialog().waitFor({ state: "detached" });
+    assertEqual(await toggle.getAttribute("aria-expanded"), "false", "a choice puts them away");
+    // Escape, and a press elsewhere
+    await toggle.tap();
+    await page.keyboard.press("Escape");
+    assertEqual(await toggle.getAttribute("aria-expanded"), "false", "Escape puts them away");
+    await toggle.tap();
+    await page.locator(".cm-line", { hasText: "Plant the beans" }).tap();
+    assertEqual(await toggle.getAttribute("aria-expanded"), "false", "a press on the page puts them away");
+    assert(await hasFocus(page), "(and is a press on the page)");
+  });
+
+  await app("a wide screen has the page's actions in a row, and no button for them", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    assert(!(await page.locator(".actions-toggle").isVisible()), "no button for them");
+    for (const name of ["Rename", "New sub-page", "Attach…", "Table", "Download", "Delete"]) assert(await page.getByRole("button", { name, exact: true }).isVisible(), `${name} is there`);
+  });
+
+  await app("on a phone a tap on the folded header unfolds it, and the first screen of a page is mostly the page", phone, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    assertEqual(await page.locator(".cm-zim-header-chip").count(), 1, "the header is one line");
+    await page.locator(".cm-zim-header-chip").tap();
+    assertEqual(await page.locator(".cm-zim-header-chip").count(), 0, "a tap on it shows the header's lines");
+    assert(await ui.inText(), "with the caret in the text");
   });
 
   await app("the Table button makes a table where the caret is, as a block of its own, ready to be written in, and what is typed is saved", {}, async (ui) => {
@@ -2368,10 +2464,15 @@ try {
     assert(await page.locator("#sidebar").isHidden(), "choosing a page closes the drawer");
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     assert(overflow <= 0, `the page does not scroll sideways (${overflow}px too wide)`);
-    for (const name of ["New page", "Rename", "Attach…", "Delete"]) {
+    const onScreen = async (name) => {
       const box = await page.getByRole("button", { name, exact: true }).boundingBox();
       assert(box && box.x >= 0 && box.x + box.width <= 390, `the ${name} button is on the screen`);
-    }
+    };
+    await onScreen("New page");
+    // (the page's own actions are behind one button on a screen this narrow)
+    await page.locator(".actions-toggle").click();
+    for (const name of ["Rename", "Attach…", "Delete"]) await onScreen(name);
+    await page.locator(".actions-toggle").click();
     // the lists under the tree are in the drawer and fit it
     await page.locator(".icon-button").click();
     await page.locator("details.tags summary").click();
@@ -2394,7 +2495,6 @@ try {
   // ==========================================================================================
   // A phone: a small screen that is touched, with an on-screen keyboard (made up: see madeUpKeyboard)
   // ==========================================================================================
-  const hasFocus = (page) => page.evaluate(() => window.__zim.editor.view.hasFocus);
   const shown = (page, selector) => page.locator(selector).first().isVisible();
   const picked = (page) =>
     page.evaluate(() => {

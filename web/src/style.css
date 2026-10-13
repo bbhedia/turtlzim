@@ -242,6 +242,7 @@ mark { background: rgba(255, 213, 0, 0.35); color: inherit; border-radius: 2px; 
 .crumb-sep { color: var(--zim-muted); }
 .page-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .page-actions button { font-size: 0.85rem; padding: 0.2rem 0.55rem; }
+.actions-toggle { display: none; }
 
 .notice { margin-top: 0.4rem; margin-bottom: 0.2rem; padding: 0.5rem 0.8rem; background: var(--notice-bg); border: 1px solid var(--zim-border); border-radius: 8px; font-size: 0.9rem; width: calc(100% - 2rem); }
 .notice[hidden] { display: none; }
@@ -395,8 +396,28 @@ dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
   .topbar > .primary { order: 3; }
   .search { order: 4; flex: 1 1 12rem; max-width: none; }
   .check { order: 5; }
-  .pagebar { padding-inline: 0.6rem; }
-  .page-actions { width: 100%; }
+  .pagebar { padding-inline: 0.6rem; position: relative; flex-wrap: nowrap; }
+  .breadcrumb { flex: 1 1 auto; }
+  /* (the page's actions are behind one button: six buttons are two rows of a screen that has few) */
+  .actions-toggle { display: inline-block; flex: none; font-size: 1.2rem; line-height: 1; padding: 0.2rem 0.7rem; }
+  .page-actions { display: none; }
+  .pagebar[data-actions="open"] .page-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    position: absolute;
+    top: calc(100% - 0.15rem);
+    right: 0.6rem;
+    z-index: 25;
+    min-width: 13rem;
+    padding: 0.3rem;
+    background: var(--zim-bg);
+    border: 1px solid var(--zim-border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+  .pagebar[data-actions="open"] .page-actions button { text-align: left; font-size: 1rem; padding: 0.45rem 0.8rem; border-color: transparent; background: none; min-height: 2.5rem; }
+  .pagebar[data-actions="open"] .page-actions button.danger-text { color: var(--danger); }
 }
 
 /* (what is typed on gets the room: the search and Show markup are for when the keyboard is away) */
