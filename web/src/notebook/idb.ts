@@ -17,6 +17,17 @@ interface FileRow extends StoredFile {
   key: string;
 }
 
+/**
+ * The bytes of a file in a Blob of their own, in memory. A Blob that IndexedDB hands out stands for the stored file it came from, and a
+ * record written again from one, which is what moving a file to another path is (a page renamed with its pictures), left Playwright's
+ * WebKit with a picture that did not load until the page was opened again, in 6 renames of 42. Written from the bytes that were read, it
+ * was 0 of 42. Written from a new Blob made of the handed-out one (`new Blob([blob])`) it was 3 of 30, and with the puts before the
+ * deletes 3 of 42, so neither does it.
+ */
+async function ownBytes(blob: Blob): Promise<Blob> {
+  return new Blob([await blob.arrayBuffer()], { type: blob.type });
+}
+
 function request<T>(r: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     r.onsuccess = () => resolve(r.result);
@@ -162,6 +173,8 @@ export class IndexedDbStore implements NotebookStore {
   }
 
   async replacePages(id: string, change: PageChange): Promise<void> {
+    // (the bytes of the files that are moved are read before the transaction: one that waits for anything but its own requests ends)
+    const copies = change.files?.move?.length ? await this.copiesOfFiles(id, change.files.move.map(([from]) => from)) : new Map<string, StoredFile>();
     // What went wrong inside the transaction's callback is kept here and thrown from this function:
     // an exception thrown from an event handler would be reported as an uncaught error instead.
     let missing = false;
@@ -184,7 +197,7 @@ export class IndexedDbStore implements NotebookStore {
             const pages = tx.objectStore("pages");
             for (const name of change.remove) pages.delete([id, this.keyOf(name)]);
             for (const page of change.put) pages.put(this.row(id, page));
-            if (change.files) this.queueFiles(tx, id, change.files, (error) => {
+            if (change.files) this.queueFiles(tx, id, change.files, copies, (error) => {
               fail(error);
               tx.abort();
             });
@@ -201,11 +214,33 @@ export class IndexedDbStore implements NotebookStore {
   }
 
   /**
+   * The files at `paths` as they are now, each with its bytes in a Blob of its own (see `ownBytes`), by the key of its path. A file that
+   * is not stored is not in it, and neither is one that can't be read: that one is moved as it is, which is what a rename did before, so
+   * a page with a picture that is damaged can still be renamed.
+   */
+  private async copiesOfFiles(id: string, paths: string[]): Promise<Map<string, StoredFile>> {
+    const copies = new Map<string, StoredFile>();
+    for (const path of paths) {
+      const key = fileKey(path);
+      if (copies.has(key)) continue;
+      try {
+        const row = (await request(this.db.transaction("files", "readonly").objectStore("files").get([id, key]))) as FileRow | undefined;
+        if (row) copies.set(key, { path: row.path, modified: row.modified, blob: await ownBytes(row.blob) });
+      } catch {
+        // (as it is)
+      }
+    }
+    return copies;
+  }
+
+  /**
    * Queue a change of files in `tx`: moved files are read first (the bytes stay with the file),
    * then everything that goes is deleted and everything that comes is written. A moved file that
-   * isn't stored is skipped.
+   * isn't stored is skipped. A moved file is written from the bytes in `copies` when the file is
+   * still what they were read from (it may have been changed from another tab since), else from
+   * the file as the transaction reads it.
    */
-  private queueFiles(tx: IDBTransaction, id: string, change: FileChange, fail: (error: unknown) => void): void {
+  private queueFiles(tx: IDBTransaction, id: string, change: FileChange, copies: Map<string, StoredFile>, fail: (error: unknown) => void): void {
     const store = tx.objectStore("files");
     const moves = change.move ?? [];
     const apply = (moved: FileRow[]) => {
@@ -222,7 +257,11 @@ export class IndexedDbStore implements NotebookStore {
       read.onsuccess = () => {
         try {
           const row = read.result as FileRow | undefined;
-          if (row) moved.push({ ...row, path: to, key: fileKey(to) });
+          if (row) {
+            const copy = copies.get(fileKey(from));
+            const same = copy !== undefined && copy.modified === row.modified && copy.blob.size === row.blob.size && copy.blob.type === row.blob.type;
+            moved.push({ ...row, blob: same ? copy.blob : row.blob, path: to, key: fileKey(to) });
+          }
           if (--waiting === 0) apply(moved);
         } catch (error) {
           fail(error);

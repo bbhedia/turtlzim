@@ -2041,6 +2041,28 @@ try {
     assertDeepEqual((await ui.picture()).natural, [320, 180], "and still shows the picture");
     assertDeepEqual(await page.evaluate(() => window.__zim.app.session.attachments("Projects:Allotment").map((f) => f.path)), ["Projects/Allotment/Bed 1.png", "Projects/Allotment/notes.csv"], "they are in the folder of the new name");
     assertEqual(await page.evaluate(() => window.__zim.app.session.attachments("Projects:Garden").length), 0, "and not in the old one");
+    // the page's own actions work on the page under its new name (Rename and Delete were left switched off until another page was opened)
+    assert(await page.getByRole("button", { name: "Rename", exact: true }).isEnabled(), "Rename can be used again at once");
+    assert(await page.locator(".page-actions").getByRole("button", { name: "Delete", exact: true }).isEnabled(), "and Delete");
+    // and again: a file that was moved is read at once (to draw it), which is when WebKit did not have it ready, in about one rename of seven
+    // (the picture stayed an empty frame until the page was opened again); one rename proves little, so there are several
+    for (const next of ["Plot", "Bed", "Border", "Row", "Patch", "Corner", "Strip", "Allotment"]) {
+      await page.getByRole("button", { name: "Rename", exact: true }).click();
+      await dialog.waitFor();
+      await page.keyboard.type(next);
+      await dialog.getByRole("button", { name: "Rename", exact: true }).click();
+      await dialog.waitFor({ state: "detached" });
+      await ui.waitCurrent(`Projects:${next}`);
+      assertDeepEqual((await ui.picture()).natural, [320, 180], `the picture is drawn after the page is renamed to ${next}`);
+      assertDeepEqual(
+        await page.evaluate(async (name) => {
+          const session = window.__zim.app.session;
+          return Promise.all(session.attachments(`Projects:${name}`).map(async (f) => [f.path, (await (await session.fileBlob(f.path)).arrayBuffer()).byteLength]));
+        }, next),
+        [[`Projects/${next}/Bed 1.png`, green.length], [`Projects/${next}/notes.csv`, 18]],
+        `and the files can be read, at their new paths (${next})`,
+      );
+    }
     // after a reload, still
     await ui.reload();
     assertDeepEqual((await ui.picture()).natural, [320, 180], "after a reload too");

@@ -1850,6 +1850,8 @@ export class App {
         this.locate(this.current?.name ?? from, "replace");
         this.renderBreadcrumb();
         this.renderBacklinks();
+        // (the notebook told the page's actions about the rename while the page still had its old name, which is no page: Rename and Delete were left off)
+        this.renderActions();
         this.say(`Renamed ${from} to ${moved?.[1] ?? String(values.name)}${report.linksChanged ? `; ${report.linksChanged} link${report.linksChanged === 1 ? "" : "s"} updated on ${report.rewritten.length} page${report.rewritten.length === 1 ? "" : "s"}` : ""}.`);
       },
     });

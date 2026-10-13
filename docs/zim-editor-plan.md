@@ -243,7 +243,12 @@ nothing. A screenshot of it, taken while the thing that is wrong happens, is wha
 bar's and the table toolbar's buttons cancelled `pointerdown` (to keep the focus in the text), and **WebKit then delivers no
 `mousedown` and no `click`**, so every button was dead. They cancel `mousedown` only, which keeps the focus in Chromium and WebKit
 alike, and a Chromium check fails if one cancels a `pointerdown`. WebKit with no profile folder has no OPFS and cannot put a Blob in
-IndexedDB, so the run gives each context a profile folder of its own. What is left out of the WebKit run: the service worker and
+IndexedDB, so the run gives each context a profile folder of its own. A second thing only WebKit showed: **a page renamed with its
+pictures left the picture an empty frame (until the page was opened again) in about one rename in seven**, because the store wrote the moved
+file from the Blob that IndexedDB had handed out. Written from bytes that were read it did not fail in 82 renames (6 of 42 before; a new Blob
+made of the handed-out one, or the writes in the other order, did not help: 3 of 30 and 3 of 42), so a moved file is now written from its bytes, and the
+scenario that renames a page with its attachments renames it nine times, one rename proving little. (A file that a person chooses is
+copied into the store when it is put: WebKit kept the picture after its file on the disk was deleted or overwritten.) What is left out of the WebKit run: the service worker and
 certificate scenarios (they drive Chromium's DevTools), the one that opens a `blob:` address as a page, and two that replace
 `navigator.storage.persist` (WebKit goes on answering for itself).
 

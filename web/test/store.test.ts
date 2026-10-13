@@ -2,12 +2,12 @@
 // under a NotebookSession (the encrypted and folder stores to come will be held to the same tests).
 import "fake-indexeddb/auto";
 import { readFileSync } from "node:fs";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { pageKey } from "../src/notebook-core";
 import { TurtlStore } from "../src/vault/turtl-store";
 import { freshAccount } from "./helpers/direct-core";
 import { IndexedDbStore, newId } from "../src/notebook/idb";
-import { MemoryStore } from "../src/notebook/store";
+import { MemoryStore, fileKey } from "../src/notebook/store";
 import type { NotebookStore, StoredFile, StoredPage } from "../src/notebook/store";
 import { initZimSync } from "../src/zim";
 
@@ -219,6 +219,65 @@ describe("IndexedDB, beyond the contract", () => {
     ).rejects.toThrow(/clone/i);
     expect(byName(await store.loadPages(n.id)).map((p) => p.name)).toEqual(["A"]);
     expect(await paths(store, n.id)).toEqual(["a.png", "b.png"]);
+  });
+
+  describe("a file that is moved with its page", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it("is written from bytes of its own, not from the Blob that the database handed out (WebKit failed to draw one picture in ten that was)", async () => {
+      const store = await IndexedDbStore.open(pageKey, `own-bytes-${++databases}`);
+      const n = await store.createNotebook({ title: "N", home: "Home", kind: "open" }, [], [file("Foo/a.png", "A", "image/png", 7), file("Foo/b.csv", "B", "text/csv", 8)]);
+      const handedOut: unknown[] = [];
+      const written: Array<{ path: string; blob: unknown }> = [];
+      const get = IDBObjectStore.prototype.get;
+      const put = IDBObjectStore.prototype.put;
+      vi.spyOn(IDBObjectStore.prototype, "get").mockImplementation(function (this: IDBObjectStore, query: IDBValidKey | IDBKeyRange) {
+        const asked = get.call(this, query);
+        asked.addEventListener("success", () => handedOut.push((asked.result as { blob?: unknown } | undefined)?.blob));
+        return asked;
+      });
+      vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+        if (this.name === "files") written.push({ path: (value as StoredFile).path, blob: (value as StoredFile).blob });
+        return put.call(this, value, key);
+      });
+      await store.replacePages(n.id, { remove: [], put: [], files: { move: [["Foo/a.png", "Bar/a.png"], ["Foo/b.csv", "Bar/b.csv"]] } });
+      vi.restoreAllMocks();
+      expect(written.map((w) => w.path).sort()).toEqual(["Bar/a.png", "Bar/b.csv"]);
+      expect(handedOut.filter((blob) => blob instanceof Blob).length).toBeGreaterThanOrEqual(2); // (the spy saw what the database gave)
+      for (const w of written) expect(handedOut).not.toContain(w.blob);
+      // and nothing of the file is lost on the way: its bytes, its type, its time
+      const moved = await store.loadFile(n.id, "Bar/a.png");
+      expect(moved?.type).toBe("image/png");
+      expect(await moved?.text()).toBe("A");
+      expect((await store.loadFile(n.id, "Bar/b.csv"))?.type).toBe("text/csv");
+      expect((await store.listFiles(n.id)).map((f) => [f.path, f.modified]).sort()).toEqual([["Bar/a.png", 7], ["Bar/b.csv", 8]]);
+    });
+
+    it("is moved as it is when its bytes can't be read, so that a page with a damaged picture can still be renamed", async () => {
+      const store = await IndexedDbStore.open(pageKey, `unreadable-${++databases}`);
+      const n = await store.createNotebook({ title: "N", home: "Home", kind: "open" }, [page("Foo", "x")], [file("Foo/a.png", "A", "image/png"), file("Foo/b.png", "B", "image/png")]);
+      vi.spyOn(Blob.prototype, "arrayBuffer").mockRejectedValueOnce(new DOMException("The object can not be found here.", "NotFoundError"));
+      await store.replacePages(n.id, { remove: ["Foo"], put: [page("Bar", "x")], files: { move: [["Foo/a.png", "Bar/a.png"], ["Foo/b.png", "Bar/b.png"]] } });
+      vi.restoreAllMocks();
+      expect(await paths(store, n.id)).toEqual(["Bar/a.png", "Bar/b.png"]);
+      expect(await text(store, n.id, "Bar/a.png")).toBe("A");
+      expect(await text(store, n.id, "Bar/b.png")).toBe("B");
+      expect(byName(await store.loadPages(n.id)).map((p) => p.name)).toEqual(["Bar"]);
+    });
+
+    it("is written from the file as it is when it changed after its bytes were read (another tab wrote it again)", async () => {
+      const store = await IndexedDbStore.open(pageKey, `changed-${++databases}`);
+      const now = (path: string) => file(path, "NOW", "image/png", 5);
+      const names = ["size", "time", "type"];
+      const n = await store.createNotebook({ title: "N", home: "Home", kind: "open" }, [], names.map((name) => now(`Foo/${name}.png`)));
+      // (what was read a moment ago, and is not what is stored now: in size only, in time only, in type only)
+      const read = (name: string, content: string, modified: number, type: string) => [fileKey(`Foo/${name}.png`), { path: `Foo/${name}.png`, modified, blob: new Blob([content], { type }) }] as const;
+      const copies = new Map([read("size", "OLD VERSION", 5, "image/png"), read("time", "OLD", 4, "image/png"), read("type", "OLD", 5, "image/jpeg")]);
+      vi.spyOn(store as unknown as { copiesOfFiles(): Promise<typeof copies> }, "copiesOfFiles").mockResolvedValue(copies);
+      await store.replacePages(n.id, { remove: [], put: [], files: { move: names.map((name) => [`Foo/${name}.png`, `Bar/${name}.png`] as [string, string]) } });
+      vi.restoreAllMocks();
+      for (const name of names) expect(await text(store, n.id, `Bar/${name}.png`)).toBe("NOW");
+    });
   });
 
   it("opens a database made before files existed, keeps what is in it, and can then hold files", async () => {

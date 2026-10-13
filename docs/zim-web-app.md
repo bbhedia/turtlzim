@@ -148,6 +148,9 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
     and files: *moves* first (a rename moves a folder with its pages; the bytes stay with each file),
     then removals, then writes. The rules know only paths; where a reference leads, what a new
     attachment is called, and what a rename must rewrite are in Rust (`zim-notebook`, `files.rs`).
+    In IndexedDB a moved file is written again **from its bytes, read into memory before the transaction** (a rename reads the page's
+    attachments once; one that can't be read is moved as it was, and one that changed meanwhile is written as the transaction reads it):
+    written from the Blob that the database handed out, WebKit failed to draw the picture in 6 renames of 42 (`zim-editor-plan.md`, *Other engines*).
 12. **An attachment can't run.** A notebook can come from anywhere, so a file in it is treated as
     hostile. Pictures (PNG, JPEG, GIF, WebP, AVIF, BMP, ICO, SVG) are shown only in an `<img>`,
     where not even an SVG can run a script, and the large view is an `<img>` in a dialog; every other
@@ -209,7 +212,7 @@ search finds are the Rust ones, so desktop and mobile shells get them unchanged.
 | Rules | `cargo test -p zim-notebook` (unit tests, and property tests on random colliding notebooks with files and every style of reference) and, with `scripts/zim-golden.sh`, Zim's own manual: all 301 links and 25 image references resolve; renames keep every one leading where it did |
 | Plain text | `cargo test -p zim-format` (`tests/plain.rs`): every construct, and that what is hidden is hidden by the span model |
 | Bindings | `cargo test -p zim-wasm` and `web/test/notebook-core.test.ts` (also run against the real manual) |
-| Stores | `web/test/store.test.ts`: the same contract on both stores, including files, moves (swaps, case-only), atomicity under failure, and opening a database made before files existed (`fake-indexeddb`) |
+| Stores | `web/test/store.test.ts`: the same contract on both stores, including files, moves (swaps, case-only), atomicity under failure, and opening a database made before files existed (`fake-indexeddb`); and that a moved file is written from bytes of its own (a spy on what IndexedDB hands out and what is put), that one that can't be read is moved as it is, and that one that changed is not overwritten with the old bytes |
 | Session, files, zip | `web/test/session.test.ts` (rename/delete/failed write/export paths/import rules/zip round trips and damage; attachments through rename, delete and export; Zim's manual in and out, every file byte for byte) |
 | The app on the device | `zim-pwa.md` (what verifies what): `web/test/pwa-worker.test.ts` (the worker, in a pretend browser), `pwa-page.test.ts`, `pwa-build.test.ts`, and the scenarios "The app on the device" in `browser.mjs` |
 | Encrypted notebooks | `zim-encrypted-notebooks.md` (what verifies what); `web/test/{vault,engine-failures,cut-off,turtl-store,routed-store}.test.ts`, `store.test.ts` (the shared contract), `vault-browser.mjs` (`npm run test:vault`) |
