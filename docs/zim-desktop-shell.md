@@ -22,6 +22,7 @@ the program is that build packed again. No second branch, no second UI.
 | Window | made in `main.rs`: https scheme (`https://tauri.localhost`, a secure context as on Android, which the vault needs), with the shell's script as an initialization script |
 | Shell script | `src-tauri/shell.js`: `window.__zimShell` = `{ version, saveFile }` (the web app's `web/src/app/shell.ts` recognises Tauri by `window.__TAURI_INTERNALS__` and says `desktop`) |
 | Saving a file | a WebView does nothing with a link to a Blob that has `download`: `saveFile` sends the bytes to the command `save_file`, which opens the system's *Save as* dialog and writes the file (export zip, page download, attachment, vault backup all use it) |
+| Linux WebKitGTK | built with the web's **storage and file system APIs off** (Ubuntu 26.04's 2.52 at least): no `navigator.storage`, so no OPFS and no vault. `linux_web_features` in `main.rs` switches on `StorageAPI`, `StorageAPIEstimate`, `FileSystem`, `FileSystemWritableStream` and `AccessHandle` (by `webkit_settings_get_all_features`, WebKitGTK 2.42+, found at run time) and reloads the page |
 | Content policy | the web server's, in `tauri.conf.json` (plus the program's own channel in `connect-src`); `web/test/desktop-config.test.ts` keeps the two from drifting |
 | Permissions | `core:default` only; no remote page may talk to the program; no network is used by the app itself |
 | Not in the program | no service worker (the code is the program, changed by installing another), no "Install the app" |
@@ -52,11 +53,21 @@ runner); cross-building them from Linux (cargo-xwin and NSIS) is possible and ha
 
 ## What verifies it
 
-- `cargo check --target x86_64-pc-windows-msvc` in `desktop/src-tauri`: the Rust compiles against Tauri 2.x.
-- `web/test/shell.test.ts` (Tauri is recognised), `desktop-config.test.ts` (version, policy, hooks, command, permissions).
-- **Not run yet**: a Linux build (needs the packages above), either installer, the program itself on either system. The things to look at first
-  when it runs: that `https://tauri.localhost` (Windows) and `tauri://localhost` (Linux, WebKitGTK) give the vault OPFS and a Worker, that the policy
-  lets the app and Tauri's own scripts run, and the *Save as* dialog.
+- `cargo check --target x86_64-pc-windows-msvc` in `desktop/src-tauri`: the Rust compiles against Tauri 2.x for Windows.
+- `web/test/shell.test.ts` (Tauri is recognised), `desktop-config.test.ts` (version, policy, hooks, commands, permissions, the WebKit features).
+- **Linux, built and run here** (2026-10-14: `.deb` 2.9 MB, `.rpm` 2.9 MB, `.AppImage` 85 MB; the program run on a virtual display, Xvfb, under a D-Bus session):
+  the sample notebook opens (tree, page, contents, calendar), IndexedDB works, `tauri://localhost` is a secure context, Worker, WebAssembly and
+  `crypto.subtle` are there, and, with the features above on, `navigator.storage.getDirectory()` opens the OPFS root (without them it was undefined, and
+  `MiniBrowser`, WebKitGTK's own, showed the same on `http://127.0.0.1`: it is the build, not the custom scheme).
+- **Not run**: the vault itself (creating an encrypted notebook) in the program; the *Save as* dialog; the `.deb`/`.rpm` installed; the AppImage on
+  another distribution; **any of it on Windows** (WebView2, the NSIS and MSI installers: the workflow builds them, nobody has run them).
+
+**Where this machine is not typical** (so that the same symptoms are known): its CPU is a 2011 Pentium (no AVX), and Ubuntu's WebKitGTK **web process dies with
+SIGILL** as soon as JavaScript is compiled (`JSC_useJIT=false` makes it run, slowly); there is no desktop session, so GTK waits 25 s for a portal unless the
+program runs under `dbus-run-session`; and WebKit's sandbox (bubblewrap) cannot start here (`WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1` for tests only). None of
+these is the program's: a current computer has none of them. To see what a page does when it does not start, run the program with
+`ZIM_DESKTOP_DEBUG=1`: the page's errors, the content-policy refusals and a short report of what the WebView offers go to the standard error and onto the page
+(never by default: a message can name a page).
 
 ## Not done
 

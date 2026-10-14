@@ -11,12 +11,16 @@ publish = false
 [workspace]
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = "2"
+tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 percent-encoding = "2"
+
+# (to reach the settings of the WebKitGTK view: see `linux_web_features` in main.rs; the version is the one Tauri itself uses)
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2.0.2"
 
 [profile.release]
 opt-level = "s"

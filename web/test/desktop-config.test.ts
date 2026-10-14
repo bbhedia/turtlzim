@@ -32,9 +32,16 @@ describe("the desktop program", () => {
     expect(script).toContain('invoke("save_file", bytes, { headers: { "x-file-name"');
     expect(program).toContain("async fn save_file(");
     expect(program).toContain('.get("x-file-name")');
-    expect(program).toContain("generate_handler![save_file]");
+    expect(program).toContain("generate_handler![save_file, debug_log]");
     // and the program puts the script in the page before the app's own
     expect(program).toContain(".initialization_script(shell_script())");
+  });
+
+  it("switches on, in WebKitGTK, the web storage features that it is built without (OPFS, which the vault needs)", () => {
+    const program = read("../../desktop/src-tauri/src/main.rs");
+    for (const feature of ["StorageAPI", "StorageAPIEstimate", "FileSystem", "FileSystemWritableStream", "AccessHandle"]) expect(program, feature).toContain(`"${feature}"`);
+    expect(program).toContain("webkit_settings_set_feature_enabled");
+    expect(read("../../desktop/src-tauri/Cargo.toml")).toMatch(/cfg\(target_os = "linux"\)'\.dependencies\]\s+webkit2gtk = /);
   });
 
   it("asks the system for nothing that its pages do not need: no remote page, no permission but the basics", () => {
