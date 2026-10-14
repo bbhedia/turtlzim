@@ -60,7 +60,7 @@ Design, threat model, limits and what verifies each claim: `docs/zim-encrypted-n
 | Web storage | `sqlite-wasm-rs` (real `libsqlite3` compiled straight to `wasm32-unknown-unknown`, linked directly into the core's own wasm binary; the OPFS-SAHPool VFS from `sqlite-wasm-vfs` for persistence, in a dedicated Worker) — **not** IndexedDB; core-rs's storage/search layer is real SQL + SQLite FTS4, which IndexedDB can't represent without rebuilding full-text search from scratch. See `docs/wasm-port-plan.md`. |
 | Web networking | `reqwest` upgraded to its async API (already wasm32-native via `fetch` under the hood) — applies to both native and web so the core's public interface stays identical across targets. |
 | Editor / UI | CodeMirror 6 with live Zim-syntax formatting (shared web UI) |
-| Desktop shell | Tauri (Rust host → links the core as a crate) |
+| Desktop shell | Tauri 2 (`desktop/`, `docs/zim-desktop-shell.md`): `web/dist` in the system WebView; installers for Linux (.deb, .rpm, .AppImage) and Windows (NSIS, MSI) built by `.github/workflows/desktop.yml` on every change of the web app. Not a GTK/Qt UI (the editor would be written again) |
 | Mobile shell | Capacitor/webview (built for Android: `mobile/`, `docs/zim-mobile-shell.md`; iOS needs a Mac); core via JNI (Android) + FFI (iOS), not yet: the shell runs the wasm core in its WebView |
 | Sync server | Turtl `server` (Node + Postgres) |
 
@@ -145,9 +145,9 @@ scripts/emulator.sh start|stop|shot # a headless Android 15 emulator (needs /dev
 npm run test:device                # the app in the emulator's WebView (installs the APK; VAULT=1 adds an encrypted notebook)
 cd ../web && scripts/serve.sh restart --host :: --port 8443 --tls --name ADDRESS --download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk   # give the APK out beside the web app
 
-# Desktop (Tauri)
-npm run tauri dev
-npm run tauri build
+# Desktop program (desktop/; docs/zim-desktop-shell.md): Tauri around web/dist; Linux needs `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev patchelf file`
+cd desktop && npm install
+npm run package -- --web            # npm run build in web/, then tauri build -> desktop/out/ (.deb .rpm .AppImage on Linux, .exe .msi on Windows) + SHA256SUMS
 
 # Mobile (Capacitor)
 npx cap sync
@@ -203,6 +203,8 @@ docker compose up                   # Postgres + server (define compose file)
   each, one undo) and holds no table rules; drawing or moving in a table never rewrites its text.
   A UI change is not done until it has been looked at (`npm run screenshots`) and driven in the real
   browser test (`npm run test:browser`); the unit tests cannot see layout, focus or timing.
+- **The desktop program** (`desktop/`) is the same web build in Tauri, not a second UI or branch: `web/dist` goes in as it is, the version is `web/package.json`'s, and what a
+  WebView lacks comes through `window.__zimShell` like on a phone. The CI workflow packs it for Linux and Windows on every change of `web/`, `core/` or `desktop/`.
 - **The app in a native shell** (`mobile/`, `docs/zim-mobile-shell.md`): the web app depends on no shell package. A shell is recognised by
   `window.Capacitor` and gives what a WebView lacks through `window.__zimShell` (`web/src/app/shell.ts`: a hook for saving a file, the version);
   something a browser does by itself and a WebView does not goes through a hook set by `mobile/shell/shell.ts`, never into the web app's imports.

@@ -1,0 +1,26 @@
+[package]
+name = "zim-notebook-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "The Zim notebook web app as a program for Windows and Linux"
+license = "GPL-3.0-or-later"
+publish = false
+
+# Its own workspace: the web toolkit of a computer (WebKitGTK, WebView2) must not enter the core's, whose crates build for wasm and for tests
+# without any of it.
+[workspace]
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+tauri = "2"
+tauri-plugin-dialog = "2"
+percent-encoding = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,0 +1,115 @@
+# The installers for Windows and Linux, built from the web app on every change to it. One job builds the web app (the wasm of the core, the
+# editor, the service worker's list of files) and keeps web/dist; one job per system packs that same web/dist in the Tauri program:
+# Linux .deb, .rpm and .AppImage, Windows .exe (NSIS) and .msi. A tag `v*` also makes a draft release with them. See docs/zim-desktop-shell.md.
+name: desktop
+
+on:
+  push:
+    branches: [master]
+    paths: ["web/**", "core/**", "desktop/**", ".github/workflows/desktop.yml"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            core/turtl-core-rs -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      # (the core's SQLite is C, compiled for wasm32 by clang)
+      - run: sudo apt-get update && sudo apt-get install -y clang llvm
+      - name: the wasm of the format and of the core
+        working-directory: web
+        run: |
+          npm ci
+          npm run wasm
+          npm run core
+      - name: typecheck, unit tests, build
+        working-directory: web
+        run: |
+          npm run typecheck
+          npm run build
+          npm test
+          npm run pwa:check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+
+  desktop:
+    needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+      - name: what WebKitGTK and the bundlers need (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev patchelf file
+      - name: installers
+        working-directory: desktop
+        env:
+          # (the AppImage tools run without FUSE, which a runner does not have)
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          npm ci
+          npm run package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: desktop/out
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: desktop
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: installers
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: installers/*

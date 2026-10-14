@@ -20,6 +20,12 @@ describe("the native shell that the page runs in", () => {
     expect(shellPlatform({ Capacitor: { isNativePlatform: () => true } })).toBe("native");
   });
 
+  it("is the desktop in Tauri, whatever else the page has", () => {
+    expect(shellPlatform({ __TAURI_INTERNALS__: {} })).toBe("desktop");
+    expect(shellPlatform({ __TAURI_INTERNALS__: null })).toBe("desktop");
+    expect(shellHooks({ __TAURI_INTERNALS__: {}, __zimShell: hooks })).toBe(hooks);
+  });
+
   it("gives its hooks in a shell and no hook in a browser, even if a page put some there", () => {
     const shell: ShellWindow = { Capacitor: { getPlatform: () => "android" }, __zimShell: hooks };
     expect(shellHooks(shell)).toBe(hooks);

@@ -1,0 +1,16 @@
+{
+  "name": "zim-notebook-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The Zim notebook web app (../web) as a program for Windows and Linux, with Tauri. See ../docs/zim-desktop-shell.md.",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "tauri": "tauri",
+    "web": "npm --prefix ../web run build",
+    "package": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.2"
+  }
+}

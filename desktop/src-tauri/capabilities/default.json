@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the page may ask of the program: the basics of the window, and the commands of the program itself (save_file).",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
