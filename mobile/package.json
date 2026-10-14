@@ -1,0 +1,28 @@
+{
+  "name": "zim-notebook-mobile",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "The Zim notebook web app (../web) in a Capacitor shell for Android. See ../docs/zim-mobile-shell.md.",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "prepare:web": "node scripts/prepare.mjs",
+    "sync": "node scripts/prepare.mjs && cap sync android",
+    "apk": "node scripts/apk.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/filesystem": "^8.1.4",
+    "@capacitor/share": "^8.0.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
+    "@types/node": "^24.19.1",
+    "esbuild": "^0.25.0",
+    "playwright-core": "^1.64.0",
+    "typescript": "^7.0.2"
+  }
+}

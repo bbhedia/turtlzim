@@ -61,7 +61,7 @@ Design, threat model, limits and what verifies each claim: `docs/zim-encrypted-n
 | Web networking | `reqwest` upgraded to its async API (already wasm32-native via `fetch` under the hood) — applies to both native and web so the core's public interface stays identical across targets. |
 | Editor / UI | CodeMirror 6 with live Zim-syntax formatting (shared web UI) |
 | Desktop shell | Tauri (Rust host → links the core as a crate) |
-| Mobile shell | Capacitor/webview; core via JNI (Android) + FFI (iOS) |
+| Mobile shell | Capacitor/webview (built for Android: `mobile/`, `docs/zim-mobile-shell.md`; iOS needs a Mac); core via JNI (Android) + FFI (iOS), not yet: the shell runs the wasm core in its WebView |
 | Sync server | Turtl `server` (Node + Postgres) |
 
 ---
@@ -138,6 +138,12 @@ npm run screenshots <dir>           # pictures of the app to look at (light, dar
 scripts/serve.sh start --host :: --port 8080   # serve web/dist in the background (see docs/zim-editor-plan.md: trying it from another machine)
 scripts/serve.sh start --host :: --port 8443 --tls --name ADDRESS   # https for encrypted notebooks from another machine (docs/zim-pwa.md: trusting its certificate)
 
+# Mobile shell, Android (mobile/; docs/zim-mobile-shell.md): a Capacitor project around web/dist; JDK 21 + Android SDK in ~/android, no root
+cd mobile && npm install
+npm run apk                         # prepare www/ from web/dist (npm run build in web/ first), cap sync, gradle -> mobile/out/zim-notebook-debug.apk
+scripts/emulator.sh start|stop|shot # a headless Android 15 emulator (needs /dev/kvm) to try the app in a real WebView
+cd ../web && scripts/serve.sh restart --host :: --port 8443 --tls --name ADDRESS --download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk   # give the APK out beside the web app
+
 # Desktop (Tauri)
 npm run tauri dev
 npm run tauri build
@@ -196,6 +202,12 @@ docker compose up                   # Postgres + server (define compose file)
   each, one undo) and holds no table rules; drawing or moving in a table never rewrites its text.
   A UI change is not done until it has been looked at (`npm run screenshots`) and driven in the real
   browser test (`npm run test:browser`); the unit tests cannot see layout, focus or timing.
+- **The app in a native shell** (`mobile/`, `docs/zim-mobile-shell.md`): the web app depends on no shell package. A shell is recognised by
+  `window.Capacitor` and gives what a WebView lacks through `window.__zimShell` (`web/src/app/shell.ts`: a hook for saving a file, the version);
+  something a browser does by itself and a WebView does not goes through a hook set by `mobile/shell/shell.ts`, never into the web app's imports.
+  In a shell there is no service worker (the code is the app), the page carries the web server's content policy in a `<meta>`, and the manifest has
+  no permission it does not use (no `INTERNET` until sync exists) and no backup. Asked 2026-10-13 whether Flutter would be better for the native
+  apps: no (the editor would be rewritten), the shell it is.
 - **Writing on a phone** (`docs/zim-editor-plan.md`, *Writing on a phone*): the formatting bar runs the commands the keys
   run (no second rule for anything), never takes the focus from the text (a press that did would put the keyboard
   away), and keeps nothing but whether it is wanted (`zim:formatbar`). On a touch screen a tap follows a link only while the

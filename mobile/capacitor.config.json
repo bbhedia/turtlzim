@@ -1,0 +1,11 @@
+{
+  "appId": "org.zimnotebook.app",
+  "appName": "Zim Notebook",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+# what prepare.mjs makes from ../web/dist, and what the APK build makes
+www/
+out/
+android/.gradle/
+android/build/
+android/app/build/
+android/capacitor-cordova-android-plugins/
+android/local.properties
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+*.keystore

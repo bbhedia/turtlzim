@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Zim Notebook</string>
+    <string name="title_activity_main">Zim Notebook</string>
+    <string name="package_name">org.zimnotebook.app</string>
+    <string name="custom_url_scheme">org.zimnotebook.app</string>
+</resources>
