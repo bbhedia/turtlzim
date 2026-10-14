@@ -11,7 +11,8 @@
 //   node scripts/serve.mjs --host 0.0.0.0 --tls         # https, with a certificate it makes itself
 //
 // Options: --host, --port, --dir (default: ../dist), --auth user:password (or ZIM_WEB_AUTH, which
-// keeps the password out of the process list), --tls (or --cert FILE --key FILE), --pid-file path,
+// keeps the password out of the process list), --tls (or --cert FILE --key FILE), --download /ADDRESS=FILE
+// (a file from outside dist, such as the app for a phone, given out at that one address), --pid-file path,
 // --help.
 //
 // Encrypted notebooks need a **secure page**: https, or localhost. From another machine that means
@@ -49,12 +50,14 @@ const TYPES = {
   // Browsers compile wasm while it downloads only if it is served with this exact type.
   ".wasm": "application/wasm",
 };
+// (what a file given out with --download is, by its name: the app for an Android phone is asked for as an app, not shown)
+const DOWNLOAD_TYPES = { ".apk": "application/vnd.android.package-archive", ".zip": "application/zip" };
 const COMPRESSIBLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".webmanifest", ".txt", ".svg", ".wasm"]);
 
 // What the editor needs and no more. 'wasm-unsafe-eval' lets the page compile its own WebAssembly;
 // CodeMirror adds <style> elements and style attributes at run time, hence 'unsafe-inline' for
 // styles (scripts stay strict: no inline script, no eval).
-const CONTENT_SECURITY_POLICY = [
+export const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
@@ -116,10 +119,14 @@ function locate(rootReal, urlPath) {
  * @param {{ key: Buffer | string, cert: Buffer | string }} [options.tls] serve over https with this key and certificate
  * @param {Buffer | string} [options.authority] the certificate of the authority that signed `tls` (public: it is
  *   given out at /ca.pem, for a computer to be asked to trust)
+ * @param {Array<{ path: string, file: string }>} [options.downloads] files from outside `dir`, each given out at one
+ *   address (`/zim-notebook.apk`) as a download. The address is matched as a whole, and nothing else of the file's
+ *   folder can be reached through it.
  * @returns {import("node:http").Server}
  */
-export function createStaticServer({ dir, auth, log = () => {}, tls, authority }) {
+export function createStaticServer({ dir, auth, log = () => {}, tls, authority, downloads = [] }) {
   const rootReal = realpathSync(resolve(dir));
+  const given = new Map(downloads.map(({ path, file }) => [path, resolve(file)]));
   const expected = auth ? digest(`Basic ${Buffer.from(auth).toString("base64")}`) : null;
   const compressed = new Map(); // "file:mtime:size" -> gzip bytes; the app is a few files, so this stays small
 
@@ -145,7 +152,19 @@ export function createStaticServer({ dir, auth, log = () => {}, tls, authority }
       // (as a certificate to install: a phone offers to install what is sent as this type, and a computer saves it as a .crt)
       return reply(200, { "content-type": "application/x-x509-ca-cert", "content-disposition": 'attachment; filename="zim-web-authority.crt"', "cache-control": "no-cache" }, authority);
     }
-    const found = locate(rootReal, target.split(/[?#]/, 1)[0]);
+    const addressed = target.split(/[?#]/, 1)[0];
+    const handedOut = given.get(addressed);
+    if (handedOut !== undefined) {
+      let body;
+      try {
+        body = readFileSync(handedOut);
+      } catch {
+        return reply(404, { "content-type": "text/plain" }, "Not found\n");
+      }
+      const name = addressed.slice(addressed.lastIndexOf("/") + 1);
+      return reply(200, { "content-type": DOWNLOAD_TYPES[extname(name)] ?? "application/octet-stream", "content-disposition": `attachment; filename="${name}"`, "content-length": body.length, "cache-control": "no-cache" }, body);
+    }
+    const found = locate(rootReal, addressed);
     if (!found) return reply(404, { "content-type": "text/plain" }, "Not found\n");
 
     const { file, stat } = found;
@@ -310,12 +329,26 @@ Serves the built editor (web/dist) and nothing else.
                      localhost and every address of this machine.
   --cert FILE --key FILE
                      serve https with your own certificate instead
+  --download /ADDRESS=FILE
+                     also give out FILE (from anywhere) at this one address, as a download:
+                     the app for a phone, --download /zim-notebook.apk=mobile/out/zim-notebook-debug.apk
+                     (repeat it for each)
   --pid-file PATH    write the process id here while running
   --help             this text
 `;
 
+/** `/zim-notebook.apk=mobile/out/app.apk` as the address and the file it gives out. */
+function downloadOption(text) {
+  const at = text.indexOf("=");
+  const path = text.slice(0, at);
+  if (at < 0 || !/^\/[^/?#\\\s][^?#\\\s]*$/.test(path) || path.split("/").some((part) => part === ".." || part === ".")) throw new Error("--download must look like /address=file (an address that starts with / and has no .. in it)");
+  const file = text.slice(at + 1);
+  if (!file) throw new Error("--download must look like /address=file");
+  return { path, file: resolve(file) };
+}
+
 function parseArguments(argv) {
-  const options = { host: "127.0.0.1", port: 8080, dir: fileURLToPath(new URL("../dist", import.meta.url)), auth: process.env.ZIM_WEB_AUTH, pidFile: undefined, tls: false, cert: undefined, key: undefined, names: [] };
+  const options = { host: "127.0.0.1", port: 8080, dir: fileURLToPath(new URL("../dist", import.meta.url)), auth: process.env.ZIM_WEB_AUTH, pidFile: undefined, tls: false, cert: undefined, key: undefined, names: [], downloads: [] };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const value = () => {
@@ -330,6 +363,7 @@ function parseArguments(argv) {
     else if (flag === "--name") options.names.push(value());
     else if (flag === "--cert") options.cert = resolve(value());
     else if (flag === "--key") options.key = resolve(value());
+    else if (flag === "--download") options.downloads.push(downloadOption(value()));
     else if (flag === "--pid-file") options.pidFile = resolve(value());
     else if (flag === "--help" || flag === "-h") options.help = true;
     else throw new Error(`unknown option ${flag} (try --help)`);
@@ -370,7 +404,7 @@ function main() {
     console.error(`serve: ${error.message}`);
     process.exit(1);
   }
-  const server = createStaticServer({ dir: options.dir, auth: options.auth, tls: tls && { key: tls.key, cert: tls.cert }, authority: options.tls ? tls.authority : undefined, log: (line) => console.log(`${new Date().toISOString()} ${line}`) });
+  const server = createStaticServer({ dir: options.dir, auth: options.auth, tls: tls && { key: tls.key, cert: tls.cert }, authority: options.tls ? tls.authority : undefined, downloads: options.downloads, log: (line) => console.log(`${new Date().toISOString()} ${line}`) });
   server.on("error", (error) => {
     console.error(error.code === "EADDRINUSE" ? `serve: port ${options.port} is already in use on ${options.host}` : `serve: ${error.message}`);
     process.exit(1);
@@ -379,6 +413,7 @@ function main() {
     const port = server.address().port; // the real one when asked for 0
     console.log(`Serving ${options.dir}${options.auth ? " (password protected)" : ""}${tls ? " over https" : ""}`);
     for (const url of urlsFor(options.host, port, tls ? "https" : "http")) console.log(`  ${url}`);
+    for (const { path, file } of options.downloads) console.log(`Also given out, as a download: ${path} (${file}${existsSync(file) ? "" : ", which is not there yet"})`);
     if (options.tls) {
       console.log(`The certificate is for ${tls.names.join(", ")}, signed by an authority that exists only for it: its key was destroyed when it had signed.`);
       console.log("A browser that does not know that authority warns once (Advanced > Proceed): the page is then secure enough for encrypted notebooks, but the browser will not run the offline app for it.");

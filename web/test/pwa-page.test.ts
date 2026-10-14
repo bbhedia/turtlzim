@@ -63,7 +63,7 @@ const version = (running: string, offered: { id: string; files?: number; bytes?:
   ...extra,
 });
 
-function pretend(options: { secure?: boolean; scriptUrl?: string | undefined; noWorkers?: boolean } = {}) {
+function pretend(options: { secure?: boolean; scriptUrl?: string | undefined; noWorkers?: boolean; native?: string | null } = {}) {
   const container = new FakeContainer();
   const events = new EventTarget();
   const host: PwaHost = {
@@ -71,6 +71,7 @@ function pretend(options: { secure?: boolean; scriptUrl?: string | undefined; no
     secure: options.secure ?? true,
     scriptUrl: "scriptUrl" in options ? options.scriptUrl : "https://app.test/sw.js",
     events,
+    native: options.native ?? null,
   };
   const pwa = new Pwa(host);
   const restarts: number[] = [];
@@ -99,6 +100,18 @@ describe("where the app can't be saved on the device", () => {
       expect(container.registered, what).toBeNull();
       pwa.stop();
     }
+  });
+
+  it("is the installed app in a native shell: it registers no worker, offers no install, and says that its code is the app's", async () => {
+    const { container, events, pwa } = pretend({ native: "android" });
+    await pwa.start();
+    expect(pwa.state.phase).toBe("native");
+    expect(pwa.state.reason).toMatch(/installed app: its code is part of the app/);
+    expect(container.registered).toBeNull();
+    expect(container.startedMessages).toBe(false);
+    events.dispatchEvent(new Event("beforeinstallprompt"));
+    expect(pwa.canInstall).toBe(false);
+    pwa.stop();
   });
 
   it("says that it could not be saved when the browser refuses the worker", async () => {

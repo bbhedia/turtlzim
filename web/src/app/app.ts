@@ -29,6 +29,7 @@ import { clear, h, highlighted } from "./dom";
 import { TagsPanel } from "./tags";
 import { TreeView } from "./tree-view";
 import { showScreenDetails } from "./screen-details";
+import { shellHooks } from "./shell";
 import type { ScreenDetails } from "./screen-details";
 import { trackVisibleHeight } from "./viewport";
 
@@ -854,8 +855,13 @@ export class App {
     this.saveFile(fileName, blob);
   }
 
-  /** Hand a file to the browser to save, as it is. */
+  /** Hand a file to the browser to save, as it is; in an app of the phone's store, to the shell, which has the system's own sheet for it. */
   private saveFile(fileName: string, blob: Blob): void {
+    const hand = shellHooks().saveFile;
+    if (hand) {
+      hand(fileName, blob).catch((error: unknown) => this.say(`Couldn't hand over ${fileName}: ${error instanceof Error ? error.message : String(error)}`));
+      return;
+    }
     const link = h("a", { href: URL.createObjectURL(blob), download: fileName });
     document.body.append(link);
     link.click();
@@ -1317,6 +1323,8 @@ export class App {
     if (!pwa) return;
     const { phase, reason, running, files, bytes, offer, replaced, refused } = pwa.state;
     const lines: Array<string | HTMLElement> = [];
+    const shell = shellHooks();
+    if (phase === "native" && shell.version) lines.push(h("p", {}, "Version ", h("code", { text: shell.version })));
     if (phase === "ready" && running) {
       lines.push(h("p", {}, "Version ", h("code", { text: running })));
       lines.push(`This app is saved on this device (${count(files, "file")}, ${megabytes(bytes)}): it starts without the network, and its code changes only when you approve an update.`);
@@ -1325,7 +1333,7 @@ export class App {
     if (offer) lines.push(`A new version (${offer.id}) is ready: choose “Update the app” in the notebook menu to see what changes.`);
     if (refused) lines.push("A new version was found, but its files were not what it says it is made of, so it was not installed.");
     if (replaced) lines.push(`The version that you had (${replaced}) could not be restored on this device, and the server no longer had it, so the one that runs now took its place.`);
-    lines.push(h("p", {}, "The version is a fingerprint of every file of the app and of the code that keeps it as it is: two copies that show the same one are the same app. (A server that wanted to cheat could show any version: to check what it serves, without this page in the way, run ", h("code", { text: "node scripts/pwa.mjs --remote ADDRESS" }), " from the web folder.)"));
+    if (phase !== "native") lines.push(h("p", {}, "The version is a fingerprint of every file of the app and of the code that keeps it as it is: two copies that show the same one are the same app. (A server that wanted to cheat could show any version: to check what it serves, without this page in the way, run ", h("code", { text: "node scripts/pwa.mjs --remote ADDRESS" }), " from the web folder.)"));
     await showDialog({
       title: "About this version",
       body: lines,

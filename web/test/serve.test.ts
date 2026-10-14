@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { certificateName, createStaticServer, selfSignedCertificate, urlsFor } from "../scripts/serve.mjs";
+import { CONTENT_SECURITY_POLICY, certificateName, createStaticServer, selfSignedCertificate, urlsFor } from "../scripts/serve.mjs";
 
 // A site in a temp directory next to a secret that is *not* in it: nothing may ever return the secret.
 const SECRET = "the secret outside the site";
@@ -139,6 +139,60 @@ describe("what it serves", () => {
   });
 });
 
+describe("a file given out from outside the site", () => {
+  const given = (app: string, options: { auth?: string } = {}) => {
+    const server = createStaticServer({ dir: site, downloads: [{ path: "/zim-notebook.apk", file: app }], ...options });
+    return new Promise<number>((resolve) =>
+      server.listen(0, "127.0.0.1", () => {
+        servers.push(server);
+        resolve((server.address() as AddressInfo).port);
+      }),
+    );
+  };
+
+  it("is a download at the one address it was given, and nothing else of its folder is reachable through it", async () => {
+    const app = join(outside, "zim-notebook.apk");
+    writeFileSync(app, Buffer.from("PK-an-app"));
+    const port = await given(app);
+    const reply = await request(port, "/zim-notebook.apk");
+    expect(reply.status).toBe(200);
+    expect(reply.body.toString()).toBe("PK-an-app");
+    expect(reply.headers["content-type"]).toBe("application/vnd.android.package-archive");
+    expect(reply.headers["content-disposition"]).toBe('attachment; filename="zim-notebook.apk"');
+    expect(reply.headers["content-length"]).toBe("9");
+    expect(reply.headers["cache-control"]).toBe("no-cache");
+    expect(reply.headers["content-security-policy"]).toBe(CONTENT_SECURITY_POLICY);
+    expect((await request(port, "/zim-notebook.apk?download=1")).status).toBe(200);
+    const head = await request(port, "/zim-notebook.apk", { method: "HEAD" });
+    expect([head.status, head.body.length, head.headers["content-length"]]).toEqual([200, 0, "9"]);
+    // (that address as a whole: not under it, not in another case, and not the folder that the file is in)
+    for (const path of ["/zim-notebook.apk/", "/zim-notebook.apk/x", "/ZIM-NOTEBOOK.APK", "/secret.txt", "/%2e%2e/zim-notebook.apk", "/site/../zim-notebook.apk"]) expect((await request(port, path)).status, path).toBe(404);
+    // the site is as it was
+    expect((await request(port, "/")).status).toBe(200);
+  });
+
+  it("is found when the file is made, and goes when it does (the app is built after the server starts, and again after that)", async () => {
+    const app = join(outside, "built-later.apk");
+    const port = await given(app);
+    expect((await request(port, "/zim-notebook.apk")).status).toBe(404);
+    writeFileSync(app, Buffer.from("PK-first"));
+    expect((await request(port, "/zim-notebook.apk")).body.toString()).toBe("PK-first");
+    writeFileSync(app, Buffer.from("PK-a-newer-one"));
+    expect((await request(port, "/zim-notebook.apk")).body.toString()).toBe("PK-a-newer-one");
+    rmSync(app);
+    expect((await request(port, "/zim-notebook.apk")).status).toBe(404);
+  });
+
+  it("asks for the password first, like the rest", async () => {
+    const app = join(outside, "protected.apk");
+    writeFileSync(app, Buffer.from("PK-private"));
+    const port = await given(app, { auth: "me:secret" });
+    expect((await request(port, "/zim-notebook.apk")).status).toBe(401);
+    const authorised = await request(port, "/zim-notebook.apk", { headers: { authorization: `Basic ${Buffer.from("me:secret").toString("base64")}` } });
+    expect([authorised.status, authorised.body.toString()]).toEqual([200, "PK-private"]);
+  });
+});
+
 describe("what it refuses", () => {
   const attempts = [
     "/../secret.txt",
@@ -242,6 +296,14 @@ describe("the command line", () => {
     expect(run("--bogus").stderr).toContain("unknown option --bogus");
     expect(run("--host").stderr).toContain("needs a value");
     expect(run("--auth", "nopassword").stderr).toContain("user:password");
+  });
+
+  it("takes --download as an address and a file, and refuses anything else", () => {
+    for (const bad of ["/app.apk", "app.apk=file", "/=file", "/a/../b=file", "/a b=file", "/app.apk=", "//app.apk=file", "/a?x=file"]) {
+      const result = run("--download", bad);
+      expect([bad, result.status, result.stderr.includes("--download must look like")]).toEqual([bad, 2, true]);
+    }
+    expect(run("--download").stderr).toContain("needs a value");
   });
 
   it("won't start without a build to serve", () => {

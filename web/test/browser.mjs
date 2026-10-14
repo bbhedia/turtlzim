@@ -4636,6 +4636,59 @@ try {
     await about.getByRole("button", { name: "Close" }).click();
   });
 
+  await app(
+    "in an app of the phone's store (a native shell) no worker is registered, the About dialog says that the code is the app's, and files are handed to the shell, not downloaded",
+    {
+      serviceWorkers: "allow",
+      beforeLoad: () => {
+        window.Capacitor = { getPlatform: () => "android", isNativePlatform: () => true };
+        window.__zimShell = {
+          version: "0.1.0 · web build test",
+          saveFile: async (name, blob) => {
+            const head = new Uint8Array(await blob.slice(0, 2).arrayBuffer());
+            (window.__handedOver ??= []).push({ name, type: blob.type, size: blob.size, head: [...head] });
+          },
+        };
+      },
+    },
+    async (ui) => {
+      const { page } = ui;
+      let downloads = 0;
+      page.on("download", () => downloads++);
+      await ui.openMenu();
+      assertEqual(await ui.menu().getByRole("menuitem", { name: "Install the app…" }).count(), 0, "there is nothing to install");
+      await ui.menu().getByRole("menuitem", { name: "About this version…" }).click();
+      const about = topDialog(page);
+      await about.waitFor();
+      const said = await about.innerText();
+      assert(said.includes("0.1.0 · web build test"), `it says which version this is (${said})`);
+      assert(said.includes("installed app: its code is part of the app"), `and that the code is the app's (${said})`);
+      assert(!said.includes("fingerprint"), "it says nothing of a worker's fingerprint");
+      assertEqual(await about.getByRole("button", { name: "Look for a new version" }).count(), 0, "and there is no new version to look for");
+      await about.getByRole("button", { name: "Close" }).click();
+      assertEqual(await page.evaluate(async () => (await navigator.serviceWorker.getRegistrations()).length), 0, "no worker was registered");
+      // a file goes to the shell, which has the system's own sheet for it, and the browser is asked for nothing
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "Export notebook (zip)" }).click();
+      await page.waitForFunction(() => window.__handedOver?.length === 1);
+      await page.getByRole("button", { name: "Download", exact: true }).click();
+      await page.waitForFunction(() => window.__handedOver?.length === 2);
+      const [zip, text] = await page.evaluate(() => window.__handedOver);
+      assert(/\.zip$/.test(zip.name) && zip.type === "application/zip" && zip.size > 100 && zip.head[0] === 0x50 && zip.head[1] === 0x4b, `the zip was handed over as a zip (${JSON.stringify(zip)})`);
+      assert(/\.txt$/.test(text.name) && text.type === "text/plain;charset=utf-8", `and the page as text (${JSON.stringify(text)})`);
+      assertEqual(downloads, 0, "the browser downloaded nothing");
+      // a shell that could not hand a file over says so
+      await page.evaluate(() => {
+        window.__zimShell.saveFile = async () => {
+          throw new Error("no room left");
+        };
+      });
+      await page.getByRole("button", { name: "Download", exact: true }).click();
+      await page.waitForFunction(() => document.querySelector("#status")?.textContent?.includes("Couldn't hand over"));
+      assert((await ui.status()).includes("no room left"), `and why (${await ui.status()})`);
+    },
+  );
+
   // ==========================================================================================
   // The certificate that `serve.sh --tls` makes: with the warning clicked through, and trusted
   // ==========================================================================================

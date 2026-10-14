@@ -2,6 +2,7 @@
 // worker, learns which version of the app is running and whether another is installed and waiting for the
 // person to approve it, and starts the page again when the version has changed. What the person sees of it
 // is in app/app.ts.
+import { shellPlatform } from "../app/shell";
 
 /** A version that is installed and waits to be approved. */
 export interface Offer {
@@ -12,7 +13,8 @@ export interface Offer {
   changed: string[];
 }
 
-export type Phase = "unsupported" | "starting" | "installing" | "ready" | "failed";
+/** `native`: the page runs in an app of the phone's store, whose code is part of the app: no worker keeps it. */
+export type Phase = "unsupported" | "native" | "starting" | "installing" | "ready" | "failed";
 
 export interface PwaState {
   phase: Phase;
@@ -37,6 +39,8 @@ export interface PwaHost {
   scriptUrl: string | undefined;
   /** For `beforeinstallprompt` and `appinstalled`. */
   events: EventTarget;
+  /** The platform of the native shell that the page runs in (`android`, `ios`), if it does. */
+  native?: string | null;
 }
 
 /** Chromium's way of offering to install the app. */
@@ -136,7 +140,9 @@ export class Pwa {
   }
 
   private async begin(): Promise<void> {
-    const { serviceWorker, secure, scriptUrl, events } = this.host;
+    const { serviceWorker, secure, scriptUrl, events, native } = this.host;
+    // (an app of the phone's store has its code in the app, which only the store's update changes: a worker would keep a second copy)
+    if (native) return this.set({ phase: "native", reason: "This is the installed app: its code is part of the app, and it changes only when the app itself is updated." });
     const listen = (target: EventTarget, type: string, listener: (event: Event) => void) => {
       target.addEventListener(type, listener);
       this.stops.push(() => target.removeEventListener(type, listener));
@@ -290,5 +296,6 @@ export function browserHost(): PwaHost {
     secure: window.isSecureContext,
     scriptUrl: import.meta.env.PROD ? new URL("sw.js", document.baseURI).href : undefined,
     events: window,
+    native: shellPlatform(),
   };
 }

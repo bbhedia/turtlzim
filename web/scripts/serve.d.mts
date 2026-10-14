@@ -1,6 +1,8 @@
 import type { Server } from "node:http";
 
-export function createStaticServer(options: { dir: string; auth?: string; log?: (line: string) => void; tls?: { key: Buffer | string; cert: Buffer | string }; authority?: Buffer | string }): Server;
+export function createStaticServer(options: { dir: string; auth?: string; log?: (line: string) => void; tls?: { key: Buffer | string; cert: Buffer | string }; authority?: Buffer | string; downloads?: Array<{ path: string; file: string }> }): Server;
+/** What the page may load and do: the server sends it as a header, and the app's shell (mobile/) puts the same in the page. */
+export const CONTENT_SECURITY_POLICY: string;
 export function urlsFor(host: string, port: number, scheme?: "http" | "https"): string[];
 export function certificateName(name: string): string;
 export function selfSignedCertificate(
