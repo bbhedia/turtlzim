@@ -9,7 +9,8 @@
     "prepare:web": "node scripts/prepare.mjs",
     "sync": "node scripts/prepare.mjs && cap sync android",
     "apk": "node scripts/apk.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:device": "node test/device.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

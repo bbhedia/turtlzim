@@ -95,7 +95,9 @@ Then open `https://ADDRESS:8443/zim-notebook.apk` on the phone (or copy the file
   emulator's two emulated cores; a phone is much faster (`npm run measure:unlock` has the numbers for a browser), but it has not been measured on one.
   These were driven by hand through the WebView's DevTools socket (`adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>`, then
   a small CDP client: Playwright's `connectOverCDP` does not take a WebView, `Browser.setDownloadBehavior` is not supported), with `adb` for taps,
-  keys and screenshots (`mobile/scripts/emulator.sh`). They are not an automated suite yet.
+  keys and screenshots (`mobile/scripts/emulator.sh`). They are now `npm run test:device` in `mobile/` (12 checks: start, hooks, no worker, no network
+  permission, keyboard and bar, save and restart, back twice, the share sheet; `VAULT=1` adds the encrypted notebook, minutes on an emulator). Removing the back
+  handling from `shell.ts` makes two of them fail.
 - The APK's manifest (`aapt2 dump xmltree`): no `INTERNET` permission, `allowBackup=false`, `adjustResize`, target SDK 36.
 - `web/test/shell.test.ts`, `pwa-page.test.ts` (the native phase), `mobile-page.test.ts` (the page of the shell: policy after the charset, the shell's
   script before the app's), `serve.test.ts` (a file given out at one address), the browser scenario "in an app of the phone's store…" (Chromium,

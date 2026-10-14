@@ -142,6 +142,7 @@ scripts/serve.sh start --host :: --port 8443 --tls --name ADDRESS   # https for 
 cd mobile && npm install
 npm run apk                         # prepare www/ from web/dist (npm run build in web/ first), cap sync, gradle -> mobile/out/zim-notebook-debug.apk
 scripts/emulator.sh start|stop|shot # a headless Android 15 emulator (needs /dev/kvm) to try the app in a real WebView
+npm run test:device                # the app in the emulator's WebView (installs the APK; VAULT=1 adds an encrypted notebook)
 cd ../web && scripts/serve.sh restart --host :: --port 8443 --tls --name ADDRESS --download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk   # give the APK out beside the web app
 
 # Desktop (Tauri)
