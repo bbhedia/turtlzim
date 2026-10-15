@@ -119,12 +119,14 @@ function locate(rootReal, urlPath) {
  * @param {{ key: Buffer | string, cert: Buffer | string }} [options.tls] serve over https with this key and certificate
  * @param {Buffer | string} [options.authority] the certificate of the authority that signed `tls` (public: it is
  *   given out at /ca.pem, for a computer to be asked to trust)
+ * @param {(req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => Promise<boolean> | boolean} [options.api] answers what is asked at `/api/`
+ *   (the account server, server/): it is called first, with the security headers already on the answer, and says whether it answered
  * @param {Array<{ path: string, file: string }>} [options.downloads] files from outside `dir`, each given out at one
  *   address (`/zim-notebook.apk`) as a download. The address is matched as a whole, and nothing else of the file's
  *   folder can be reached through it.
  * @returns {import("node:http").Server}
  */
-export function createStaticServer({ dir, auth, log = () => {}, tls, authority, downloads = [] }) {
+export function createStaticServer({ dir, auth, log = () => {}, tls, authority, downloads = [], api }) {
   const rootReal = realpathSync(resolve(dir));
   const given = new Map(downloads.map(({ path, file }) => [path, resolve(file)]));
   const expected = auth ? digest(`Basic ${Buffer.from(auth).toString("base64")}`) : null;
@@ -140,6 +142,20 @@ export function createStaticServer({ dir, auth, log = () => {}, tls, authority, 
 
     if (expected && !timingSafeEqual(digest(req.headers.authorization ?? ""), expected)) {
       return reply(401, { "www-authenticate": 'Basic realm="Zim editor", charset="UTF-8"', "content-type": "text/plain" }, "Authentication required\n");
+    }
+    if (api && /^\/api(\/|\?|#|$)/.test(req.url ?? "")) {
+      for (const [name, value] of Object.entries(SECURITY_HEADERS)) res.setHeader(name, value);
+      Promise.resolve(api(req, res)).then(
+        (handled) => {
+          if (!handled && !res.headersSent) reply(404, { "content-type": "text/plain" }, "Not found\n");
+          else log(`${remote} ${req.method} ${req.url?.split("?")[0]} ${res.statusCode}`);
+        },
+        () => {
+          if (!res.headersSent) reply(500, { "content-type": "text/plain" }, "Error\n");
+          else res.end();
+        },
+      );
+      return;
     }
     if (req.method !== "GET" && req.method !== "HEAD") {
       return reply(405, { allow: "GET, HEAD", "content-type": "text/plain" }, "Method not allowed\n");
