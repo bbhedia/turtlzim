@@ -5,14 +5,17 @@
 // site's own scripts can add, and an `Origin` that is this site's); a cookie that a script can read (it is HttpOnly); one that is sent along to other sites (SameSite) or over plain
 // http (Secure, and the `__Host-` name that a browser only accepts with Secure, Path=/ and no Domain); a body that is huge; and answers that are kept by a cache.
 import { AccountError } from "./accounts.mjs";
-import { Sync } from "./sync.mjs";
+import { Connectors, DRIVERS, validDir } from "./connectors/index.mjs";
+import { Sync, validPath } from "./sync.mjs";
 
 const MAX_BODY = 16 * 1024;
 /** A notebook is sent whole, as base64: the quota (1 MB) and a third more. */
 const MAX_SYNC_BODY = 2 * 1024 * 1024;
+/** What is sent to a connected service in one request (base64: a third more than the files). */
+const MAX_CONNECTOR_BODY = 12 * 1024 * 1024;
 const NONCE_SECONDS = 600;
 
-export function createApi({ accounts, oauth, config, log = () => {}, sync = new Sync({ db: accounts.db }) }) {
+export function createApi({ accounts, oauth, config, log = () => {}, sync = new Sync({ db: accounts.db }), connectors = new Connectors({ db: accounts.db, config }) }) {
   const prefix = config.secure ? "__Host-" : "";
   const SESSION = `${prefix}zim`;
   const NONCE = `${prefix}zim-oauth`;
@@ -142,6 +145,37 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
         }
         return void send(res, 405, { error: "Not that way." }, { allow: "GET, PUT, DELETE" });
       }
+      const connectorRoute = /^\/api\/connectors(?:\/(\d{1,9})(?:\/(list|read|write))?)?$/.exec(route);
+      if (connectorRoute) {
+        const found = sessionOf(req);
+        if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
+        const userId = found.user.id;
+        const id = connectorRoute[1] ? Number(connectorRoute[1]) : null;
+        const action = connectorRoute[2];
+        if (get && id === null) return void send(res, 200, { connectors: connectors.list(userId), services: Object.values(DRIVERS).map((d) => ({ kind: d.kind, label: d.label })) });
+        if (get) return void send(res, 405, { error: "Not that way." }, { allow: "POST, DELETE" });
+        checkSameSite(req);
+        if (id === null && method === "POST") {
+          accounts.limit(`connector:add:${userId}`, 10, 3600);
+          const body = await readJson(req);
+          return void send(res, 200, await connectors.add(userId, body.kind, body.label, body.settings));
+        }
+        if (id !== null && !action && method === "DELETE") return void send(res, 200, connectors.remove(userId, id));
+        if (id !== null && action && method === "POST") {
+          accounts.limit(`connector:io:${userId}`, 600, 600);
+          const body = await readJson(req, MAX_CONNECTOR_BODY);
+          if (!validDir(body.dir)) throw new AccountError("That is not a folder name that can be used.", 400, { code: "bad-dir" });
+          if (action === "list") return void send(res, 200, await connectors.files(userId, id, body.dir));
+          if (action === "read") return void send(res, 200, await connectors.read(userId, id, body.dir));
+          const put = Array.isArray(body.put) ? body.put : [];
+          const remove = Array.isArray(body.remove) ? body.remove : [];
+          if (put.length > 2000 || remove.length > 2000 || typeof body.baseVersion !== "string") throw new AccountError("That change is not valid.", 400, { code: "bad-files" });
+          for (const file of put) if (!file || !validPath(file.path) || typeof file.base64 !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.base64)) throw new AccountError("A file of the notebook is not valid.", 400, { code: "bad-files" });
+          for (const path of remove) if (!validPath(path)) throw new AccountError("A file of the notebook is not valid.", 400, { code: "bad-files" });
+          return void send(res, 200, await connectors.write(userId, id, body.dir, body.baseVersion, { put, remove }));
+        }
+        return void send(res, 405, { error: "Not that way." }, { allow: "GET, POST, DELETE" });
+      }
       const oauthRoute = /^\/api\/oauth\/([a-z]+)\/(start|callback)$/.exec(route);
       if (oauthRoute && get) {
         const [, provider, step] = oauthRoute;
@@ -210,7 +244,7 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
       }
     } catch (error) {
       if (error instanceof AccountError) {
-        return void send(res, error.status, { error: error.message, ...(error.extra.code ? { code: error.extra.code } : {}), ...(error.extra.retryAfter ? { retryAfter: error.extra.retryAfter } : {}), ...(error.extra.revision !== undefined ? { revision: error.extra.revision } : {}), ...(error.extra.quotaBytes ? { usedBytes: error.extra.usedBytes, quotaBytes: error.extra.quotaBytes } : {}) }, error.extra.retryAfter ? { "retry-after": String(error.extra.retryAfter) } : {});
+        return void send(res, error.status, { error: error.message, ...(error.extra.code ? { code: error.extra.code } : {}), ...(error.extra.retryAfter ? { retryAfter: error.extra.retryAfter } : {}), ...(error.extra.revision !== undefined ? { revision: error.extra.revision } : {}), ...(error.extra.version !== undefined ? { version: error.extra.version } : {}), ...(error.extra.quotaBytes ? { usedBytes: error.extra.usedBytes, quotaBytes: error.extra.quotaBytes } : {}) }, error.extra.retryAfter ? { "retry-after": String(error.extra.retryAfter) } : {});
       }
       log(`error: ${error instanceof Error ? error.stack : String(error)}`);
       return void send(res, 500, { error: "Something went wrong on the server." });

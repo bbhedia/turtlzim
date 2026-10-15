@@ -70,6 +70,17 @@ const STEPS = [
     foreign key (user_id, notebook_id) references notebooks (user_id, id) on delete cascade
   );
   `,
+  `
+  create table connectors (
+    id integer primary key,
+    user_id integer not null references users(id) on delete cascade,
+    kind text not null,
+    label text not null,
+    config blob not null,
+    created_at integer not null
+  );
+  create index connectors_by_user on connectors (user_id);
+  `,
 ];
 
 /** Open (and make or bring up to date) the database at `path` (`:memory:` for a test). */
