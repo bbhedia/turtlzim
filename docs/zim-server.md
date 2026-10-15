@@ -3,7 +3,7 @@
 `server/`: a Node 24 program (no framework; `node:sqlite`, `node:crypto`, and `nodemailer` for SMTP) that serves the web app **and** `/api/`, in one
 process. It exists so that a person can have an **account**; an account is optional, and without one nothing changes: notebooks stay on the device.
 Accounts can keep **open notebooks on the server, in clear**, in step with other devices (below; 1 MB per user). A sealed copy of the encrypted notebooks (below) and
-connected services (Nextcloud / WebDAV and a GitHub repository; Dropbox, Google Drive, GitLab are later steps (`docs/zim-cloud-feasibility.md`, roadmap lots 3 to 6). Decided 2026-10-15: Google and GitHub
+connected services (Nextcloud / WebDAV, a GitHub repository and a GitLab project; Dropbox and Google Drive are later steps (`docs/zim-cloud-feasibility.md`, roadmap lots 3 to 6). Decided 2026-10-15: Google and GitHub
 first, a mailed code **only at sign-up**, and run on this server (a VPS later if the project succeeds; the shared hosting idea is dropped).
 
 ## What it does
@@ -110,7 +110,17 @@ and keeps the token sealed like a WebDAV password. A notebook is `<folder>/<titl
   is fetched by A; stop deletes only the notebook's files, the README stays; disconnect forgets the token). **Not tried against the real GitHub**: rate limits (5000 requests an hour; a send makes one request for each changed file plus five), repositories with
   branch protection or required signed commits (the move would be refused), files over 100 MB, a repository that is empty.
 
-- Not done: Dropbox, Google Drive, GitLab (each needs OAuth apps of yours, or a token, and its own driver: the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what they plug into), connecting a service
+### A GitLab project (`server/src/connectors/gitlab.mjs`)
+
+*Connect GitLab project…* takes the host (`gitlab.com`, or a GitLab of the person's own: only a public https address passes the guard above), `group/name`, a branch, a folder and an access token (scope `api`, Developer role; a project
+access token is best). Same model as GitHub: the settings are tested first (project, branch, the role needed to write), the token is sealed, and a send is **one commit** (`POST /repository/commits` with create / update / delete actions, chosen from what
+the branch has) that names the commit it was made on top of (`last_commit_id`), so if the branch moved meanwhile GitLab refuses it and the app asks. Long listings are read page by page; a folder that is not there yet is empty; a file already
+deleted is not deleted twice. The API's address is `https://<host>/api/v4`, changeable only by the operator (`connectorOptions.gitlabApi`).
+Verified by `server/test/gitlab.test.mjs` (a GitLab in memory, listings in pages of two; 8 tests; 11 mutants all caught) and the browser scenario “…kept in a GitLab project…”. **Not tried against a real GitLab** (rate limits, protected
+branches, a project with no commit, the exact words GitLab uses to refuse a stale commit: the conflict is recognised from them, so a GitLab that words it differently would show as an error instead of a question).
+A review of the validators for this found that a repository named `../..` passed for GitHub and GitLab: a dot segment is now refused in both (a test each).
+
+- Not done: Dropbox, Google Drive (each needs an OAuth app of yours, and its own driver: the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what they plug into), connecting a service
   for the encrypted notebooks' sealed copy, and a sync of connected services from the native apps.
 
 ## Run it
@@ -156,4 +166,4 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## Not yet
 
-Merging two versions of a page (today one copy replaces the other), the Dropbox / Google Drive / GitLab connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).
+Merging two versions of a page (today one copy replaces the other), the Dropbox / Google Drive connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).

@@ -40,7 +40,7 @@ describe("a GitHub repository as a connected service", () => {
     assert.equal((await add({ repo: "ada/missing" })).json.code, "not-found");
     assert.equal((await add({ token: "ghp_readonly" })).json.code, "read-only");
     assert.equal((await add({ branch: "develop" })).json.code, "no-branch");
-    for (const settings of [{ repo: "nonsense" }, { repo: "a/b/c" }, { branch: "a..b" }, { root: "../x" }, { root: ".hidden" }, { root: "a/b/c/d" }, { token: "" }, { token: "has space" }]) assert.equal((await add(settings)).json.code, "bad-settings", JSON.stringify(settings));
+    for (const settings of [{ repo: "nonsense" }, { repo: "a/b/c" }, { repo: "../.." }, { repo: "ada/.." }, { repo: "./x" }, { branch: "a..b" }, { root: "../x" }, { root: ".hidden" }, { root: "a/b/c/d" }, { token: "" }, { token: "has space" }]) assert.equal((await add(settings)).json.code, "bad-settings", JSON.stringify(settings));
     assert.equal((await call("/api/connectors")).json.connectors.length, 0, "nothing was kept");
     const ok = await add({});
     assert.equal(ok.status, 200, ok.text);
@@ -83,8 +83,8 @@ describe("a GitHub repository as a connected service", () => {
 
   it("removes and replaces files in the same commit, and the version moves", async () => {
     const before = (await call(`/api/connectors/${id}/list`, { dir })).json.version;
-    const next = await call(`/api/connectors/${id}/write`, { dir, baseVersion: before, put: [{ path: "Home.txt", base64: b64("second") }], remove: ["Help/Editor page.txt"] });
-    assert.equal(next.status, 200, next.text);
+    const next = await call(`/api/connectors/${id}/write`, { dir, baseVersion: before, put: [{ path: "Home.txt", base64: b64("second") }], remove: ["Help/Editor page.txt", "Ghost.txt"] });
+    assert.equal(next.status, 200, "a file that is already gone is not an error: " + next.text);
     assert.notEqual(next.json.version, before);
     const files = gh.files();
     assert.equal(files[`notebooks/${dir}/Home.txt`].toString(), "second");

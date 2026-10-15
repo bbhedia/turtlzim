@@ -146,6 +146,8 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
       confirmButton.textContent = options.confirm;
       if (problem) {
         errorLine.textContent = problem;
+        // (in a dialog taller than the window the reason is where the buttons are, not out of sight above them)
+        errorLine.scrollIntoView?.({ block: "nearest" });
         refresh();
         return;
       }

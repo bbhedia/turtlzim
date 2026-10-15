@@ -4,9 +4,10 @@ import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:cr
 import { AccountError } from "../accounts.mjs";
 import { ConnectorError } from "./safe-fetch.mjs";
 import { github } from "./github.mjs";
+import { gitlab } from "./gitlab.mjs";
 import { versionOf, webdav } from "./webdav.mjs";
 
-export const DRIVERS = { webdav, github };
+export const DRIVERS = { webdav, github, gitlab };
 const MAX_CONNECTORS = 10;
 const SEGMENT = /^[^\u0000-\u001f\\/]{1,120}$/;
 

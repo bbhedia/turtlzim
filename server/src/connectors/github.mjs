@@ -4,7 +4,7 @@
 import { ConnectorError, safeRequest } from "./safe-fetch.mjs";
 import { versionOf } from "./webdav.mjs";
 
-const REPO = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
+const REPO = /^(?!\.{1,2}\/)(?!.*\/\.{1,2}$)[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const BRANCH = /^(?!.*\.\.)[A-Za-z0-9._/-]{1,100}$/;
 const ROOT_PART = /^[A-Za-z0-9 _.-]{1,80}$/;
 const DEFAULT_API = "https://api.github.com";
@@ -105,7 +105,9 @@ export const github = {
       const blob = this.json(await this.api(config, options, "POST", `/repos/${config.repo}/git/blobs`, { content: file.bytes.toString("base64"), encoding: "base64" }), `a file (${file.path})`);
       entries.push({ path: `${this.prefix(config, dir)}/${file.path}`, mode: "100644", type: "blob", sha: blob.sha });
     }
-    for (const path of remove) entries.push({ path: `${this.prefix(config, dir)}/${path}`, mode: "100644", type: "blob", sha: null });
+    // (a file that is already gone is not deleted again: GitHub refuses a tree that deletes what is not there)
+    const there = new Set((await this.list(config, options, dir)).map((f) => f.path));
+    for (const path of remove) if (there.has(path)) entries.push({ path: `${this.prefix(config, dir)}/${path}`, mode: "100644", type: "blob", sha: null });
     const tree = this.json(await this.api(config, options, "POST", `/repos/${config.repo}/git/trees`, { base_tree: commit.tree.sha, tree: entries }), "the new tree");
     const message = `Zim Notebook: ${dir} (${put.length} written${remove.length ? `, ${remove.length} deleted` : ""})`;
     const made = this.json(await this.api(config, options, "POST", `/repos/${config.repo}/git/commits`, { message, tree: tree.sha, parents: [head.object.sha] }), "the new commit");
