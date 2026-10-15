@@ -270,4 +270,5 @@ docker compose up                   # Postgres + server (define compose file)
 - The Zim editor (decisions, span model, keys, performance, serving it): `docs/zim-editor-plan.md`
 - Notebook rules (names, links, tree, backlinks, search, rename): `docs/zim-notebook.md`
 - The notebook app in the browser (stores, saving, import/export, what verifies it, gaps): `docs/zim-web-app.md`
+- Accounts, the Turtlzim SaaS on shared OVH hosting, cloud connectors and encrypted sync (feasibility study in French, roadmap, decisions to take): `docs/zim-cloud-feasibility.md`
 - Claude Code docs: https://docs.claude.com/en/docs/claude-code/overview
