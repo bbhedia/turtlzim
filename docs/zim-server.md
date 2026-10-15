@@ -26,6 +26,21 @@ Safeguards (each has a test that fails without it; the mutants were tried):
 - Rate limits kept in the database (per address and per client): sign-ups, sign-ins, codes, resets, deletions → `429` with `Retry-After`.
 - The page's content policy is unchanged (`connect-src 'self'`); the service worker lets `/api/` through to the network; a native shell (Android, desktop) shows nothing of accounts (no `INTERNET`).
 
+## Notebooks on the server (the storage side; no button in the app yet)
+
+`server/src/sync.mjs`, under `/api/sync/notebooks` (signed in, and a write needs the same header and origin as everything else):
+
+| | |
+|---|---|
+| `GET /api/sync/notebooks` | the person's notebooks (id, title, revision, size), what is used and the quota |
+| `GET /api/sync/notebooks/<id>` | one notebook: its files (path, base64 bytes) and its revision |
+| `PUT /api/sync/notebooks/<id>` | replace its files; `{title, baseRevision, files}`; `baseRevision` is the revision the copy was made from (0 for a new notebook) |
+| `DELETE /api/sync/notebooks/<id>` | remove it |
+
+A write made from an old revision is refused (`409`, with the current revision): nothing is overwritten, the client has to merge. Over the quota (1 MB for the notebooks together; a notebook may use all of it when it
+replaces its own files) is `413`. Paths are checked (relative, no `..`, nothing hidden, no two that differ only by case) and ids are `[A-Za-z0-9_-]{8,64}`. The files are stored **in clear**: encryption with a passphrase is the next
+lot, and until then an account's notebooks are readable by whoever runs the server. Each person only ever sees their own (a test with two accounts and the same id), and deleting the account deletes them.
+
 ## Run it
 
 ```bash
@@ -33,7 +48,7 @@ cd web && npm run build                      # the files of the app (server/ ser
 cd ../server && npm install                  # nodemailer
 ZIM_BASE_URL=https://localhost:8443 scripts/run.sh start --host :: --port 8443 --tls --name ADDRESS [--download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk]
 scripts/run.sh status | log | stop | restart
-npm test                                     # 41 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer
+npm test                                     # 49 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage
 ```
 
 `ZIM_BASE_URL` is the address people **type**: the services send the browser back to it, and it decides `Secure` cookies. From your own computer to this
@@ -63,10 +78,10 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## What verifies it, and what does not
 
-- `server/test`: 41 tests with a real HTTP server, cookies, a clock the test moves, and stand-ins for Google and GitHub; mutants of the HTTP layer (a check removed, `HttpOnly` dropped, the body limit off, a session not replaced, …) are caught.
+- `server/test`: 49 tests with a real HTTP server, cookies, a clock the test moves, and stand-ins for Google and GitHub; mutants of the HTTP layer (a check removed, `HttpOnly` dropped, the body limit off, a session not replaced, …) are caught.
 - The browser scenario "with an account server…" (`npm run test:browser`): the real server serves the real app; an account is made with the code read from the mailer, a wrong code and a wrong password are refused, the session survives a reload and is not readable by script, sign out and in, a GitHub round trip (stand-in service) and a failed one that echoes nothing of the address.
 - **Not verified**: a real Google or GitHub sign-in (needs your apps), real SMTP delivery, more than one process, any load. The server has had no outside review.
 
 ## Not yet
 
-Sync of notebooks (and the 1 MB quota, now only a number), encrypted copies with a passphrase, connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).
+The app's side of sync (what to upload, when, merging a conflict; the server side above exists), encrypted copies with a passphrase, connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).

@@ -52,6 +52,24 @@ const STEPS = [
     created_at integer not null
   );
   `,
+  `
+  create table notebooks (
+    user_id integer not null references users(id) on delete cascade,
+    id text not null,
+    title text not null,
+    revision integer not null,
+    updated_at integer not null,
+    primary key (user_id, id)
+  );
+  create table notebook_files (
+    user_id integer not null,
+    notebook_id text not null,
+    path text not null,
+    bytes blob not null,
+    primary key (user_id, notebook_id, path),
+    foreign key (user_id, notebook_id) references notebooks (user_id, id) on delete cascade
+  );
+  `,
 ];
 
 /** Open (and make or bring up to date) the database at `path` (`:memory:` for a test). */

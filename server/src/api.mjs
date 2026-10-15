@@ -5,11 +5,14 @@
 // site's own scripts can add, and an `Origin` that is this site's); a cookie that a script can read (it is HttpOnly); one that is sent along to other sites (SameSite) or over plain
 // http (Secure, and the `__Host-` name that a browser only accepts with Secure, Path=/ and no Domain); a body that is huge; and answers that are kept by a cache.
 import { AccountError } from "./accounts.mjs";
+import { Sync } from "./sync.mjs";
 
 const MAX_BODY = 16 * 1024;
+/** A notebook is sent whole, as base64: the quota (1 MB) and a third more. */
+const MAX_SYNC_BODY = 2 * 1024 * 1024;
 const NONCE_SECONDS = 600;
 
-export function createApi({ accounts, oauth, config, log = () => {} }) {
+export function createApi({ accounts, oauth, config, log = () => {}, sync = new Sync({ db: accounts.db }) }) {
   const prefix = config.secure ? "__Host-" : "";
   const SESSION = `${prefix}zim`;
   const NONCE = `${prefix}zim-oauth`;
@@ -44,14 +47,14 @@ export function createApi({ accounts, oauth, config, log = () => {} }) {
   }
 
   /** The body as JSON, or an error that says what is wrong with it. */
-  function readJson(req) {
+  function readJson(req, limit = MAX_BODY) {
     return new Promise((resolve, reject) => {
       if (!/^application\/json\b/i.test(String(req.headers["content-type"] ?? ""))) return reject(new AccountError("Send JSON.", 415));
       const chunks = [];
       let size = 0;
       req.on("data", (chunk) => {
         size += chunk.length;
-        if (size > MAX_BODY) {
+        if (size > limit) {
           reject(new AccountError("That request is too big.", 413));
           req.destroy();
           return;
@@ -93,7 +96,7 @@ export function createApi({ accounts, oauth, config, log = () => {} }) {
     return { token, cookie: setCookie(SESSION, token, config.sessionDays * 86400) };
   };
 
-  const publicMe = (found) => ({ user: { email: found.user.email, quotaBytes: found.user.quotaBytes, usedBytes: 0, hasPassword: found.user.hasPassword }, signIns: accounts.identities(found.user.id).map((i) => i.provider) });
+  const publicMe = (found) => ({ user: { email: found.user.email, quotaBytes: found.user.quotaBytes, usedBytes: sync.used(found.user.id), hasPassword: found.user.hasPassword }, signIns: accounts.identities(found.user.id).map((i) => i.provider) });
 
   /** Handle the request if it is for `/api/`; says whether it was. */
   return async function handle(req, res) {
@@ -123,6 +126,21 @@ export function createApi({ accounts, oauth, config, log = () => {} }) {
         const found = sessionOf(req);
         if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
         return void send(res, 200, accounts.exportData(found.user.id), { "content-disposition": 'attachment; filename="zim-notebook-account.json"' });
+      }
+      const notebookRoute = /^\/api\/sync\/notebooks(?:\/([^/]+))?$/.exec(route);
+      if (notebookRoute) {
+        const found = sessionOf(req);
+        if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
+        const id = notebookRoute[1] && decodeURIComponent(notebookRoute[1]);
+        if (get && !id) return void send(res, 200, { notebooks: sync.list(found.user.id), usedBytes: sync.used(found.user.id), quotaBytes: found.user.quotaBytes });
+        if (get) return void send(res, 200, sync.get(found.user.id, id));
+        if (id && (method === "PUT" || method === "DELETE")) {
+          checkSameSite(req);
+          if (method === "DELETE") return void send(res, 200, sync.remove(found.user.id, id));
+          const body = await readJson(req, MAX_SYNC_BODY);
+          return void send(res, 200, sync.put(found.user.id, found.user.quotaBytes, id, body));
+        }
+        return void send(res, 405, { error: "Not that way." }, { allow: "GET, PUT, DELETE" });
       }
       const oauthRoute = /^\/api\/oauth\/([a-z]+)\/(start|callback)$/.exec(route);
       if (oauthRoute && get) {
@@ -192,7 +210,7 @@ export function createApi({ accounts, oauth, config, log = () => {} }) {
       }
     } catch (error) {
       if (error instanceof AccountError) {
-        return void send(res, error.status, { error: error.message, ...(error.extra.code ? { code: error.extra.code } : {}), ...(error.extra.retryAfter ? { retryAfter: error.extra.retryAfter } : {}) }, error.extra.retryAfter ? { "retry-after": String(error.extra.retryAfter) } : {});
+        return void send(res, error.status, { error: error.message, ...(error.extra.code ? { code: error.extra.code } : {}), ...(error.extra.retryAfter ? { retryAfter: error.extra.retryAfter } : {}), ...(error.extra.revision !== undefined ? { revision: error.extra.revision } : {}), ...(error.extra.quotaBytes ? { usedBytes: error.extra.usedBytes, quotaBytes: error.extra.quotaBytes } : {}) }, error.extra.retryAfter ? { "retry-after": String(error.extra.retryAfter) } : {});
       }
       log(`error: ${error instanceof Error ? error.stack : String(error)}`);
       return void send(res, 500, { error: "Something went wrong on the server." });
