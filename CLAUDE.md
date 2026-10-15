@@ -148,6 +148,7 @@ cd ../web && scripts/serve.sh restart --host :: --port 8443 --tls --name ADDRESS
 # Desktop program (desktop/; docs/zim-desktop-shell.md): Tauri around web/dist; Linux needs `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev patchelf file`
 cd desktop && npm install
 npm run package -- --web            # npm run build in web/, then tauri build -> desktop/out/ (.deb .rpm .AppImage on Linux, .exe .msi on Windows) + SHA256SUMS
+(cd src-tauri && cargo test)        # the program's folder code: paths, listing, the all-or-nothing change and its recovery
 
 # Mobile (Capacitor)
 npx cap sync
@@ -203,6 +204,10 @@ docker compose up                   # Postgres + server (define compose file)
   each, one undo) and holds no table rules; drawing or moving in a table never rewrites its text.
   A UI change is not done until it has been looked at (`npm run screenshots`) and driven in the real
   browser test (`npm run test:browser`); the unit tests cannot see layout, focus or timing.
+- **Notebooks in folders** (the desktop program, `docs/zim-desktop-shell.md`): a folder notebook is Zim's own layout, read and written by `FolderStore` over
+  `window.__zimShell.folders`; the page names a folder only by the id the program gave it, and `desktop/src-tauri/src/folders.rs` (no Tauri in it, `cargo test` in
+  `desktop/src-tauri`) is all the program knows of one: paths are checked there, links are not followed, and a change is made entirely or not at all, with a journal. A
+  folder is the person's: only what is listed and read as a page or an attachment is written, and removing a notebook only unlists it.
 - **The desktop program** (`desktop/`) is the same web build in Tauri, not a second UI or branch: `web/dist` goes in as it is, the version is `web/package.json`'s, and what a
   WebView lacks comes through `window.__zimShell` like on a phone. The CI workflow packs it for Linux and Windows on every change of `web/`, `core/` or `desktop/`.
 - **The app in a native shell** (`mobile/`, `docs/zim-mobile-shell.md`): the web app depends on no shell package. A shell is recognised by

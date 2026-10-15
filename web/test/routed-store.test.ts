@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
 import { pageKey } from "../src/notebook-core";
+import { FOLDER_PREFIX, isFolderId } from "../src/notebook/folder-store";
 import { ENCRYPTED_PREFIX, RoutedStore, isEncryptedId } from "../src/notebook/routed-store";
 import { MemoryStore } from "../src/notebook/store";
 import type { StoredFile, StoredPage } from "../src/notebook/store";
@@ -27,6 +28,73 @@ function make(vaultOpen = { value: true }) {
   const sealed = new SealedStub(pageKey);
   return { open, sealed, vaultOpen, store: new RoutedStore(open, sealed, () => vaultOpen.value) };
 }
+
+/** The folder side is a memory store that says "folder" and has a place for each notebook, as the folder store's are. */
+class FolderStub extends MemoryStore {
+  override async listNotebooks() {
+    return (await super.listNotebooks()).map((info) => ({ ...info, kind: "folder" as const, location: info.id }));
+  }
+  override async createNotebook(info: Parameters<MemoryStore["createNotebook"]>[0], pages?: StoredPage[], files?: StoredFile[]) {
+    return super.createNotebook({ ...info, kind: "folder" }, pages, files);
+  }
+}
+
+describe("the store of notebooks in folders, beside the open and the encrypted ones", () => {
+  const withFolders = () => {
+    const open = new MemoryStore(pageKey);
+    const sealed = new SealedStub(pageKey);
+    const folders = new FolderStub(pageKey);
+    const problems: Array<[string, string]> = [];
+    return { open, sealed, folders, problems, store: new RoutedStore(open, sealed, () => true, (error, which) => problems.push([error.message, which]), folders) };
+  };
+
+  it("makes a folder notebook in the folder store, gives it an id that says so, and sends everything about it there", async () => {
+    const { store, open, folders } = withFolders();
+    const plain = await store.createNotebook({ title: "Plain", home: "Home", kind: "open" }, [page("Home", "p")]);
+    const kept = await store.createNotebook({ title: "In a folder", home: "Home", kind: "folder", location: "somewhere" }, [page("Home", "f")], [file("Home/a.png", "A")]);
+    expect(isFolderId(kept.id)).toBe(true);
+    expect(isFolderId(plain.id)).toBe(false);
+    expect(kept.id.startsWith(FOLDER_PREFIX)).toBe(true);
+    expect((await open.listNotebooks()).map((n) => n.title)).toEqual(["Plain"]);
+    expect((await folders.listNotebooks()).map((n) => n.title)).toEqual(["In a folder"]);
+    expect((await store.listNotebooks()).map((n) => [n.title, n.kind, isFolderId(n.id)])).toEqual([["Plain", "open", false], ["In a folder", "folder", true]]);
+    expect((await store.loadPages(kept.id)).map((p) => p.text)).toEqual(["f"]);
+    expect((await store.listFiles(kept.id)).map((f) => f.path)).toEqual(["Home/a.png"]);
+    expect(await (await store.loadFile(kept.id, "Home/a.png"))?.text()).toBe("A");
+    await store.replacePages(kept.id, { remove: ["Home"], put: [page("Front", "g")] });
+    expect((await folders.loadPages(kept.id.slice(FOLDER_PREFIX.length))).map((p) => p.name)).toEqual(["Front"]);
+    await store.updateNotebook({ ...kept, title: "Renamed" });
+    expect((await store.listNotebooks()).map((n) => n.title)).toContain("Renamed");
+    await store.deleteNotebook(kept.id);
+    expect((await store.listNotebooks()).map((n) => n.title)).toEqual(["Plain"]);
+  });
+
+  it("lists the others, and says which side it was, when the folders can't be listed", async () => {
+    const { store, folders, problems } = withFolders();
+    await store.createNotebook({ title: "Plain", home: "Home", kind: "open" });
+    folders.listNotebooks = async () => {
+      throw new Error("the program says no");
+    };
+    expect((await store.listNotebooks()).map((n) => n.title)).toEqual(["Plain"]);
+    expect(problems).toEqual([["the program says no", "folders"]]);
+  });
+
+  it("says which side it was when the encrypted ones can't be listed", async () => {
+    const { store, sealed, problems } = withFolders();
+    sealed.listNotebooks = async () => {
+      throw new Error("the engine is broken");
+    };
+    await store.listNotebooks();
+    expect(problems).toEqual([["the engine is broken", "encrypted"]]);
+  });
+
+  it("has no folder notebooks, and can't make or reach one, where there is no program to give them", async () => {
+    const { store } = make();
+    expect((await store.listNotebooks()).map((n) => n.kind)).toEqual([]);
+    await expect(store.createNotebook({ title: "F", home: "Home", kind: "folder", location: "x" })).rejects.toThrow(/desktop program/);
+    await expect(store.loadPages(`${FOLDER_PREFIX}x`)).rejects.toThrow(/desktop program/);
+  });
+});
 
 describe("the store of open and encrypted notebooks", () => {
   it("makes a notebook where its kind says, and gives encrypted ones an id that says so", async () => {

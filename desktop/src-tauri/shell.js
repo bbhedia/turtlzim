@@ -50,8 +50,30 @@
     }, 12000);
   }
 
+  // A change of a notebook folder: the new files are staged in the folder (beside the notebook), then the program makes the whole change or none of it.
+  const transaction = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  const folders = {
+    roots: () => invoke("fs_roots"),
+    pick: () => invoke("fs_pick"),
+    forget: (id) => invoke("fs_forget", { id }),
+    list: (id) => invoke("fs_list", { id }),
+    read: async (id, path) => new Uint8Array(await invoke("fs_read", { id, path })),
+    async apply(id, change) {
+      const txn = transaction();
+      const writes = [];
+      for (const [number, write] of change.writes.entries()) {
+        const headers = { "x-root": id, "x-txn": txn, "x-n": String(number) };
+        if (write.modified) headers["x-modified"] = String(Math.round(write.modified));
+        await invoke("fs_stage", write.bytes, { headers });
+        writes.push({ path: write.path, staged: number });
+      }
+      await invoke("fs_commit", { id, txn, plan: { writes, deletes: change.deletes, moves: change.moves } });
+    },
+  };
+
   window.__zimShell = {
     version: "__ZIM_VERSION__",
+    folders,
     // A link to a Blob that has `download`, which is how a browser saves a file, does nothing in a WebView: the file goes to the
     // program, which asks where to save it (the system's own dialog) and writes it.
     async saveFile(fileName, blob) {

@@ -32,9 +32,29 @@ describe("the desktop program", () => {
     expect(script).toContain('invoke("save_file", bytes, { headers: { "x-file-name"');
     expect(program).toContain("async fn save_file(");
     expect(program).toContain('.get("x-file-name")');
-    expect(program).toContain("generate_handler![save_file, debug_log]");
+    expect(program).toContain("generate_handler![save_file, debug_log, fs_roots, fs_pick, fs_forget, fs_list, fs_read, fs_stage, fs_commit]");
     // and the program puts the script in the page before the app's own
     expect(program).toContain(".initialization_script(shell_script())");
+  });
+
+  it("gives the app the folder hooks that notebooks in folders ask of a shell, each over the command of the program that does it", () => {
+    const script = read("../../desktop/src-tauri/shell.js");
+    const program = read("../../desktop/src-tauri/src/main.rs");
+    for (const [hook, command] of [["roots", "fs_roots"], ["pick", "fs_pick"], ["forget", "fs_forget"], ["list", "fs_list"], ["read", "fs_read"]]) {
+      expect(script, hook).toMatch(new RegExp(`${hook}[:(].*invoke\\("${command}"`, "s"));
+      expect(program, command).toContain(`async fn ${command}(`);
+    }
+    // a change is staged file by file, with the headers that the command reads, and then made as a whole
+    for (const header of ["x-root", "x-txn", "x-n", "x-modified"]) {
+      expect(script, header).toContain(`"${header}"`);
+      expect(program, header).toContain(`"${header}"`);
+    }
+    expect(script).toContain('invoke("fs_stage", write.bytes, { headers })');
+    expect(script).toContain('invoke("fs_commit", { id, txn, plan: { writes, deletes: change.deletes, moves: change.moves } })');
+    expect(program).toContain("async fn fs_stage(");
+    expect(program).toContain("async fn fs_commit(");
+    // and the page names a folder by an id: no command takes a path from the page but a path inside a folder
+    expect(program).not.toMatch(/async fn fs_\w+\([^)]*root_path|PathBuf>?,? path/);
   });
 
   it("switches on, in WebKitGTK, the web storage features that it is built without (OPFS, which the vault needs)", () => {

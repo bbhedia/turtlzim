@@ -1,7 +1,9 @@
-// One NotebookStore over two: the open notebooks (kept in the browser's IndexedDB) and the encrypted
-// ones (kept by the vault). The app asks for notebooks and pages without caring where they are; an
-// encrypted notebook's id carries a prefix that says so, and while the vault is locked those
-// notebooks are not listed (nothing is known of them but that they exist) and can't be touched.
+// One NotebookStore over three: the open notebooks (kept in the browser's IndexedDB), the encrypted
+// ones (kept by the vault) and, in the desktop program, the folders of Zim files on the computer. The app
+// asks for notebooks and pages without caring where they are; an encrypted or a folder notebook's id carries
+// a prefix that says so, and while the vault is locked the encrypted notebooks are not listed (nothing is
+// known of them but that they exist) and can't be touched.
+import { FOLDER_PREFIX, isFolderId } from "./folder-store";
 import type { FileInfo, NotebookInfo, NotebookStore, PageChange, StoredFile, StoredPage } from "./store";
 
 /** What an encrypted notebook's id starts with. */
@@ -16,22 +18,36 @@ export class RoutedStore implements NotebookStore {
     /** Whether the vault is unlocked: only then are its notebooks there. */
     private readonly vaultOpen: () => boolean,
     /** Told when the encrypted notebooks can't be listed: the list is then the open ones, so that the app can still be used (and the vault locked). */
-    private readonly onProblem?: (error: Error) => void,
+    private readonly onProblem?: (error: Error, which: "encrypted" | "folders") => void,
+    /** The notebooks that are folders on the computer, where there is a program to give them. */
+    private readonly folders?: NotebookStore,
   ) {}
 
   async listNotebooks(): Promise<NotebookInfo[]> {
-    const open = await this.open.listNotebooks();
+    let open = await this.open.listNotebooks();
+    if (this.folders) {
+      try {
+        open = [...open, ...(await this.folders.listNotebooks()).map((info) => ({ ...info, id: FOLDER_PREFIX + info.id }))];
+      } catch (error) {
+        this.onProblem?.(error instanceof Error ? error : new Error(String(error)), "folders");
+      }
+    }
     if (!this.vaultOpen()) return open;
     try {
       const encrypted = (await this.encrypted.listNotebooks()).map((info) => ({ ...info, id: ENCRYPTED_PREFIX + info.id }));
       return [...open, ...encrypted];
     } catch (error) {
-      this.onProblem?.(error instanceof Error ? error : new Error(String(error)));
+      this.onProblem?.(error instanceof Error ? error : new Error(String(error)), "encrypted");
       return open;
     }
   }
 
   async createNotebook(info: Omit<NotebookInfo, "id" | "created">, pages?: StoredPage[], files?: StoredFile[]): Promise<NotebookInfo> {
+    if (info.kind === "folder") {
+      if (!this.folders) throw new Error("Notebooks in folders need the desktop program.");
+      const made = await this.folders.createNotebook(info, pages, files);
+      return { ...made, id: FOLDER_PREFIX + made.id };
+    }
     if (info.kind !== "encrypted") return this.open.createNotebook(info, pages, files);
     this.assertOpen();
     const made = await this.encrypted.createNotebook(info, pages, files);
@@ -73,6 +89,10 @@ export class RoutedStore implements NotebookStore {
   }
 
   private route(id: string): [NotebookStore, string] {
+    if (isFolderId(id)) {
+      if (!this.folders) throw new Error("Notebooks in folders need the desktop program.");
+      return [this.folders, id.slice(FOLDER_PREFIX.length)];
+    }
     if (!isEncryptedId(id)) return [this.open, id];
     this.assertOpen();
     return [this.encrypted, id.slice(ENCRYPTED_PREFIX.length)];

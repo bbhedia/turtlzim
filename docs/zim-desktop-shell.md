@@ -51,6 +51,27 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appi
 After that, `npm run package -- --web` here builds the `.deb`, `.rpm` and `.AppImage`. Windows installers are built by the workflow (a Windows
 runner); cross-building them from Linux (cargo-xwin and NSIS) is possible and has not been tried.
 
+## Notebooks as folders of Zim files
+
+In the program a notebook is a **real folder**: pages are `Name.txt` (`Projects:Garden` is `Projects/Garden.txt`), the folder named like a page holds its
+attachments, and `notebook.zim` marks the folder as a notebook, so Zim opens it as it is, and git, grep and any editor read it. The program's
+notebook menu has **Open a folder as a notebook…** (a folder of Zim files, or just of `.txt` files, is taken as it is: nothing is written until a page is
+saved, and what is not a page or an attachment, or is hidden, or is not valid UTF-8, is left alone) and **New notebook…**, which in the program is a folder
+by default (the system's folder dialog; refused if a file of the same name is already there). **Remove notebook** only stops listing it. The browser
+app is as it was: notebooks kept in the browser, and zip and folder import and export.
+
+| | |
+|---|---|
+| The store | `web/src/notebook/folder-store.ts`: a `NotebookStore` over `window.__zimShell.folders`, routed by id (`folder:`) with the open and the encrypted ones |
+| The program's side | `desktop/src-tauri/src/folders.rs` (nothing of Tauri in it) and the commands `fs_roots`, `fs_pick`, `fs_forget`, `fs_list`, `fs_read`, `fs_stage`, `fs_commit` |
+| What the page can name | a folder by the **id** that the program gave it when the person chose it (kept in `folders.json` in the app's data folder), and a path inside it: relative, `/`, no `.` or `..`, nothing hidden, no link on the way (a link in a notebook folder is not followed, listed or written through) |
+| A change | all of it or none: the new files are staged beside the notebook (`.zim-txn/`), every file that is replaced, moved or deleted is put aside, the new state is put in place, and only then is what was put aside let go; a journal says what to put back, so a change cut off by a crash is undone the next time the folder is listed. The folders that a move or a delete leaves empty go |
+| What is kept | a page is written to the file it has, spelled as that file is (Zim's own `My Note.txt`), with its byte-order mark and line endings, and with the time that the page says it was changed; a page with a new name, or spelled another way (only the case can differ), goes where its name says and its old file goes |
+
+What it does **not** do: it does not watch the folder (what another program changes is seen the next time the notebook is opened), it does not lock a page
+against two programs (the last write wins), it reads the whole notebook when it is opened, and encrypted notebooks stay in the vault, not in folders. The
+Android shell has no folders yet (the same hooks, over the Storage Access Framework, are the way).
+
 ## What verifies it
 
 - `cargo check --target x86_64-pc-windows-msvc` in `desktop/src-tauri`: the Rust compiles against Tauri 2.x for Windows.
@@ -59,6 +80,11 @@ runner); cross-building them from Linux (cargo-xwin and NSIS) is possible and ha
   the sample notebook opens (tree, page, contents, calendar), IndexedDB works, `tauri://localhost` is a secure context, Worker, WebAssembly and
   `crypto.subtle` are there, and, with the features above on, `navigator.storage.getDirectory()` opens the OPFS root (without them it was undefined, and
   `MiniBrowser`, WebKitGTK's own, showed the same on `http://127.0.0.1`: it is the build, not the custom scheme).
+- **Folders**: `cargo test` in `desktop/src-tauri` (13 tests: paths, links, listing, a change that writes, moves, swaps and deletes, one that fails half way, one
+  cut off by a crash, the registry; 12 mutants of the module, all caught but one that is equivalent), the store contract run over a file system in memory (13 tests) and
+  11 more about folders (`web/test/store.test.ts`), a browser scenario with a stand-in file system in the page, and **a run of the program on Linux**: the folder dialog of
+  GTK chose a folder of Zim files, the notebook opened with its name from `notebook.zim` and its tree, text typed was saved into `Start.txt` with the header lines as
+  they were and nothing else touched, and a new notebook in an empty folder made `notebook.zim` and `Home.txt` as Zim writes them.
 - **Not run**: the vault itself (creating an encrypted notebook) in the program; the *Save as* dialog; the `.deb`/`.rpm` installed; the AppImage on
   another distribution; **any of it on Windows** (WebView2, the NSIS and MSI installers: the workflow builds them, nobody has run them).
 
@@ -71,7 +97,6 @@ these is the program's: a current computer has none of them. To see what a page 
 
 ## Not done
 
-- **Open notebooks as real `.txt` folders** (a locked decision): the notebooks are in the WebView's storage, as in a browser. A store on the
-  file system (Tauri's fs, a folder chosen by the person, the same Zim layout) is the next milestone of the program.
+- **A folder that is watched** (a page changed by another program while it is open), and a lock against two programs writing the same page.
 - **Signing and updates**: the installers are unsigned (Windows SmartScreen will warn), and there is no updater; a new version is a new installer.
 - macOS: the same project builds it (Tauri) on a Mac; not asked for.

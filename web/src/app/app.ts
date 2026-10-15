@@ -7,6 +7,7 @@ import type { FormatBar, ImageSource, LinkInfo, LinkStatus, ZimEditor } from "..
 import { anchorsIn, checkPageName, classifyLink, journalDayOf, journalPage, pageKey, startingText, zimTimestamp } from "../notebook-core";
 import type { Backlink, JournalDay, SearchHit } from "../notebook-core";
 import { FileUrls } from "../notebook/file-urls";
+import { FolderStore } from "../notebook/folder-store";
 import { IndexedDbStore } from "../notebook/idb";
 import { attachmentName, formatSize, isImageType, pictureAddress } from "../notebook/media";
 import { RoutedStore, isEncryptedId } from "../notebook/routed-store";
@@ -289,7 +290,9 @@ export class App {
     // the encrypted notebooks are another store, in the vault, which is there to be unlocked
     const sealed = new TurtlStore(() => vault.core, pageKey);
     vault.onChange((event) => event.kind !== "unlocked" && sealed.reset());
-    store = new RoutedStore(store, sealed, () => vault.unlocked, (error) => app?.warnAboutVault(`The encrypted notebooks can't be read at the moment (${error.message}). Lock them and unlock them again.`));
+    // (notebooks as folders of files on the computer, where the program has a file system to give: the desktop program)
+    const folders = shellHooks().folders ? new FolderStore(() => shellHooks().folders, pageKey) : undefined;
+    store = new RoutedStore(store, sealed, () => vault.unlocked, (error, which) => (which === "encrypted" ? app?.warnAboutVault(`The encrypted notebooks can't be read at the moment (${error.message}). Lock them and unlock them again.`) : app?.warn(`The notebooks in folders can't be listed at the moment (${error.message}).`)), folders);
     app = new App(root, store, keptInMemory, vault);
     await app.openInitialNotebook();
     return app;
@@ -579,7 +582,15 @@ export class App {
     const last = prefs.get("notebook");
     const info = notebooks.find((n) => n.id === draft?.notebook) ?? notebooks.find((n) => n.id === last) ?? (notebooks[0] as NotebookInfo);
     const draftHere = draft && draft.notebook === info.id ? draft : null;
-    await this.openNotebook(info.id, pageFromHash() ?? draftHere?.name ?? null);
+    try {
+      await this.openNotebook(info.id, pageFromHash() ?? draftHere?.name ?? null);
+    } catch (error) {
+      // (a notebook whose folder has gone, or can't be read, must not keep the app from starting: another is opened, and the person is told)
+      const other = notebooks.find((n) => n.kind === "open") ?? (await createSampleNotebook(this.store));
+      await this.openNotebook(other.id);
+      this.warn(`Couldn't open ${info.title}: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     if (draftHere) await this.recoverDraft(draftHere);
     else if (draft) prefs.remove("draft"); // for a notebook that is gone
     if (this.keptInMemory) this.showNotice("This browser won't keep notebooks for this site, so what you write is lost when the tab closes. Use Export in the notebook menu to keep a copy.");
@@ -694,7 +705,7 @@ export class App {
         h("button", { type: "button", role: "menuitem", class: "menu-item", on: { click: () => { this.closeNotebookMenu(); onClick(); } }, ...extra }, h("span", { text }), badge ? h("span", { class: "badge", text: badge }) : null);
       clear(this.els.notebookMenu);
       for (const notebook of notebooks) {
-        this.els.notebookMenu.append(item(notebook.title, () => void this.openNotebook(notebook.id).catch((error: unknown) => this.say(`Couldn't open ${notebook.title}: ${error instanceof Error ? error.message : String(error)}`)), { role: "menuitemradio", "aria-checked": String(notebook.id === this.session.info.id) }, notebook.kind === "encrypted" ? "encrypted" : undefined));
+        this.els.notebookMenu.append(item(notebook.title, () => void this.openNotebook(notebook.id).catch((error: unknown) => this.say(`Couldn't open ${notebook.title}: ${error instanceof Error ? error.message : String(error)}`)), { role: "menuitemradio", "aria-checked": String(notebook.id === this.session.info.id) }, notebook.kind === "encrypted" ? "encrypted" : notebook.kind === "folder" ? "folder" : undefined));
       }
       if (this.vault.unlocked) this.els.notebookMenu.append(h("hr", {}), item("Lock encrypted notebooks", () => void this.lockVault()), item("Change the passphrase…", () => void this.changePassphraseDialog()), item("Back up the encrypted notebooks…", () => void this.backupDialog()));
       else if (this.vaultKnown()) this.els.notebookMenu.append(h("hr", {}), item("Unlock encrypted notebooks…", () => void this.unlockFromMenu()));
@@ -705,12 +716,13 @@ export class App {
         item(this.formatBarShown() ? "Hide the formatting bar" : "Show the formatting bar", () => this.setFormatBar(!this.formatBarShown())),
         item(this.screenDetails ? "Hide the screen details" : "Screen and keyboard details", () => this.toggleScreenDetails()),
         item("New notebook…", () => void this.newNotebook()),
+        ...(shellHooks().folders ? [item("Open a folder as a notebook…", () => void this.openFolderNotebook())] : []),
         item("Rename notebook…", () => void this.renameNotebook()),
         item("Import a folder…", () => this.els.folderInput.click()),
         item("Import a zip…", () => this.els.zipInput.click()),
         item("Export notebook (zip)", () => this.exportNotebook()),
         h("hr", {}),
-        item("Delete notebook…", () => void this.deleteNotebook(), { class: "menu-item danger-text" }),
+        item(this.session.info.kind === "folder" ? "Remove notebook…" : "Delete notebook…", () => void this.deleteNotebook(), { class: this.session.info.kind === "folder" ? "menu-item" : "menu-item danger-text" }),
       );
       const pwa = this.pwa;
       if (pwa) {
@@ -731,27 +743,45 @@ export class App {
   }
 
   private async newNotebook(): Promise<void> {
+    const folders = shellHooks().folders;
     await showDialog({
       title: "New notebook",
       fields: [{ name: "title", label: "Name", value: "My notebook", validate: (v) => (v.trim() ? null : "Give the notebook a name.") }],
       choices: [
-        { name: "kind", label: "Kind", value: "open", options: [{ value: "open", label: "Open: plain pages, kept in this browser" }, { value: "encrypted", label: "Encrypted: needs a passphrase to open" }] },
+        { name: "kind", label: "Kind", value: folders ? "folder" : "open", options: [...(folders ? [{ value: "folder", label: "Folder: Zim files in a folder of this computer, which Zim opens too" }] : []), { value: "open", label: folders ? "Open: plain pages, kept in this program" : "Open: plain pages, kept in this browser" }, { value: "encrypted", label: "Encrypted: needs a passphrase to open" }] },
         { name: "start", label: "Start with", value: "empty", options: [{ value: "empty", label: "An empty notebook" }, { value: "sample", label: "The sample notebook" }] },
       ],
       confirm: "Create",
       working: "Creating…",
       submit: async (values) => {
         const title = String(values.title).trim();
-        const kind = values.kind === "encrypted" ? "encrypted" : "open";
+        const kind = values.kind === "encrypted" ? "encrypted" : values.kind === "folder" && folders ? "folder" : "open";
         if (kind === "encrypted") {
           const problem = await this.prepareVault();
           if (problem) return problem;
         }
-        const info = values.start === "sample" ? await createSampleNotebook(this.store, title, kind) : await createEmptyNotebook(this.store, title, "Home", kind);
+        // (for a folder: the person says which, with the system's own dialog; it should be an empty one, and is refused if a file is in the way)
+        const root = kind === "folder" ? await folders?.pick() : undefined;
+        if (kind === "folder" && !root) return "No folder was chosen.";
+        const info = values.start === "sample" ? await createSampleNotebook(this.store, title, kind, root?.id) : await createEmptyNotebook(this.store, title, "Home", kind, root?.id);
         await this.openNotebook(info.id);
         if (kind === "encrypted") void this.warnIfNotKept();
       },
     });
+  }
+
+  /** Take a folder of Zim files as a notebook, as it is: nothing in it is written until a page is. */
+  private async openFolderNotebook(): Promise<void> {
+    const folders = shellHooks().folders;
+    if (!folders) return;
+    try {
+      const root = await folders.pick();
+      if (!root) return;
+      const info = await this.store.createNotebook({ title: root.name, home: "Home", kind: "folder", location: root.id });
+      await this.openNotebook(info.id);
+    } catch (error) {
+      this.say(`Couldn't open that folder as a notebook: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /**
@@ -794,11 +824,15 @@ export class App {
   private async deleteNotebook(): Promise<void> {
     const session = this.session;
     const title = session.title;
+    // (a notebook that is a folder is only no longer listed: the folder and its files stay where they are)
+    const folder = session.info.kind === "folder";
     await showDialog({
-      title: "Delete notebook",
-      body: [h("p", {}, "Delete ", h("strong", { text: title }), ` and its ${session.pageCount} pages from this browser? This can't be undone. Export it first if you may want it back.`)],
-      confirm: "Delete notebook",
-      danger: true,
+      title: folder ? "Remove notebook" : "Delete notebook",
+      body: [folder
+        ? h("p", {}, "Stop listing ", h("strong", { text: title }), " in this program? Its folder and every file in it stay where they are, and you can open the folder again later.")
+        : h("p", {}, "Delete ", h("strong", { text: title }), ` and its ${session.pageCount} pages from this browser? This can't be undone. Export it first if you may want it back.`)],
+      confirm: folder ? "Remove from this program" : "Delete notebook",
+      danger: !folder,
       submit: async () => {
         const stale = this.stale(session);
         if (stale) return stale;
@@ -808,7 +842,7 @@ export class App {
         const rest = await this.store.listNotebooks();
         const next = rest[0] ?? (await createEmptyNotebook(this.store, "My notebook"));
         await this.openNotebook(next.id);
-        this.say(`Deleted the notebook ${title}.`);
+        this.say(folder ? `${title} is no longer listed. Its folder was not touched.` : `Deleted the notebook ${title}.`);
       },
     });
   }
@@ -948,7 +982,7 @@ export class App {
     this.discardUnsaved();
     await this.saveChain;
     this.discardUnsaved();
-    const open = (await this.store.listNotebooks()).filter((n) => n.kind === "open");
+    const open = (await this.store.listNotebooks()).filter((n) => n.kind !== "encrypted");
     const next = open[0] ?? (await createSampleNotebook(this.store));
     await this.openNotebook(next.id);
   }

@@ -62,8 +62,13 @@ export interface NotebookInfo {
   /** The page shown when the notebook is opened. */
   home: string;
   created: number;
-  /** "open": plain pages, kept in the browser's IndexedDB. "encrypted": kept as ciphertext in the vault (see vault/). */
-  kind: "open" | "encrypted";
+  /**
+   * "open": plain pages, kept in the browser's IndexedDB. "encrypted": kept as ciphertext in the vault (see vault/). "folder": Zim files in a folder
+   * of the computer, which Zim opens as it is (see folder-store.ts).
+   */
+  kind: "open" | "encrypted" | "folder";
+  /** For a folder notebook: the id of the folder (which the program, not the page, knows the place of). */
+  location?: string;
 }
 
 export interface NotebookStore {

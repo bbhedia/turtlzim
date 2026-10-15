@@ -4689,6 +4689,136 @@ try {
     },
   );
 
+  await app(
+    "in the desktop program a folder of Zim files is a notebook: opened as it is, written back where it was, made new, and only unlisted when it is removed",
+    {
+      beforeLoad: () => {
+        // (the program's file system, in the page: folders that the test makes, one of which the next folder dialog "chooses")
+        window.__TAURI_INTERNALS__ = {};
+        const encoder = new TextEncoder();
+        const decoder = new TextDecoder();
+        const folders = [];
+        const find = (id) => {
+          const folder = folders.find((f) => f.id === id && f.listed);
+          if (!folder) throw new Error("that folder is not one of the notebooks");
+          return folder;
+        };
+        window.__fake = {
+          next: null,
+          make(name, texts = {}) {
+            const folder = { id: `folder${folders.length + 1}`, name, listed: false, files: new Map() };
+            for (const [path, text] of Object.entries(texts)) folder.files.set(path, { bytes: encoder.encode(text), modified: 1000 });
+            folders.push(folder);
+            return folder.id;
+          },
+          text: (id, path) => (folders.find((f) => f.id === id)?.files.has(path) ? decoder.decode(folders.find((f) => f.id === id).files.get(path).bytes) : undefined),
+          paths: (id) => [...folders.find((f) => f.id === id).files.keys()].sort(),
+          listed: () => folders.filter((f) => f.listed).map((f) => f.id),
+        };
+        window.__zimShell = {
+          version: "test",
+          folders: {
+            roots: async () => folders.filter((f) => f.listed).map((f) => ({ id: f.id, name: f.name, exists: true })),
+            pick: async () => {
+              const id = window.__fake.next;
+              window.__fake.next = null;
+              const folder = folders.find((f) => f.id === id);
+              if (!folder) return null;
+              folder.listed = true;
+              return { id: folder.id, name: folder.name, exists: true };
+            },
+            forget: async (id) => {
+              const folder = folders.find((f) => f.id === id);
+              if (folder) folder.listed = false;
+            },
+            list: async (id) => [...find(id).files].filter(([path]) => !path.split("/").some((p) => p.startsWith("."))).map(([path, f]) => ({ path, size: f.bytes.length, modified: f.modified })),
+            read: async (id, path) => {
+              const held = find(id).files.get(path);
+              if (!held) throw new Error(`could not read ${path}`);
+              return held.bytes.slice();
+            },
+            apply: async (id, change) => {
+              const files = find(id).files;
+              const before = new Map(files);
+              for (const [from] of change.moves) files.delete(from);
+              for (const path of change.deletes) files.delete(path);
+              for (const [from, to] of change.moves) if (before.has(from)) files.set(to, before.get(from));
+              for (const write of change.writes) files.set(write.path, { bytes: write.bytes.slice(), modified: write.modified ?? Date.now() });
+            },
+          },
+        };
+      },
+    },
+    async (ui) => {
+      const { page } = ui;
+      const header = "Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\nCreation-Date: 2026-10-06T09:00:00+02:00\n\n";
+      const field = await page.evaluate((h) => window.__fake.make("Field notes folder", {
+        "notebook.zim": "[Notebook]\nversion=0.4\nname=Field notes\nhome=Start\n",
+        "Start.txt": `${h}====== Start ======\nhello from files\n`,
+        "Projects/My_Note.txt": `${h}====== My Note ======\nin a folder\n`,
+      }), header);
+
+      // the menu offers it, and takes a folder as it is
+      await ui.openMenu();
+      assert(await ui.menu().getByRole("menuitem", { name: "Open a folder as a notebook…" }).isVisible(), "the menu offers to open a folder");
+      await page.evaluate((id) => (window.__fake.next = id), field);
+      await ui.menu().getByRole("menuitem", { name: "Open a folder as a notebook…" }).click();
+      await page.waitForFunction(() => document.querySelector(".notebook-title")?.textContent === "Field notes");
+      assertDeepEqual(await ui.names(), ["Projects:My Note", "Start"], "the pages of the files are the pages");
+      await ui.waitCurrent("Start");
+      assert((await ui.pageText("Start")).includes("hello from files"), "and their text");
+      assertDeepEqual(await page.evaluate((id) => window.__fake.paths(id), field), ["Projects/My_Note.txt", "Start.txt", "notebook.zim"], "nothing was written to open it");
+
+      // writing goes to the file the page has, and nothing else of the folder changes
+      await ui.typeAtEnd("and what I add");
+      await page.waitForFunction(() => document.querySelector(".save-state")?.textContent === "Saved");
+      const written = await page.evaluate((id) => window.__fake.text(id, "Start.txt"), field);
+      assert(written.startsWith("Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\nCreation-Date: 2026-10-06T09:00:00+02:00\n\n====== Start ======\nhello from files\n"), `the file keeps what it had (${written})`);
+      assert(written.includes("and what I add"), "and has what was written");
+      assertEqual(await page.evaluate((id) => window.__fake.text(id, "Projects/My_Note.txt"), field), `${header}====== My Note ======\nin a folder\n`, "the other page's file is as it was");
+
+      // a new notebook in a folder, chosen with the system's dialog: Zim's files, with notebook.zim
+      const fresh = await page.evaluate(() => window.__fake.make("An empty folder"));
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+      const dialog = ui.dialog();
+      await dialog.waitFor();
+      assertEqual(await dialog.locator("#choice-kind").inputValue(), "folder", "a new notebook is a folder in the program");
+      await dialog.locator("#field-title").fill("Fresh");
+      await page.evaluate((id) => (window.__fake.next = id), fresh);
+      await dialog.getByRole("button", { name: "Create", exact: true }).click();
+      await dialog.waitFor({ state: "detached" });
+      await page.waitForFunction(() => document.querySelector(".notebook-title")?.textContent === "Fresh");
+      assertDeepEqual(await page.evaluate((id) => window.__fake.paths(id), fresh), ["Home.txt", "notebook.zim"], "it is the files of a Zim notebook");
+      assert((await page.evaluate((id) => window.__fake.text(id, "notebook.zim"), fresh)).includes("name=Fresh"), "named in notebook.zim");
+
+      // a folder that was not chosen is no notebook
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+      await dialog.waitFor();
+      await dialog.getByRole("button", { name: "Create", exact: true }).click();
+      await page.waitForFunction(() => document.querySelector("dialog.dialog")?.textContent?.includes("No folder was chosen."));
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await dialog.waitFor({ state: "detached" });
+
+      // both are in the menu, as folders; removing one only unlists it
+      await ui.openMenu();
+      const listed = (await ui.menu().getByRole("menuitemradio").allInnerTexts()).map((t) => t.toLowerCase());
+      assert(listed.some((t) => t.startsWith("field notes") && t.includes("folder")) && listed.some((t) => t.startsWith("fresh") && t.includes("folder")), `the menu lists the folders (${listed.join(" | ")})`);
+      await page.keyboard.press("Escape");
+      await ui.openMenu();
+      assertEqual(await ui.menu().getByRole("menuitem", { name: "Delete notebook…" }).count(), 0, "a folder is removed, not deleted");
+      await ui.menu().getByRole("menuitem", { name: "Remove notebook…" }).click();
+      await dialog.waitFor();
+      const said = await dialog.innerText();
+      assert(said.includes("Stop listing") && said.includes("stay where they are"), `removing a folder says that its files stay (${said})`);
+      await dialog.getByRole("button", { name: "Remove from this program", exact: true }).click();
+      await dialog.waitFor({ state: "detached" });
+      assertDeepEqual(await page.evaluate(() => window.__fake.listed()), [field], "only the other folder is listed now");
+      assertDeepEqual(await page.evaluate((id) => window.__fake.paths(id), fresh), ["Home.txt", "notebook.zim"], "and the files of the one removed are still there");
+    },
+  );
+
   // ==========================================================================================
   // The certificate that `serve.sh --tls` makes: with the warning clicked through, and trusted
   // ==========================================================================================

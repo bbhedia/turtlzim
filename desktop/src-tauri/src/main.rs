@@ -2,10 +2,14 @@
 // own but what a WebView lacks: the page's script (shell.js) and a command that saves a file where the person says.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod folders;
+
 use percent_encoding::percent_decode_str;
 use std::path::Path;
 use tauri::ipc::{InvokeBody, Request};
-use tauri::{AppHandle, WebviewUrl, WebviewWindowBuilder};
+use std::path::PathBuf;
+use std::sync::Mutex;
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::DialogExt;
 
 /// Whether the page's errors are to be written to this program's standard error: only when it was started with `ZIM_DESKTOP_DEBUG` set (to
@@ -105,11 +109,72 @@ fn linux_web_features(view: &webkit2gtk::WebView) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// notebooks in folders (the work is in folders.rs; the page names a folder by the id it was given, never by a path)
+
+type Registry<'a> = State<'a, Mutex<folders::Registry>>;
+
+fn folder_path(registry: &Registry<'_>, id: &str) -> Result<PathBuf, String> {
+    registry.lock().map_err(|_| "the list of folders is in use".to_string())?.path(id)
+}
+
+/// The folders that are notebooks.
+#[tauri::command]
+async fn fs_roots(registry: Registry<'_>) -> Result<Vec<folders::RootInfo>, String> {
+    Ok(registry.lock().map_err(|_| "the list of folders is in use".to_string())?.infos())
+}
+
+/// Ask where, with the system's folder dialog, and list that folder as a notebook. `None` if the person cancelled.
+#[tauri::command]
+async fn fs_pick(app: AppHandle, registry: Registry<'_>) -> Result<Option<folders::RootInfo>, String> {
+    let Some(chosen) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let path = chosen.into_path().map_err(|error| error.to_string())?;
+    registry.lock().map_err(|_| "the list of folders is in use".to_string())?.add(&path).map(Some)
+}
+
+/// Stop listing a folder. Nothing in it is touched.
+#[tauri::command]
+async fn fs_forget(registry: Registry<'_>, id: String) -> Result<(), String> {
+    registry.lock().map_err(|_| "the list of folders is in use".to_string())?.forget(&id)
+}
+
+#[tauri::command]
+async fn fs_list(registry: Registry<'_>, id: String) -> Result<Vec<folders::Entry>, String> {
+    folders::list(&folder_path(&registry, &id)?)
+}
+
+#[tauri::command]
+async fn fs_read(registry: Registry<'_>, id: String, path: String) -> Result<tauri::ipc::Response, String> {
+    folders::read(&folder_path(&registry, &id)?, &path).map(tauri::ipc::Response::new)
+}
+
+/// The bytes of a file that a change will put in place (`x-root`, `x-txn`, `x-n`, and `x-modified` in ms are the request's headers).
+#[tauri::command]
+async fn fs_stage(registry: Registry<'_>, request: Request<'_>) -> Result<(), String> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err("the file's bytes did not come with the request".into());
+    };
+    let header = |name: &str| request.headers().get(name).and_then(|value| value.to_str().ok()).map(str::to_string);
+    let root = folder_path(&registry, &header("x-root").ok_or("which folder?")?)?;
+    let number = header("x-n").and_then(|n| n.parse::<u32>().ok()).ok_or("which file?")?;
+    let modified = header("x-modified").and_then(|n| n.parse::<u64>().ok());
+    folders::stage(&root, &header("x-txn").ok_or("which change?")?, number, bytes, modified)
+}
+
+/// Make the change that was staged: all of it, or none.
+#[tauri::command]
+async fn fs_commit(registry: Registry<'_>, id: String, txn: String, plan: folders::Plan) -> Result<(), String> {
+    folders::commit(&folder_path(&registry, &id)?, &txn, &plan)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![save_file, debug_log])
+        .invoke_handler(tauri::generate_handler![save_file, debug_log, fs_roots, fs_pick, fs_forget, fs_list, fs_read, fs_stage, fs_commit])
         .setup(|app| {
+            app.manage(Mutex::new(folders::Registry::load(app.path().app_data_dir()?.join("folders.json"))));
             let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Zim Notebook")
                 .inner_size(1200.0, 800.0)
