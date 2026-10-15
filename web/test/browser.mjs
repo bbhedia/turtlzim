@@ -5464,6 +5464,128 @@ try {
     }
   });
 
+  // --- a GitHub repository as a connected service (the API is a stand-in with the real model: blobs, trees, commits, a branch that only moves forward) ---
+  await scenario("with an account server a notebook is kept in a GitHub repository: one commit for each send, other files untouched, a push made elsewhere is fetched, stop deletes only the notebook's files", async () => {
+    const { Accounts } = await import("../../server/src/accounts.mjs");
+    const { createApi } = await import("../../server/src/api.mjs");
+    const { openDatabase } = await import("../../server/src/db.mjs");
+    const { OutboxMailer } = await import("../../server/src/mail.mjs");
+    const { OAuth } = await import("../../server/src/oauth.mjs");
+    const { fakeGithub } = await import("../../server/test/fake-github.mjs");
+    const { randomBytes } = await import("node:crypto");
+    const gh = fakeGithub();
+    const ghUrl = await gh.start();
+    const config = { baseUrl: "http://127.0.0.1", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: {}, connectorOptions: { allowInsecure: true, allowPrivate: true, githubApi: ghUrl } };
+    const db = openDatabase(":memory:");
+    const mailer = new OutboxMailer();
+    const accounts = new Accounts({ db, mailer, config });
+    const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+    const withAccounts = createStaticServer({ dir: dist, api });
+    await new Promise((resolve) => withAccounts.listen(0, "127.0.0.1", resolve));
+    const at = `http://127.0.0.1:${withAccounts.address().port}`;
+    config.baseUrl = at;
+    await accounts.register("ada@example.org", "correct horse battery");
+    accounts.verify("ada@example.org", /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1]);
+    const devices = [];
+    try {
+      const device = async () => {
+        const made = await openApp({ at });
+        devices.push(made);
+        const { page } = made.ui;
+        const says = (text) =>
+          page.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout: 25_000 }).catch(async () => {
+            throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await page.locator("#status").innerText())}`);
+          });
+        const choose = async (name) => {
+          await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+          await made.ui.openMenu();
+          await made.ui.menu().getByRole("menuitem", { name }).click();
+        };
+        return { ...made, page, says, choose, dialog: () => topDialog(page) };
+      };
+      const signIn = async (d) => {
+        await d.choose("Sign in or create an account…");
+        await d.dialog().getByLabel("E-mail address", { exact: true }).fill("ada@example.org");
+        await d.dialog().getByLabel("Password", { exact: true }).fill("correct horse battery");
+        await d.dialog().getByRole("button", { name: "Sign in" }).click();
+        await d.says("Signed in as ada@example.org");
+      };
+      const write = async (d, text) => {
+        await d.ui.typeAtEnd(text);
+        await d.ui.flush();
+      };
+      const A = await device();
+      await signIn(A);
+      await write(A, "written on A\n");
+
+      await A.choose("Connected services…");
+      await A.dialog().getByRole("button", { name: "Connect GitHub repository…" }).click();
+      const connect = A.dialog();
+      await connect.getByLabel("Name", { exact: true }).fill("Notes repo");
+      await connect.getByLabel("Repository", { exact: true }).fill("ada/notebooks");
+      await connect.getByLabel("Access token", { exact: true }).fill("ghp_wrong");
+      await connect.getByRole("button", { name: "Test and connect" }).click();
+      await connect.locator(".dialog-error").filter({ hasText: "GitHub refused that token" }).waitFor();
+      if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, "connect-github.png") });
+      await connect.getByLabel("Access token", { exact: true }).fill("ghp_valid");
+      await connect.getByRole("button", { name: "Test and connect" }).click();
+      await A.says("Connected: Notes repo");
+      assert(!Buffer.from(db.prepare("select config from connectors").get().config).includes("ghp_valid"), "the token is sealed in the server's database");
+
+      const commits0 = gh.commits.size;
+      await A.choose("Keep this notebook on the server…");
+      await A.dialog().getByLabel("Where").selectOption({ index: 1 });
+      await A.dialog().getByRole("button", { name: "Keep it there" }).click();
+      await A.says("is kept on Notes repo");
+      assertEqual(gh.commits.size, commits0 + 1, "the whole notebook went in one commit");
+      const inRepo = Object.keys(gh.files()).filter((p) => p.startsWith("notebooks/"));
+      assert(inRepo.some((p) => p.endsWith("/Home.txt")) && inRepo.some((p) => p.endsWith("/notebook.zim")), `the notebook is in the repository's folder as Zim files (${inRepo.slice(0, 4).join(", ")})`);
+      assert("README.md" in gh.files(), "and the README is untouched");
+      const folder = inRepo[0].split("/")[1];
+
+      const B = await device();
+      await signIn(B);
+      await B.choose("Open a notebook from the server…");
+      await B.dialog().waitFor();
+      assert((await B.dialog().locator("option").allTextContents()).some((o) => o.includes("Notes repo")), "B is offered the notebook of the repository");
+      await B.dialog().getByRole("button", { name: "Open" }).click();
+      await B.says("was copied from Notes repo");
+      assert((await B.ui.text()).includes("written on A"), "B has what A wrote");
+
+      await write(B, "written on B\n");
+      const commits1 = gh.commits.size;
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to Notes repo");
+      assertEqual(gh.commits.size, commits1 + 1, "one commit for the change");
+      assert(gh.commits.get(gh.branches.get("main")).message.includes("1 written"), "that wrote one file");
+
+      // someone edits the page in the repository itself: the next sync brings it in
+      gh.push({ [`notebooks/${folder}/Home.txt`]: gh.files()[`notebooks/${folder}/Home.txt`].toString() + "edited on github.com\n" });
+      await A.choose("Sync this notebook now");
+      await A.says("was brought up to date from Notes repo");
+      assert((await A.ui.text()).includes("edited on github.com") && (await A.ui.text()).includes("written on B"), "A has the push made elsewhere and B's work");
+
+      await A.choose("Stop keeping this notebook on the server…");
+      await A.dialog().getByRole("button", { name: "Stop" }).click();
+      await A.says("The copy was deleted");
+      const left = Object.keys(gh.files());
+      assert(!left.some((p) => p.startsWith(`notebooks/${folder}/`)) && left.includes("README.md"), `only the notebook's files were deleted (${left.join(", ")})`);
+      await B.choose("Connected services…");
+      await B.dialog().getByRole("button", { name: "Disconnect" }).click();
+      await B.says("Disconnected");
+      assertEqual(db.prepare("select count(*) as n from connectors").get().n, 0, "the server forgot the token");
+      const refusals = problems.filter((p) => /Failed to load resource: the server responded with a status of 400/.test(p));
+      assertEqual(refusals.length, 1, `one refusal was asked for (${problems.join(" | ")})`);
+      problems = problems.filter((p) => !refusals.includes(p));
+    } finally {
+      for (const d of devices) await d.context.close();
+      withAccounts.closeAllConnections?.();
+      withAccounts.close();
+      gh.stop();
+      db.close();
+    }
+  });
+
   for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"} ${r.name}${r.ok ? ` (${r.ms} ms)` : `\n    ${r.error}`}`);
   const failed = results.length === 0 || results.some((r) => !r.ok);
   console.log(`\n${results.filter((r) => r.ok).length} of ${results.length} scenarios passed`);

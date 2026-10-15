@@ -3,9 +3,10 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { AccountError } from "../accounts.mjs";
 import { ConnectorError } from "./safe-fetch.mjs";
+import { github } from "./github.mjs";
 import { versionOf, webdav } from "./webdav.mjs";
 
-export const DRIVERS = { webdav };
+export const DRIVERS = { webdav, github };
 const MAX_CONNECTORS = 10;
 const SEGMENT = /^[^\u0000-\u001f\\/]{1,120}$/;
 
@@ -81,7 +82,7 @@ export class Connectors {
     try {
       return await work();
     } catch (error) {
-      if (error instanceof ConnectorError) throw new AccountError(error.message, error.status === 502 || error.status === 504 ? error.status : 400, { code: error.code });
+      if (error instanceof ConnectorError) throw new AccountError(error.message, [409, 413, 502, 504].includes(error.status) ? error.status : 400, { code: error.code });
       throw error;
     }
   }

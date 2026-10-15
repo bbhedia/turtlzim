@@ -444,6 +444,7 @@ export class SyncUi {
       },
     });
     if (next === "webdav") await this.connectWebdavDialog();
+    else if (next === "github") await this.connectGithubDialog();
   }
 
   private async connectWebdavDialog(): Promise<void> {
@@ -464,6 +465,34 @@ export class SyncUi {
       submit: async (values) => {
         try {
           const made = await this.account.client.addConnector("webdav", String(values.label).trim(), { url: String(values.url).trim(), username: String(values.username).trim(), password: String(values.password) });
+          this.connections = [...this.connections, made];
+          this.host.say(`Connected: ${made.label}. Choose it in “Keep this notebook on the server…”.`);
+        } catch (error) {
+          return this.explain(error);
+        }
+      },
+    });
+  }
+
+  private async connectGithubDialog(): Promise<void> {
+    await showDialog({
+      title: "Connect a GitHub repository",
+      body: [
+        "Notebooks are kept as folders of files in a repository of yours, one commit for each time they are sent. The repository needs at least one commit already (a README does), and it should be private: the notebooks are stored as they are, not encrypted.",
+        "Use a fine-grained personal access token (GitHub: Settings → Developer settings → Personal access tokens) for that one repository only, with “Contents: Read and write”. This server keeps it sealed and uses it only to read and write that folder.",
+      ],
+      fields: [
+        { name: "label", label: "Name", value: "", placeholder: "My notes repository" },
+        { name: "repo", label: "Repository", placeholder: "owner/name", validate: (v) => (/^[\w.-]+\/[\w.-]+$/.test(v.trim()) ? null : "Write it as owner/name.") },
+        { name: "branch", label: "Branch", value: "main", validate: (v) => (v.trim() ? null : "Give the branch.") },
+        { name: "root", label: "Folder in the repository", value: "notebooks", hint: "Each notebook gets a folder inside it. Leave empty for the top of the repository." },
+        { name: "token", label: "Access token", type: "password", autocomplete: "new-password", validate: (v) => (v.trim() ? null : "Paste the token.") },
+      ],
+      confirm: "Test and connect",
+      working: "Testing…",
+      submit: async (values) => {
+        try {
+          const made = await this.account.client.addConnector("github", String(values.label).trim(), { repo: String(values.repo).trim(), branch: String(values.branch).trim(), root: String(values.root).trim(), token: String(values.token).trim() });
           this.connections = [...this.connections, made];
           this.host.say(`Connected: ${made.label}. Choose it in “Keep this notebook on the server…”.`);
         } catch (error) {

@@ -156,7 +156,7 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
         if (get) return void send(res, 405, { error: "Not that way." }, { allow: "POST, DELETE" });
         checkSameSite(req);
         if (id === null && method === "POST") {
-          accounts.limit(`connector:add:${userId}`, 10, 3600);
+          accounts.limit(`connector:add:${userId}`, 30, 3600);
           const body = await readJson(req);
           return void send(res, 200, await connectors.add(userId, body.kind, body.label, body.settings));
         }

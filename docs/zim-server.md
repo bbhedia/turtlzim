@@ -3,7 +3,7 @@
 `server/`: a Node 24 program (no framework; `node:sqlite`, `node:crypto`, and `nodemailer` for SMTP) that serves the web app **and** `/api/`, in one
 process. It exists so that a person can have an **account**; an account is optional, and without one nothing changes: notebooks stay on the device.
 Accounts can keep **open notebooks on the server, in clear**, in step with other devices (below; 1 MB per user). A sealed copy of the encrypted notebooks (below) and
-connected services (Nextcloud / WebDAV; Dropbox, Google Drive, GitHub, GitLab are later steps (`docs/zim-cloud-feasibility.md`, roadmap lots 3 to 6). Decided 2026-10-15: Google and GitHub
+connected services (Nextcloud / WebDAV and a GitHub repository; Dropbox, Google Drive, GitLab are later steps (`docs/zim-cloud-feasibility.md`, roadmap lots 3 to 6). Decided 2026-10-15: Google and GitHub
 first, a mailed code **only at sign-up**, and run on this server (a VPS later if the project succeeds; the shared hosting idea is dropped).
 
 ## What it does
@@ -92,10 +92,25 @@ Then *Keep this notebook on the server…* offers the account's space (1 MB) or 
   and file names are checked (no `..`, nothing hidden, no more than four levels) before the service is called; connections belong to their owner (another account gets “no such connection”); limits per account. An operator who runs the server inside
   their own network can allow private addresses (`connectorOptions.allowPrivate`, in code or tests only: there is no setting for it in `config.json` on purpose).
 - The password is the service's, so a server that is hacked gives it away: **use an app password** (Nextcloud: Settings → Security), revocable without touching the main one.
-- Verified by `server/test/connectors.test.mjs` (a WebDAV server in memory; 13 tests, 10 mutants of the guards, the sealing, the version check and the ownership all caught) and the browser scenario "…a connected WebDAV service…" (connect with a wrong
+- Verified by `server/test/connectors.test.mjs` (a WebDAV server in memory; 14 tests, 10 mutants of the guards, the sealing, the version check and the ownership all caught) and the browser scenario "…a connected WebDAV service…" (connect with a wrong
   password refused, then right; keep; open on a second device; only the changed page written; a new page and a deleted page reach the service; a conflict is asked about; stop deletes its files; disconnect from a linked device unlinks it).
   **Not tried against a real Nextcloud or ownCloud** (only the protocol as the fake speaks it: PROPFIND, MKCOL, GET, PUT, DELETE, basic authentication; a real server may answer details differently).
-- Not done: Dropbox, Google Drive, GitHub, GitLab (each needs OAuth apps of yours, or a token, and its own driver: the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what they plug into), connecting a service
+### A GitHub repository (`server/src/connectors/github.mjs`)
+
+*Connect GitHub repository…* takes `owner/name`, a branch (default `main`), a folder of the repository for the notebooks (default `notebooks`, or empty for the top) and a **personal access token**
+(best: fine-grained, for that one repository, “Contents: Read and write”; the repository should be **private**, the notebooks are stored in clear). The server checks the repository, the branch and that the token can write before keeping anything,
+and keeps the token sealed like a WebDAV password. A notebook is `<folder>/<title>-<random>/…` in the branch.
+
+- **A send is one commit**, made with the Git Data API (the changed files as blobs, a tree on top of the branch's own tree, a commit, then the branch moved *without force*): the rest of the repository is untouched, the history shows one commit
+  for each send (“Zim Notebook: Garden-ab12cd (2 written, 1 deleted)”), and **if the branch moved meanwhile GitHub refuses the move**, which is reported as a conflict: unlike plain WebDAV, two devices can't overwrite each other here.
+- A change made in the repository itself (editing a page on github.com, a pull) is **fetched at the next sync**, since the folder's version is the content hashes of its files.
+- The repository must already have a commit on that branch (a README does); the API's address is `api.github.com`, changeable only by the operator (`connectorOptions.githubApi`, for GitHub Enterprise or tests), never by a user.
+- Verified by `server/test/github.test.mjs` (a GitHub in memory with real blobs, trees, commits and a branch that only moves forward; 8 tests; 9 mutants — force push, no read-only check, wrong parent, base tree dropped, conflict not reported, removals dropped, folder ignored,
+  branch not checked, token not validated — all caught, a push at the worst moment is not overwritten) and the browser scenario “…kept in a GitHub repository…” (wrong token refused; one commit for the first send; B opens it; one commit for one change; a push made elsewhere
+  is fetched by A; stop deletes only the notebook's files, the README stays; disconnect forgets the token). **Not tried against the real GitHub**: rate limits (5000 requests an hour; a send makes one request for each changed file plus five), repositories with
+  branch protection or required signed commits (the move would be refused), files over 100 MB, a repository that is empty.
+
+- Not done: Dropbox, Google Drive, GitLab (each needs OAuth apps of yours, or a token, and its own driver: the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what they plug into), connecting a service
   for the encrypted notebooks' sealed copy, and a sync of connected services from the native apps.
 
 ## Run it
@@ -141,4 +156,4 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## Not yet
 
-Merging two versions of a page (today one copy replaces the other), the Dropbox / Google Drive / GitHub / GitLab connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).
+Merging two versions of a page (today one copy replaces the other), the Dropbox / Google Drive / GitLab connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).
