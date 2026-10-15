@@ -13,7 +13,6 @@ export function createApi({ accounts, oauth, config, log = () => {} }) {
   const prefix = config.secure ? "__Host-" : "";
   const SESSION = `${prefix}zim`;
   const NONCE = `${prefix}zim-oauth`;
-  const origin = new URL(config.baseUrl).origin;
 
   const cookieOf = (req) => {
     const jar = {};
@@ -76,6 +75,7 @@ export function createApi({ accounts, oauth, config, log = () => {} }) {
   function checkSameSite(req) {
     const fetchSite = req.headers["sec-fetch-site"];
     if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") throw new AccountError("That request does not come from this site.", 403, { code: "cross-site" });
+    const origin = new URL(config.baseUrl).origin;
     const from = req.headers.origin;
     if (from && from !== origin && from !== `${config.secure ? "https" : "http"}://${req.headers.host}`) throw new AccountError("That request does not come from this site.", 403, { code: "cross-site" });
     if (req.headers["x-requested-with"] !== "zim") throw new AccountError("That request does not come from this site.", 403, { code: "cross-site" });
@@ -116,8 +116,8 @@ export function createApi({ accounts, oauth, config, log = () => {} }) {
       if (route === "/api/providers" && get) return void send(res, 200, { providers: oauth.providers(), email: true });
       if (route === "/api/me" && get) {
         const found = sessionOf(req);
-        if (!found) return void send(res, 401, { error: "Not signed in.", code: "signed-out" });
-        return void send(res, 200, publicMe(found));
+        // (not a 401: a page that asks who is here, signed out, is not an error, and a browser would log it as one)
+        return void send(res, 200, found ? publicMe(found) : { user: null, signIns: [] });
       }
       if (route === "/api/account/export" && get) {
         const found = sessionOf(req);

@@ -63,6 +63,31 @@ function request(port: number, path: string, options: { method?: string; headers
 }
 
 describe("what it serves", () => {
+  it("says that no accounts are on offer (not an error) where there is no account server, and hands /api/ to the account server where there is one", async () => {
+    const plain = await request(await start(), "/api/providers");
+    expect(plain.status).toBe(200);
+    expect(JSON.parse(plain.body.toString())).toEqual({ email: false, providers: [] });
+    expect((await request(await start(), "/api/me")).status).toBe(404);
+    const server = createStaticServer({
+      dir: site,
+      api: (req, res) => {
+        if (req.url !== "/api/hello") return false;
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("from the api");
+        return true;
+      },
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    servers.push(server);
+    const port = (server.address() as AddressInfo).port;
+    const answered = await request(port, "/api/hello");
+    expect(answered.body.toString()).toBe("from the api");
+    expect(answered.headers["x-content-type-options"]).toBe("nosniff");
+    expect((await request(port, "/api/other")).status).toBe(404);
+    expect((await request(port, "/api/providers")).status).toBe(404);
+    expect((await request(port, "/apiary.html")).status).toBe(404);
+  });
+
   it("the page at / and /index.html, with security headers", async () => {
     const port = await start();
     for (const path of ["/", "/index.html", "/?utm=1", "/#frag"]) {

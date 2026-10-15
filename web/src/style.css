@@ -72,6 +72,10 @@ button.primary { background: var(--zim-link); border-color: var(--zim-link); col
 button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 button.secondary { background: transparent; }
 .danger-text { color: var(--danger); }
+.account-services { display: flex; flex-direction: column; gap: 0.4rem; }
+.account-services a { display: block; padding: 0.45rem 0.7rem; border: 1px solid var(--zim-border); border-radius: 6px; text-align: center; text-decoration: none; color: inherit; font-weight: 600; }
+.account-services a:hover { border-color: var(--zim-muted); }
+.account-services p { margin: 0.2rem 0 0; text-align: center; }
 
 .loading { padding: 2rem; color: var(--zim-muted); }
 

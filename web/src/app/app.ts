@@ -22,6 +22,7 @@ import { BACKUP_EXTENSION, BACKUP_TYPE, CoreError, NoVaultError, NotABackupError
 import type { VaultEvent } from "../vault";
 import { TurtlStore } from "../vault/turtl-store";
 import { createZip, readZip } from "../zip";
+import { AccountUi } from "../account/ui";
 import { closeAllDialogs, showDialog, showMessage } from "./dialogs";
 import type { Phase, Pwa } from "../pwa/register";
 import { CalendarPanel, localToday } from "./calendar";
@@ -30,7 +31,7 @@ import { clear, h, highlighted } from "./dom";
 import { TagsPanel } from "./tags";
 import { TreeView } from "./tree-view";
 import { showScreenDetails } from "./screen-details";
-import { shellHooks } from "./shell";
+import { shellHooks, shellPlatform } from "./shell";
 import type { ScreenDetails } from "./screen-details";
 import { trackVisibleHeight } from "./viewport";
 
@@ -165,6 +166,8 @@ export class App {
   private askingToLose = false;
   /** What the service worker says (see pwa/): which version runs, and whether another waits to be approved. */
   private pwa: Pwa | null = null;
+  /** Sign-in to the account server, where there is one (nowhere in a native shell: the app asks the network for nothing there). */
+  private readonly account: AccountUi;
   private pwaPhase: Phase | null = null;
   /** The new version that the person said "Not now" to, so that it is not offered again on this page. */
   private updateDismissedFor: string | null = null;
@@ -262,6 +265,7 @@ export class App {
     for (const [name, panel] of [["contents", this.contents.element], ["calendar", this.calendar.element], ["tags", this.tagList.element]] as const) {
       panel.addEventListener("toggle", () => prefs.set(`panel:${name}`, panel.open ? "open" : "closed"));
     }
+    this.account = new AccountUi((text) => this.say(text), (name, blob) => this.saveFile(name, blob));
     this.els = this.build(root);
     vault.onChange((event) => this.onVaultChange(event));
     vault.onSettled((finished) => void this.tellSettled(finished));
@@ -295,6 +299,8 @@ export class App {
     store = new RoutedStore(store, sealed, () => vault.unlocked, (error, which) => (which === "encrypted" ? app?.warnAboutVault(`The encrypted notebooks can't be read at the moment (${error.message}). Lock them and unlock them again.`) : app?.warn(`The notebooks in folders can't be listed at the moment (${error.message}).`)), folders);
     app = new App(root, store, keptInMemory, vault);
     await app.openInitialNotebook();
+    // (after the first notebook is open, so that what it says of the sign-in that was just made is not overwritten by the app starting)
+    if (shellPlatform() === null) void app.account.start();
     return app;
   }
 
@@ -700,7 +706,9 @@ export class App {
   private toggleNotebookMenu(): void {
     const open = this.els.notebookMenu.hidden;
     if (!open) return this.closeNotebookMenu();
-    this.store.listNotebooks().then((notebooks) => {
+    // (what the account server says is asked when the menu opens, not before; a server that is slow does not hold the menu back for long)
+    const accounts = shellPlatform() === null ? Promise.race([this.account.refresh(), new Promise<void>((resolve) => setTimeout(resolve, 1500))]) : Promise.resolve();
+    Promise.all([this.store.listNotebooks(), accounts]).then(([notebooks]) => {
       const item = (text: string, onClick: () => void, extra: Record<string, unknown> = {}, badge?: string) =>
         h("button", { type: "button", role: "menuitem", class: "menu-item", on: { click: () => { this.closeNotebookMenu(); onClick(); } }, ...extra }, h("span", { text }), badge ? h("span", { class: "badge", text: badge }) : null);
       clear(this.els.notebookMenu);
@@ -724,6 +732,7 @@ export class App {
         h("hr", {}),
         item(this.session.info.kind === "folder" ? "Remove notebook…" : "Delete notebook…", () => void this.deleteNotebook(), { class: this.session.info.kind === "folder" ? "menu-item" : "menu-item danger-text" }),
       );
+      if (this.account.available) this.els.notebookMenu.append(h("hr", {}), item(this.account.menuLabel, () => void this.account.open()));
       const pwa = this.pwa;
       if (pwa) {
         this.els.notebookMenu.append(h("hr", {}));

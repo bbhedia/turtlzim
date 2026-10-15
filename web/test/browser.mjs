@@ -4359,6 +4359,8 @@ try {
       assert((await ui.pageText("Secret page")).includes("written in the vault, with no server"), "and gives it back after an unlock");
       await page.locator(".lock-button").click();
       await isOpenNotebook(page);
+      // (the menu asks the account server whether it offers accounts; the server is gone, and the browser logs the request that failed: that is all that this filter lets through)
+      problems = problems.filter((p) => !/^\[console error\] Failed to load resource: net::ERR_FAILED$/.test(p));
     } finally {
       await context.close();
     }
@@ -4910,11 +4912,121 @@ try {
       assertEqual(await ui.saveState(), "Saved", "an encrypted notebook can be made and written in");
       await page.locator(".lock-button").click();
       await isOpenNotebook(page);
+      // (the menu asks the account server whether it offers accounts; the server is gone, and the browser logs the request that failed: that is all that this filter lets through)
+      problems = problems.filter((p) => !/^\[console error\] Failed to load resource: net::ERR_FAILED$/.test(p));
     } finally {
       await context.close();
       await trusting.close();
       secure.closeAllConnections?.();
       secure.close();
+    }
+  });
+
+  // --- accounts, against the real account server (server/): the pages are served by it, the sign-in service is a stand-in on a port of its own ---
+  await scenario("with an account server: create an account with the e-mailed code, stay signed in after a reload, sign out and in, sign in with GitHub, and a wrong code is refused", async () => {
+    const { Accounts } = await import("../../server/src/accounts.mjs");
+    const { createApi } = await import("../../server/src/api.mjs");
+    const { openDatabase } = await import("../../server/src/db.mjs");
+    const { OutboxMailer } = await import("../../server/src/mail.mjs");
+    const { OAuth } = await import("../../server/src/oauth.mjs");
+    const { default: http } = await import("node:http");
+    const { randomBytes } = await import("node:crypto");
+    const github = http.createServer((req, res) => {
+      const url = new URL(req.url, "http://x");
+      if (url.pathname === "/authorize") {
+        res.writeHead(302, { location: `${url.searchParams.get("redirect_uri")}?code=the-code&state=${url.searchParams.get("state")}` });
+        return res.end();
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(url.pathname === "/token" ? { access_token: "t" } : url.pathname === "/user" ? { id: 4242 } : [{ email: "grace@example.org", primary: true, verified: true }]));
+    });
+    await new Promise((resolve) => github.listen(0, "127.0.0.1", resolve));
+    const gh = `http://127.0.0.1:${github.address().port}`;
+    const config = { baseUrl: "", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: { github: { clientId: "id", clientSecret: "secret", endpoints: { authorize: `${gh}/authorize`, token: `${gh}/token`, user: `${gh}/user`, emails: `${gh}/emails` } } } };
+    const db = openDatabase(":memory:");
+    const mailer = new OutboxMailer();
+    const accounts = new Accounts({ db, mailer, config });
+    const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+    const withAccounts = createStaticServer({ dir: dist, api });
+    await new Promise((resolve) => withAccounts.listen(0, "127.0.0.1", resolve));
+    const at = `http://127.0.0.1:${withAccounts.address().port}`;
+    config.baseUrl = at;
+    const { context, ui } = await openApp({ at });
+    try {
+      const { page } = ui;
+      // (says what the status line and the address were when the wait ran out)
+      const saysStatus = (page, text) => page.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout: 15_000 }).catch(async () => {
+        const me = await page.evaluate(() => fetch("/api/me").then((r) => r.text()).catch((e) => String(e)));
+        throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await page.locator("#status").innerText())} at ${page.url()} (the server says ${me})`);
+      });
+      const field = (label) => topDialog(page).getByLabel(label, { exact: true });
+      const button = (name) => topDialog(page).getByRole("button", { name });
+      const menuItem = async (name) => {
+        await ui.openMenu();
+        return ui.menu().getByRole("menuitem", { name });
+      };
+      await page.waitForFunction(() => window.__zim !== undefined);
+      await (await menuItem("Sign in or create an account…")).click();
+      assert((await topDialog(page).innerText()).includes("Continue with GitHub"), "the dialog offers GitHub, which is set up (and not Google, which is not)");
+      assertEqual(await topDialog(page).getByText("Continue with Google").count(), 0, "no Google button where Google is not set up");
+      const shot = async (name) => process.env.SCREENSHOTS && (mkdirSync(process.env.SCREENSHOTS, { recursive: true }), await page.screenshot({ path: join(process.env.SCREENSHOTS, `account-${name}.png`) }));
+      await shot("sign-in");
+      // create an account: the code is e-mailed, a wrong one is refused, the right one signs in
+      await button("Create an account…").click();
+      await field("E-mail address").fill("ada@example.org");
+      await field("Password").fill("correct horse battery");
+      await shot("create");
+      await button("Send me the code").click();
+      await page.getByRole("heading", { name: "Enter the code" }).waitFor();
+      await shot("code");
+      const code = /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1];
+      assertEqual(mailer.sent.at(-1).to, "ada@example.org", "the code went to the address");
+      await field("Code").fill(code === "000000" ? "111111" : "000000");
+      await button("Confirm").click();
+      await topDialog(page).locator(".dialog-error").filter({ hasText: /wrong|expired/ }).waitFor();
+      await field("Code").fill(code);
+      await button("Confirm").click();
+      await saysStatus(page, "Signed in as ada@example.org");
+      assertEqual(await page.evaluate(() => document.cookie), "", "the session cookie is not readable by the page's scripts");
+      // the account is still there after a reload, and the menu says so
+      await ui.reload();
+      await (await menuItem("Account (ada@example.org)…")).click();
+      assert((await topDialog(page).innerText()).includes("Signed in as ada@example.org"), "the account dialog says who is signed in");
+      await shot("account");
+      await button("Sign out").click();
+      await saysStatus(page, "Signed out");
+      await (await menuItem("Sign in or create an account…")).click();
+      await field("E-mail address").fill("ada@example.org");
+      await field("Password").fill("wrong wrong wrong");
+      await button("Sign in").click();
+      await topDialog(page).locator(".dialog-error").filter({ hasText: "Wrong e-mail address or password" }).waitFor();
+      await field("Password").fill("correct horse battery");
+      await button("Sign in").click();
+      await saysStatus(page, "Signed in as ada@example.org");
+      // sign out, then sign in with GitHub: the browser goes to the service and back, and the address is cleaned
+      await (await menuItem("Account (ada@example.org)…")).click();
+      await button("Sign out").click();
+      await saysStatus(page, "Signed out");
+      await (await menuItem("Sign in or create an account…")).click();
+      await Promise.all([page.waitForURL((url) => url.searchParams.get("signed_in") === "1", { timeout: 15_000 }).catch(() => {}), topDialog(page).getByRole("link", { name: "Continue with GitHub" }).click()]);
+      await ready(page);
+      await saysStatus(page, "Signed in as grace@example.org");
+      assert(!page.url().includes("signed_in") && !page.url().includes("account_error"), `the address was cleaned (${page.url()})`);
+      // a failed sign-in comes back with a fixed message
+      await page.goto(`${at}/?account_error=%3Cb%3Ehi%3C%2Fb%3E`);
+      await ready(page);
+      await saysStatus(page, "The sign-in did not work");
+      assert(!(await ui.status()).includes("<b>"), "nothing of the address is echoed");
+      // (the browser logs the refusals that this scenario asked for: a wrong code and a wrong password; anything else it logged still fails it)
+      const refusals = problems.filter((p) => /Failed to load resource: the server responded with a status of 40[01]/.test(p));
+      assertEqual(refusals.length, 2, `two refusals were asked for (${problems.join(" | ")})`);
+      problems = problems.filter((p) => !refusals.includes(p));
+    } finally {
+      await context.close();
+      withAccounts.closeAllConnections?.();
+      withAccounts.close();
+      github.close();
+      db.close();
     }
   });
 

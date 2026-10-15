@@ -157,6 +157,10 @@ export function createStaticServer({ dir, auth, log = () => {}, tls, authority, 
       );
       return;
     }
+    // (no account server here: the page asks what accounts are on offer, and the answer is none, not an error that a browser would log)
+    if (!api && (req.method === "GET" || req.method === "HEAD") && req.url === "/api/providers") {
+      return reply(200, { "content-type": "application/json", "cache-control": "no-store" }, '{"email":false,"providers":[]}');
+    }
     if (req.method !== "GET" && req.method !== "HEAD") {
       return reply(405, { allow: "GET, HEAD", "content-type": "text/plain" }, "Method not allowed\n");
     }
@@ -354,7 +358,7 @@ Serves the built editor (web/dist) and nothing else.
 `;
 
 /** `/zim-notebook.apk=mobile/out/app.apk` as the address and the file it gives out. */
-function downloadOption(text) {
+export function downloadOption(text) {
   const at = text.indexOf("=");
   const path = text.slice(0, at);
   if (at < 0 || !/^\/[^/?#\\\s][^?#\\\s]*$/.test(path) || path.split("/").some((part) => part === ".." || part === ".")) throw new Error("--download must look like /address=file (an address that starts with / and has no .. in it)");

@@ -154,6 +154,10 @@ npm run package -- --web            # npm run build in web/, then tauri build ->
 npx cap sync
 npx cap open android                # / ios
 
+# Account server (server/; docs/zim-server.md): the web app + /api/ (sign-up with an e-mailed code, Google and GitHub sign-in), Node 24, no root
+cd server && npm install && npm test   # accounts, OAuth against stand-ins, the HTTP layer
+ZIM_BASE_URL=https://localhost:8443 scripts/run.sh start --host :: --port 8443 --tls --name ADDRESS   # serves web/dist and /api/; scripts/run.sh stop|status|log
+
 # Sync server
 docker compose up                   # Postgres + server (define compose file)
 ```
@@ -208,6 +212,10 @@ docker compose up                   # Postgres + server (define compose file)
   `window.__zimShell.folders`; the page names a folder only by the id the program gave it, and `desktop/src-tauri/src/folders.rs` (no Tauri in it, `cargo test` in
   `desktop/src-tauri`) is all the program knows of one: paths are checked there, links are not followed, and a change is made entirely or not at all, with a journal. A
   folder is the person's: only what is listed and read as a page or an attachment is written, and removing a notebook only unlists it.
+- **Accounts** (`server/`, `docs/zim-server.md`; decided 2026-10-15: Google + GitHub first, a mailed code only at sign-up, on this server): optional, and **an account only exists so far**:
+  notebooks stay on the device, nothing of them goes to the server. The web app talks to `/api/` on its own address only (`web/src/account/`), shows account items only when
+  `/api/providers` answers, and a native shell shows none. Passwords are scrypt, sessions are `HttpOnly` cookies with only a hash stored, every change needs the `X-Requested-With: zim`
+  header and a same-site origin: do not weaken any of it, and a new endpoint gets the same tests. Secrets (OAuth, SMTP) live in `~/.local/state/zim-server`, never in the repo.
 - **The desktop program** (`desktop/`) is the same web build in Tauri, not a second UI or branch: `web/dist` goes in as it is, the version is `web/package.json`'s, and what a
   WebView lacks comes through `window.__zimShell` like on a phone. The CI workflow packs it for Linux and Windows on every change of `web/`, `core/` or `desktop/`.
 - **The app in a native shell** (`mobile/`, `docs/zim-mobile-shell.md`): the web app depends on no shell package. A shell is recognised by

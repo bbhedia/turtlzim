@@ -41,7 +41,7 @@ describe("the HTTP API", () => {
   });
 
   it("registers, confirms with the code mailed, and signs in with an HttpOnly cookie", async () => {
-    assert.equal((await call("/api/me", { method: "GET" })).status, 401);
+    assert.deepEqual((await call("/api/me", { method: "GET" })).json, { user: null, signIns: [] });
     const registered = await call("/api/register", { body: { email: "Ada@Example.org", password: PASSWORD } });
     assert.equal(registered.status, 200);
     assert.equal(registered.headers.get("cache-control"), "no-store");
@@ -59,7 +59,7 @@ describe("the HTTP API", () => {
     const old = cookie;
     assert.equal((await call("/api/logout")).status, 200);
     assert.equal(cookie, "");
-    assert.equal((await call("/api/me", { method: "GET", headers: { cookie: old } })).status, 401);
+    assert.equal((await call("/api/me", { method: "GET", headers: { cookie: old } })).json.user, null);
     assert.equal((await call("/api/login", { body: { email: "ada@example.org", password: "wrong wrong wrong" } })).status, 401);
     assert.equal((await call("/api/login", { body: { email: "ada@example.org", password: PASSWORD } })).status, 200);
     assert.equal((await call("/api/me", { method: "GET" })).status, 200);
@@ -98,7 +98,20 @@ describe("the HTTP API", () => {
     assert.equal(exported.json.email, "ada@example.org");
     assert.match(exported.headers.get("content-disposition"), /attachment/);
     assert.equal((await call("/api/account/delete", { body: { password: PASSWORD } })).status, 200);
-    assert.equal((await call("/api/me", { method: "GET", useCookie: false })).status, 401);
+    assert.equal((await call("/api/me", { method: "GET", useCookie: false })).json.user, null);
+  });
+
+  it("replaces the session that was held when signing in again, and does not delete an account for someone who is signed out", async () => {
+    await call("/api/logout");
+    await call("/api/register", { body: { email: "rot@example.org", password: PASSWORD }, useCookie: false });
+    await call("/api/verify", { body: { email: "rot@example.org", code: lastCode(parts.mailer, "rot@example.org") }, useCookie: false });
+    const first = cookie;
+    assert.ok(first);
+    await call("/api/login", { body: { email: "rot@example.org", password: PASSWORD } });
+    assert.notEqual(cookie, first, "a new session");
+    assert.equal((await call("/api/me", { method: "GET", headers: { cookie: first }, useCookie: false })).json.user, null, "the one that was held no longer works");
+    const signedOut = await call("/api/account/delete", { body: { password: PASSWORD }, useCookie: false });
+    assert.equal(signedOut.status, 401);
   });
 
   it("sends the person to the service and back, with a cookie that binds the browser", async () => {
@@ -107,6 +120,11 @@ describe("the HTTP API", () => {
     assert.match(start.headers.get("location"), /^https:\/\/github\.com\/login\/oauth\/authorize\?/);
     assert.match(start.set, /^zim-oauth=[\w-]+; Path=\/; HttpOnly; SameSite=Lax; Max-Age=600$/);
     assert.equal((await call("/api/oauth/nowhere/start", { method: "GET" })).headers.get("location"), "/?account_error=no-provider");
+    // (the state is right but the browser is not the one that started it: refused before anything is asked of the service)
+    const state = new URL(start.headers.get("location")).searchParams.get("state");
+    const other = await call(`/api/oauth/github/callback?code=x&state=${state}`, { method: "GET", useCookie: false });
+    assert.match(other.headers.get("location"), /^\/\?account_error=/);
+    assert.equal(other.set?.includes("zim="), false, "no session");
     const back = await call("/api/oauth/github/callback?code=x&state=bad", { method: "GET", useCookie: false });
     assert.equal(back.status, 302);
     assert.match(back.headers.get("location"), /^\/\?account_error=[a-z-]+$/);

@@ -1,12 +1,12 @@
 // The process: the web app's files and the account API, in one server (the static server of web/scripts/serve.mjs with the API hooked in).
 //
-//   node src/main.mjs [--host 127.0.0.1] [--port 8080] [--tls [--name ADDRESS]...] [--dir ../web/dist] [--pid-file FILE]
+//   node src/main.mjs [--host 127.0.0.1] [--port 8080] [--tls [--name ADDRESS]...] [--download /address=file] [--dir ../web/dist] [--pid-file FILE]
 //
 // Where it is reached (`ZIM_BASE_URL`, e.g. https://localhost:8443) has to be the address that people type: the sign-in services send the browser back to it.
 import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createStaticServer, selfSignedCertificate, urlsFor } from "../../web/scripts/serve.mjs";
+import { createStaticServer, downloadOption, selfSignedCertificate, urlsFor } from "../../web/scripts/serve.mjs";
 import { Accounts } from "./accounts.mjs";
 import { createApi } from "./api.mjs";
 import { loadConfig } from "./config.mjs";
@@ -18,7 +18,7 @@ import { OAuth } from "./oauth.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 
 function parseArguments(argv) {
-  const options = { host: "127.0.0.1", port: 8080, dir: resolve(here, "../../web/dist"), tls: false, names: [], pidFile: undefined };
+  const options = { host: "127.0.0.1", port: 8080, dir: resolve(here, "../../web/dist"), tls: false, names: [], downloads: [], pidFile: undefined };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const value = () => {
@@ -30,6 +30,7 @@ function parseArguments(argv) {
     else if (flag === "--dir") options.dir = resolve(value());
     else if (flag === "--tls") options.tls = true;
     else if (flag === "--name") options.names.push(value());
+    else if (flag === "--download") options.downloads.push(downloadOption(value()));
     else if (flag === "--pid-file") options.pidFile = resolve(value());
     else throw new Error(`unknown option ${flag}`);
   }
@@ -55,7 +56,7 @@ function main() {
   const api = createApi({ accounts, oauth, config, log });
 
   const tls = options.tls ? selfSignedCertificate(undefined, options.names) : undefined;
-  const server = createStaticServer({ dir: options.dir, tls: tls && { key: tls.key, cert: tls.cert }, authority: tls?.authority, api, log });
+  const server = createStaticServer({ dir: options.dir, tls: tls && { key: tls.key, cert: tls.cert }, authority: tls?.authority, downloads: options.downloads, api, log });
   server.on("error", (error) => {
     console.error(error.code === "EADDRINUSE" ? `server: port ${options.port} is already in use on ${options.host}` : `server: ${error.message}`);
     process.exit(1);

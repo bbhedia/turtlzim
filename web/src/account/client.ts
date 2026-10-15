@@ -1,0 +1,111 @@
+// The account server, as the page sees it: JSON under `/api/` on the address the app came from (the page's content policy lets it ask nowhere else).
+// Where there is no such server (a static host, a native shell, a test) `available()` says so and the app shows nothing about accounts.
+// Notes never go through here: an account only exists, so far, and notebooks stay on the device.
+
+export interface Account {
+  email: string;
+  quotaBytes: number;
+  hasPassword: boolean;
+  /** The services (`google`, `github`) this account can sign in with. */
+  signIns: string[];
+}
+
+export interface Offer {
+  providers: string[];
+}
+
+/** What a failed request says: the server's message (written for a person) and its code, for what the page does differently. */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly retryAfter?: number,
+  ) {
+    super(message);
+  }
+}
+
+/** The messages for what the sign-in services' return trip can go wrong with: fixed text, never anything taken from the address. */
+export const SIGN_IN_PROBLEMS: Record<string, string> = {
+  "no-provider": "That way of signing in is not set up on this server.",
+  expired: "The sign-in took too long or was already used. Try again.",
+  cancelled: "The sign-in was cancelled.",
+  failed: "The sign-in did not work. Try again.",
+  "unverified-email": "That service did not confirm an e-mail address for you, so an account can't be made from it. Confirm one there, or sign up with your e-mail address.",
+};
+
+export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
+
+export class AccountClient {
+  constructor(private readonly doFetch: Fetcher = (input, init) => fetch(input, init)) {}
+
+  private async call<T>(path: string, body?: unknown, method = body === undefined ? "GET" : "POST"): Promise<T> {
+    let response: Response;
+    try {
+      response = await this.doFetch(path, { method, credentials: "same-origin", cache: "no-store", headers: method === "GET" ? undefined : { "content-type": "application/json", "x-requested-with": "zim" }, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
+    } catch {
+      throw new ApiError("The server can't be reached.", 0, "offline");
+    }
+    const type = response.headers.get("content-type") ?? "";
+    const data = type.includes("json") ? ((await response.json().catch(() => null)) as Record<string, unknown> | null) : null;
+    if (!response.ok) {
+      const retry = typeof data?.retryAfter === "number" ? data.retryAfter : undefined;
+      throw new ApiError(typeof data?.error === "string" ? data.error : "The server answered something unexpected.", response.status, typeof data?.code === "string" ? data.code : undefined, retry);
+    }
+    if (data === null) throw new ApiError("The server answered something unexpected.", response.status);
+    return data as T;
+  }
+
+  /** What this server offers, or null if there is no account server here. */
+  async offer(): Promise<Offer | null> {
+    try {
+      const data = await this.call<{ providers?: unknown; email?: unknown }>("/api/providers");
+      if (data.email !== true || !Array.isArray(data.providers)) return null;
+      return { providers: data.providers.filter((p): p is string => p === "google" || p === "github") };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Who is signed in, or null. */
+  async me(): Promise<Account | null> {
+    const data = await this.call<{ user?: unknown }>("/api/me");
+    return data.user === null ? null : toAccount(data);
+  }
+
+  register(email: string, password: string): Promise<unknown> {
+    return this.call("/api/register", { email, password });
+  }
+  resend(email: string): Promise<unknown> {
+    return this.call("/api/resend", { email });
+  }
+  async verify(email: string, code: string): Promise<Account> {
+    return toAccount(await this.call("/api/verify", { email, code }));
+  }
+  async login(email: string, password: string): Promise<Account> {
+    return toAccount(await this.call("/api/login", { email, password }));
+  }
+  logout(): Promise<unknown> {
+    return this.call("/api/logout", {});
+  }
+  forgot(email: string): Promise<unknown> {
+    return this.call("/api/password/forgot", { email });
+  }
+  reset(email: string, code: string, password: string): Promise<unknown> {
+    return this.call("/api/password/reset", { email, code, password });
+  }
+  deleteAccount(password: string): Promise<unknown> {
+    return this.call("/api/account/delete", { password });
+  }
+  /** Everything the server keeps about the person, as the text of a JSON file. */
+  async exportData(): Promise<string> {
+    return JSON.stringify(await this.call("/api/account/export"), null, 2);
+  }
+}
+
+function toAccount(data: unknown): Account {
+  const d = data as { user?: { email?: unknown; quotaBytes?: unknown; hasPassword?: unknown }; signIns?: unknown } | null;
+  if (!d?.user || typeof d.user.email !== "string") throw new ApiError("The server answered something unexpected.", 200);
+  return { email: d.user.email, quotaBytes: Number(d.user.quotaBytes) || 0, hasPassword: d.user.hasPassword === true, signIns: Array.isArray(d.signIns) ? d.signIns.filter((s): s is string => typeof s === "string") : [] };
+}
