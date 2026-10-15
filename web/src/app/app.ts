@@ -22,6 +22,7 @@ import { BACKUP_EXTENSION, BACKUP_TYPE, CoreError, NoVaultError, NotABackupError
 import type { VaultEvent } from "../vault";
 import { TurtlStore } from "../vault/turtl-store";
 import { createZip, readZip } from "../zip";
+import { SealedUi } from "../account/sealed";
 import { SyncUi } from "../account/sync-ui";
 import { AccountUi } from "../account/ui";
 import { closeAllDialogs, showDialog, showMessage } from "./dialogs";
@@ -171,6 +172,8 @@ export class App {
   private readonly account: AccountUi;
   /** Notebooks kept on the account server (open ones only, and only for someone who is signed in). */
   private readonly sync: SyncUi;
+  /** The encrypted notebooks' sealed backup, kept on the account server. */
+  private readonly sealed: SealedUi;
   private pwaPhase: Phase | null = null;
   /** The new version that the person said "Not now" to, so that it is not offered again on this page. */
   private updateDismissedFor: string | null = null;
@@ -269,6 +272,17 @@ export class App {
       panel.addEventListener("toggle", () => prefs.set(`panel:${name}`, panel.open ? "open" : "closed"));
     }
     this.account = new AccountUi((text) => this.say(text), (name, blob) => this.saveFile(name, blob));
+    this.sealed = new SealedUi(
+      {
+        say: (text) => this.say(text),
+        unlocked: () => this.vault.unlocked,
+        hasVault: () => this.vaultKnown(),
+        settle: async () => (this.isPrivate ? this.settle() : true),
+        backup: () => this.vault.exportBackup(),
+        restore: (file, label) => this.restoreBackupFile(file, label),
+      },
+      this.account,
+    );
     this.sync = new SyncUi(
       {
         say: (text) => this.say(text),
@@ -758,7 +772,7 @@ export class App {
         h("hr", {}),
         item(this.session.info.kind === "folder" ? "Remove notebook…" : "Delete notebook…", () => void this.deleteNotebook(), { class: this.session.info.kind === "folder" ? "menu-item" : "menu-item danger-text" }),
       );
-      if (this.account.available) this.els.notebookMenu.append(h("hr", {}), item(this.account.menuLabel, () => void this.account.open()), ...this.sync.menu().map((line) => item(line.label, line.run)));
+      if (this.account.available) this.els.notebookMenu.append(h("hr", {}), item(this.account.menuLabel, () => void this.account.open()), ...this.sync.menu().map((line) => item(line.label, line.run)), ...this.sealed.menu().map((line) => item(line.label, line.run)));
       const pwa = this.pwa;
       if (pwa) {
         this.els.notebookMenu.append(h("hr", {}));
@@ -1141,10 +1155,15 @@ export class App {
     const file = input.files?.[0];
     input.value = "";
     if (!file) return;
+    await this.restoreBackupFile(file, file.name);
+  }
+
+  /** Ask once more, put a backup back, and unlock what was in it. `label` says where the backup came from (a file's name, the server). */
+  private async restoreBackupFile(file: Blob, label: string): Promise<void> {
     const restored = await showDialog({
       title: "Restore encrypted notebooks",
       body: [
-        `Put the encrypted notebooks in ${file.name} (${megabytes(file.size)}) back in this browser. They are locked, and open with the passphrase they had when the backup was made.`,
+        `Put the encrypted notebooks in ${label} (${megabytes(file.size)}) back in this browser. They are locked, and open with the passphrase they had when the backup was made.`,
         "This browser has no encrypted notebooks yet: a backup is restored where there are none, and nothing here is replaced.",
       ],
       confirm: "Restore",

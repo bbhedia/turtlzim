@@ -2,7 +2,7 @@
 
 `server/`: a Node 24 program (no framework; `node:sqlite`, `node:crypto`, and `nodemailer` for SMTP) that serves the web app **and** `/api/`, in one
 process. It exists so that a person can have an **account**; an account is optional, and without one nothing changes: notebooks stay on the device.
-Accounts can keep **open notebooks on the server, in clear**, in step with other devices (below; 1 MB per user). Encrypted copies and
+Accounts can keep **open notebooks on the server, in clear**, in step with other devices (below; 1 MB per user). A sealed copy of the encrypted notebooks (below) and
 the connectors (Dropbox, Google Drive, …) are later steps (`docs/zim-cloud-feasibility.md`, roadmap lots 3 to 6). Decided 2026-10-15: Google and GitHub
 first, a mailed code **only at sign-up**, and run on this server (a VPS later if the project succeeds; the shared hosting idea is dropped).
 
@@ -56,6 +56,25 @@ With an account, the notebook menu has **Keep this notebook on the server…** (
 - Verified by the browser scenario "with an account server a notebook is kept on it…": two browsers, one account, the real server: keep, open on the second, write on each way, both changed (each of the two answers), sending by itself, an encrypted notebook has no line about the server, stop keeping. Mutants (conflicts overwriting, an encrypted notebook offered, no automatic send) are caught.
   Not tried: a flaky network half way through a send, two tabs of one browser on one notebook, a real phone.
 
+## The encrypted notebooks on the server (`web/src/account/sealed.ts`)
+
+Encrypted notebooks are **never** sent as pages (the notebook menu has no *Keep on the server* for them). What an account can do with them is keep **the vault's own backup**
+(`Vault.exportBackup`, `docs/zim-encrypted-notebooks.md` *Backup and restore*) on the server: one file of everything in the encrypted notebooks, sealed by the vault's keys exactly as they are
+kept on the device, which only the notebooks' passphrase opens. No new way of encrypting was written: the engine, the format and the passphrase are the ones that exist.
+
+- **Back up the encrypted notebooks to the server…** (vault unlocked): sends the file as the account's one sealed copy, replacing the one before (the dialog says there is one and when it was sent; the server is told the revision
+  that was shown, so a copy sent from another computer meanwhile is not replaced unseen). The dialog also offers *Delete the copy on the server*.
+- **Restore the encrypted notebooks from the server…** (a browser that has no vault): fetches it and runs the app's usual restore (confirm, put back locked, ask for the passphrase). It never replaces a vault.
+- The server holds an opaque file named by a generic title and knows its size and when it was sent. The browser keeps nothing about it (no link, no state), the status line and dialogs name no notebook, and the
+  list of notebooks that can be opened from the server leaves the sealed copy out.
+- **What this is not**: it is a copy of one moment that you send, not a sync: nothing is sent by itself, two computers do not merge (the copy that is restored becomes that browser's vault and the two go their own ways), and a restore needs a browser with no vault.
+- **What the server's operator can do**: nothing with the contents, but they can keep every copy ever sent and try passphrases offline at 128 MiB of memory a try, so the strength of the passphrase is the whole defence; a forgotten passphrase loses
+  the copy and the notebooks for good (the dialog says so). A changed passphrase does not change a copy sent earlier (the old passphrase still opens it): send a new one and delete the old.
+- Verified by the browser scenario "with an account server the encrypted notebooks are sent sealed…": a page with a marker text is written in an encrypted notebook, and neither any request the browser made, nor the file the server stored, nor
+  the browser's own storage contains the marker or the notebook's name; the file begins as a vault backup does; another browser with no vault restores it, refuses a wrong passphrase, opens it with the right one and has the page; sending again replaces
+  (revision 2), delete empties the server; locked, a browser that has the vault is offered neither line. Mutants (revision not sent, the lines offered where they should not be, the sealed copy listed as a notebook) are caught.
+- **Not done**, from the study (§6): sealing each file separately with a key hierarchy (master key wrapped by the passphrase, a recovery key, hidden names) so that encrypted notebooks could **sync** page by page between devices, and a vault-wide passphrase for an account that is not the account's password. That needs new commands in the Rust core (`LOCAL_COMMANDS`), shared test vectors for native and wasm, and a merge rule; it is the next step if sync of encrypted notebooks is wanted.
+
 ## Run it
 
 ```bash
@@ -99,4 +118,4 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## Not yet
 
-Merging two versions of a page (today one copy replaces the other), sending only what changed, encrypted copies, encrypted copies with a passphrase, connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).
+Merging two versions of a page (today one copy replaces the other), sending only what changed with a passphrase, connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).

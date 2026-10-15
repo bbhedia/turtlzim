@@ -214,6 +214,8 @@ that is a record. The sum is for accidents. It can't tell a file made
 on purpose from a real one, and does not need to: a vault opens only with its own passphrase and
 everything in it is sealed.
 
+A signed-in account can keep this same file on the account server (*Back up the encrypted notebooks to the server…*, `docs/zim-server.md`): the server holds the sealed file and nothing it can read.
+
 Limits: a backup may be up to 1 GiB, the engine holds all of it in memory while it makes or restores
 one (about twice its size at the peak), and it crosses between the page and the engine as text, 2 MiB
 at a time. A backup does not follow a passphrase change, and does not include what a browser keeps

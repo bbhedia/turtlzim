@@ -86,7 +86,7 @@ async function scenario(name, run) {
     results.push({ name, ok: true, ms: Date.now() - started });
   } catch (error) {
     await failureShot();
-    results.push({ name, ok: false, error: error instanceof Error ? error.message : String(error) });
+    results.push({ name, ok: false, error: error instanceof Error ? (process.env.ZIM_STACK ? error.stack : error.message) : String(error) });
   }
 }
 
@@ -5161,6 +5161,144 @@ try {
       await B.says("The copy on the server was deleted");
       assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 0, "the server's copy is gone");
       await A.page.locator(".lock-button").click().catch(() => {});
+    } finally {
+      for (const d of devices) await d.context.close();
+      withAccounts.closeAllConnections?.();
+      withAccounts.close();
+      db.close();
+    }
+  });
+
+  // --- the encrypted notebooks kept on the account server, sealed: the server must hold nothing that can be read ---
+  await scenario("with an account server the encrypted notebooks are sent sealed (nothing readable leaves the browser or reaches the server), restored on another browser with the passphrase, replaced, and deleted", async () => {
+    const { Accounts } = await import("../../server/src/accounts.mjs");
+    const { createApi } = await import("../../server/src/api.mjs");
+    const { openDatabase } = await import("../../server/src/db.mjs");
+    const { OutboxMailer } = await import("../../server/src/mail.mjs");
+    const { OAuth } = await import("../../server/src/oauth.mjs");
+    const { randomBytes } = await import("node:crypto");
+    const config = { baseUrl: "http://127.0.0.1", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: {} };
+    const db = openDatabase(":memory:");
+    const mailer = new OutboxMailer();
+    const accounts = new Accounts({ db, mailer, config });
+    const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+    const withAccounts = createStaticServer({ dir: dist, api });
+    await new Promise((resolve) => withAccounts.listen(0, "127.0.0.1", resolve));
+    const at = `http://127.0.0.1:${withAccounts.address().port}`;
+    config.baseUrl = at;
+    await accounts.register("ada@example.org", "correct horse battery");
+    accounts.verify("ada@example.org", /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1]);
+    const devices = [];
+    const SECRET = "SECRET-MARKER-7731-do-not-leak";
+    try {
+      const device = async () => {
+        const made = await openApp({ at });
+        devices.push(made);
+        const { page } = made.ui;
+        const sent = [];
+        page.on("request", (request) => sent.push({ url: request.url(), body: request.postData() ?? "" }));
+        const says = (text) =>
+          page.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout: 30_000 }).catch(async () => {
+            throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await page.locator("#status").innerText())}`);
+          });
+        const choose = async (name) => {
+          await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+          await made.ui.openMenu();
+          await made.ui.menu().getByRole("menuitem", { name }).click();
+        };
+        const lines = async () => {
+          await made.ui.openMenu();
+          const all = await made.ui.menu().getByRole("menuitem").allInnerTexts();
+          await page.keyboard.press("Escape");
+          return all;
+        };
+        return { ...made, page, sent, says, choose, lines, dialog: () => topDialog(page) };
+      };
+      const signIn = async (d) => {
+        await d.choose("Sign in or create an account…");
+        await d.dialog().getByLabel("E-mail address", { exact: true }).fill("ada@example.org");
+        await d.dialog().getByLabel("Password", { exact: true }).fill("correct horse battery");
+        await d.dialog().getByRole("button", { name: "Sign in" }).click();
+        await d.says("Signed in as ada@example.org");
+      };
+      const stored = () => db.prepare("select f.bytes, n.title, n.revision from notebook_files f join notebooks n on n.user_id = f.user_id and n.id = f.notebook_id").all();
+
+      const A = await device();
+      await signIn(A);
+      const before = await A.lines();
+      assert(before.includes("Restore the encrypted notebooks from the server…") && !before.includes("Back up the encrypted notebooks to the server…"), "no vault yet: only the way to restore is offered");
+      await newEncryptedNotebook(A.ui, "Diary");
+      await A.ui.typeAtEnd(`${SECRET}\n`);
+      await A.ui.flush();
+      assert((await A.lines()).includes("Back up the encrypted notebooks to the server…"), "unlocked: the line is there");
+      await A.choose("Back up the encrypted notebooks to the server…");
+      const asking = A.dialog();
+      const said = await asking.innerText();
+      assert(said.includes("The server can't read it") && said.includes("forget the passphrase"), `the dialog says what the server can't do and what a forgotten passphrase costs (${said})`);
+      assert(!said.includes("Diary") && !said.includes(SECRET), "and names nothing of the notebooks");
+      if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, "sealed-backup.png") });
+      await asking.getByRole("button", { name: "Send the sealed copy" }).click();
+      await A.says("sealed copy of the encrypted notebooks was sent");
+      assert(!(await A.page.locator("#status").innerText()).includes("Diary"), "the status line names no notebook");
+
+      // nothing readable left the browser or reached the server
+      const rows = stored();
+      assertEqual(rows.length, 1, "the server holds one file");
+      const bytes = Buffer.from(rows[0].bytes);
+      assertEqual(bytes.subarray(0, 8).toString("latin1"), "ZIMVAULT", "it is the vault's own backup, as the engine made it");
+      assert(bytes.length < 1024 * 1024, `it fits the account's space (${bytes.length} bytes)`);
+      for (const needle of [SECRET, "Diary", Buffer.from(SECRET).toString("base64").slice(0, 20)]) {
+        assert(!bytes.includes(needle), `the stored file does not contain ${needle}`);
+        assert(!A.sent.some((r) => r.body.includes(needle)), `no request carried ${needle}`);
+      }
+      assert(!rows[0].title.includes("Diary"), "the server's name for it names nothing");
+      assert(!(await A.page.evaluate(() => JSON.stringify({ ...localStorage }))).includes(SECRET), "and the browser kept nothing readable outside the vault");
+
+      // a second browser: it has no vault, so it can restore; the passphrase opens it
+      const B = await device();
+      await signIn(B);
+      assert((await B.lines()).includes("Restore the encrypted notebooks from the server…"), "a browser with no vault is offered the restore");
+      await B.choose("Restore the encrypted notebooks from the server…");
+      const restoring = vaultDialog(B.page, "Restore encrypted notebooks");
+      await restoring.waitFor();
+      assert((await restoring.innerText()).includes("the copy on the server"), "the dialog says where it comes from");
+      await restoring.getByRole("button", { name: "Restore", exact: true }).click();
+      const unlocking = vaultDialog(B.page, "Unlock encrypted notebooks");
+      await unlocking.waitFor({ timeout: 30_000 });
+      await unlocking.getByLabel("Passphrase").fill("not the passphrase at all");
+      await unlocking.getByRole("button", { name: "Unlock", exact: true }).click();
+      await unlocking.locator(".dialog-error").waitFor({ timeout: 30_000 });
+      await unlocking.getByLabel("Passphrase").fill(PASSPHRASE);
+      await unlocking.getByRole("button", { name: "Unlock", exact: true }).click();
+      await noDialogs(B.page);
+      // (this browser never had one open, so it stays on the plain notebook until the encrypted one is chosen)
+      await B.ui.openMenu();
+      await B.ui.menu().getByRole("menuitemradio", { name: "Diary" }).click();
+      await isEncryptedOpen(B.page);
+      assert((await B.ui.text()).includes(SECRET), "with the passphrase, the other browser has the page");
+      assert(!(await B.lines()).includes("Restore the encrypted notebooks from the server…"), "and no longer offers a restore (it never replaces a vault)");
+
+      // sending again replaces the copy (the dialog says there is one); and it can be deleted
+      await B.ui.typeAtEnd("second line\n");
+      await B.ui.flush();
+      // (the sealed copy is not one of the notebooks that can be opened, while it is on the server)
+      await B.choose("Open a notebook from the server…");
+      assert((await B.dialog().innerText()).includes("There is nothing on the server yet"), "no sealed copy among the notebooks that can be opened");
+      await B.dialog().getByRole("button", { name: "Close" }).click();
+      await B.choose("Back up the encrypted notebooks to the server…");
+      assert((await B.dialog().innerText()).includes("It replaces the copy that is on the server"), "it says that it replaces one");
+      await B.dialog().getByRole("button", { name: "Send the sealed copy" }).click();
+      await B.says("sealed copy of the encrypted notebooks was sent");
+      assertEqual(stored()[0].revision, 2, "the server's copy was replaced");
+      await B.choose("Back up the encrypted notebooks to the server…");
+      await B.dialog().getByRole("button", { name: "Delete the copy on the server" }).click();
+      await B.says("sealed copy was deleted");
+      assertEqual(stored().length, 0, "the server holds nothing");
+      // locked, a browser that has the vault is offered neither (a restore never replaces a vault)
+      await B.page.locator(".lock-button").click();
+      await isOpenNotebook(B.page);
+      const locked = await B.lines();
+      assert(!locked.some((l) => /encrypted notebooks (to|from) the server/.test(l)), `locked: no line about the server (${locked.join(" | ")})`);
     } finally {
       for (const d of devices) await d.context.close();
       withAccounts.closeAllConnections?.();

@@ -5,6 +5,7 @@ import type { NotebookInfo, NotebookStore } from "../notebook/store";
 import { pagesFromFiles } from "../notebook/zim-files";
 import { fileKey } from "../notebook/store";
 import type { ZipEntry } from "../zip";
+import { SEALED_ID } from "./sealed";
 import type { AccountUi } from "./ui";
 import { ApiError } from "./client";
 import type { RemoteNotebook } from "./client";
@@ -273,9 +274,10 @@ export class SyncUi {
       return;
     }
     const known = new Set((await this.host.store.listNotebooks()).map((n) => this.linkOf(n.id)?.remoteId).filter(Boolean));
-    const missing = list.filter((n) => !known.has(n.id));
+    // (the sealed copy of the encrypted notebooks is not a notebook that can be opened: it is restored by its own line of the menu)
+    const missing = list.filter((n) => !known.has(n.id) && n.id !== SEALED_ID);
     if (missing.length === 0) {
-      await showDialog({ title: "Notebooks on the server", body: [list.length ? "Every notebook on the server is already on this device." : "There is nothing on the server yet. Open a notebook and choose “Keep this notebook on the server…”."], confirm: "Close", noCancel: true });
+      await showDialog({ title: "Notebooks on the server", body: [list.some((n) => n.id !== SEALED_ID) ?  "Every notebook on the server is already on this device." : "There is nothing on the server yet. Open a notebook and choose “Keep this notebook on the server…”."], confirm: "Close", noCancel: true });
       return;
     }
     await showDialog({

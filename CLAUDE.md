@@ -179,7 +179,7 @@ docker compose up                   # Postgres + server (define compose file)
   `core/zim-format/tests/golden_real_notebooks.rs`), and the corpus-free fuzz test runs in every
   `cargo test -p zim-format`. Run both after touching `core/zim-format`.
 - Never copy Zim source into this repo; reimplement the format from its documented syntax.
-- **An encrypted notebook's contents go nowhere but the vault.** Not the address, the tab's title,
+- **An encrypted notebook's contents go nowhere but the vault** (the one exception: the person may send the vault's own *sealed backup* to their account server, `web/src/account/sealed.ts`, which holds nothing readable; the browser scenario checks every request and the stored file, and no page of an encrypted notebook is ever sent as a page). Not the address, the tab's title,
   `history.state`, `localStorage`/`sessionStorage`, IndexedDB, the Cache API, a log, or an error
   message that is kept. A new feature of the app that remembers, stores or exposes anything about a
   page (a name, text, a fold, a recent-pages list, a draft) has to check `App.isPrivate` and keep
