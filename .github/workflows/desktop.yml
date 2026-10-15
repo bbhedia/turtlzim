@@ -14,6 +14,11 @@ concurrency:
   group: desktop-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # (crates.io's download servers answer 500 now and then: cargo tries again, longer, before it gives up)
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+
 jobs:
   web:
     runs-on: ubuntu-24.04
@@ -40,9 +45,11 @@ jobs:
       - name: the wasm of the format and of the core
         working-directory: web
         run: |
-          npm ci
-          npm run wasm
-          npm run core
+          # (each step is tried three times: a download that fails for the network's sake is not the build's fault)
+          retry() { for attempt in 1 2 3; do "$@" && return 0; echo "attempt $attempt of $* failed"; sleep 20; done; return 1; }
+          retry npm ci
+          retry npm run wasm
+          retry npm run core
       - name: typecheck, unit tests, build
         working-directory: web
         run: |
@@ -89,8 +96,9 @@ jobs:
           # (the AppImage tools run without FUSE, which a runner does not have)
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
-          npm ci
-          npm run package
+          retry() { for attempt in 1 2 3; do "$@" && return 0; echo "attempt $attempt of $* failed"; sleep 20; done; return 1; }
+          retry npm ci
+          retry npm run package
       - uses: actions/upload-artifact@v4
         with:
           name: installers-${{ runner.os }}
