@@ -22,6 +22,7 @@ import { BACKUP_EXTENSION, BACKUP_TYPE, CoreError, NoVaultError, NotABackupError
 import type { VaultEvent } from "../vault";
 import { TurtlStore } from "../vault/turtl-store";
 import { createZip, readZip } from "../zip";
+import { SyncUi } from "../account/sync-ui";
 import { AccountUi } from "../account/ui";
 import { closeAllDialogs, showDialog, showMessage } from "./dialogs";
 import type { Phase, Pwa } from "../pwa/register";
@@ -168,6 +169,8 @@ export class App {
   private pwa: Pwa | null = null;
   /** Sign-in to the account server, where there is one (nowhere in a native shell: the app asks the network for nothing there). */
   private readonly account: AccountUi;
+  /** Notebooks kept on the account server (open ones only, and only for someone who is signed in). */
+  private readonly sync: SyncUi;
   private pwaPhase: Phase | null = null;
   /** The new version that the person said "Not now" to, so that it is not offered again on this page. */
   private updateDismissedFor: string | null = null;
@@ -266,6 +269,19 @@ export class App {
       panel.addEventListener("toggle", () => prefs.set(`panel:${name}`, panel.open ? "open" : "closed"));
     }
     this.account = new AccountUi((text) => this.say(text), (name, blob) => this.saveFile(name, blob));
+    this.sync = new SyncUi(
+      {
+        say: (text) => this.say(text),
+        notebook: () => (this.session ? { id: this.session.info.id, title: this.session.title, home: this.session.info.home, kind: this.session.info.kind } : null),
+        files: () => this.session.exportFiles(),
+        flush: () => this.flush(),
+        unsaved: () => this.dirty || this.saving > 0,
+        open: (id) => this.openNotebook(id),
+        store,
+      },
+      this.account,
+      { get: (id) => prefs.get(`sync:${id}`), set: (id, value) => prefs.set(`sync:${id}`, value), remove: (id) => prefs.remove(`sync:${id}`) },
+    );
     this.els = this.build(root);
     vault.onChange((event) => this.onVaultChange(event));
     vault.onSettled((finished) => void this.tellSettled(finished));
@@ -300,7 +316,16 @@ export class App {
     app = new App(root, store, keptInMemory, vault);
     await app.openInitialNotebook();
     // (after the first notebook is open, so that what it says of the sign-in that was just made is not overwritten by the app starting)
-    if (shellPlatform() === null) void app.account.start();
+    if (shellPlatform() === null) {
+      void app.account.start().then(async () => {
+        // (a notebook that is kept on the server is brought up to date at the start: that is the one reason to ask the server before the menu is opened)
+        const open = app.session?.info;
+        if (open && prefs.get(`sync:${open.id}`) !== null) {
+          await app.account.refresh();
+          await app.sync.catchUp();
+        }
+      });
+    }
     return app;
   }
 
@@ -676,6 +701,7 @@ export class App {
   }
 
   private onSessionEvent(event: SessionEvent): void {
+    this.sync.changed();
     if (event.kind === "files") {
       // pictures and file links may lead somewhere else, or nowhere, now
       this.urls?.sync();
@@ -732,7 +758,7 @@ export class App {
         h("hr", {}),
         item(this.session.info.kind === "folder" ? "Remove notebook…" : "Delete notebook…", () => void this.deleteNotebook(), { class: this.session.info.kind === "folder" ? "menu-item" : "menu-item danger-text" }),
       );
-      if (this.account.available) this.els.notebookMenu.append(h("hr", {}), item(this.account.menuLabel, () => void this.account.open()));
+      if (this.account.available) this.els.notebookMenu.append(h("hr", {}), item(this.account.menuLabel, () => void this.account.open()), ...this.sync.menu().map((line) => item(line.label, line.run)));
       const pwa = this.pwa;
       if (pwa) {
         this.els.notebookMenu.append(h("hr", {}));
@@ -1852,6 +1878,7 @@ export class App {
             }
           }
           this.setSaveState("Saved");
+          this.sync.changed();
         } catch (error) {
           // (a save that fails after its notebook was left, a lock say, is not news for the notebook that is shown)
           if (session !== this.session) return;

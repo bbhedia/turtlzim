@@ -2,7 +2,7 @@
 
 `server/`: a Node 24 program (no framework; `node:sqlite`, `node:crypto`, and `nodemailer` for SMTP) that serves the web app **and** `/api/`, in one
 process. It exists so that a person can have an **account**; an account is optional, and without one nothing changes: notebooks stay on the device.
-**Today an account only exists** (sign-up, sign-in, sign-out, export, delete). Keeping notebooks on the server (1 MB per user), encrypted or not, and
+Accounts can keep **open notebooks on the server, in clear**, in step with other devices (below; 1 MB per user). Encrypted copies and
 the connectors (Dropbox, Google Drive, …) are later steps (`docs/zim-cloud-feasibility.md`, roadmap lots 3 to 6). Decided 2026-10-15: Google and GitHub
 first, a mailed code **only at sign-up**, and run on this server (a VPS later if the project succeeds; the shared hosting idea is dropped).
 
@@ -26,7 +26,7 @@ Safeguards (each has a test that fails without it; the mutants were tried):
 - Rate limits kept in the database (per address and per client): sign-ups, sign-ins, codes, resets, deletions → `429` with `Retry-After`.
 - The page's content policy is unchanged (`connect-src 'self'`); the service worker lets `/api/` through to the network; a native shell (Android, desktop) shows nothing of accounts (no `INTERNET`).
 
-## Notebooks on the server (the storage side; no button in the app yet)
+## Notebooks on the server (the storage side)
 
 `server/src/sync.mjs`, under `/api/sync/notebooks` (signed in, and a write needs the same header and origin as everything else):
 
@@ -40,6 +40,21 @@ Safeguards (each has a test that fails without it; the mutants were tried):
 A write made from an old revision is refused (`409`, with the current revision): nothing is overwritten, the client has to merge. Over the quota (1 MB for the notebooks together; a notebook may use all of it when it
 replaces its own files) is `413`. Paths are checked (relative, no `..`, nothing hidden, no two that differ only by case) and ids are `[A-Za-z0-9_-]{8,64}`. The files are stored **in clear**: encryption with a passphrase is the next
 lot, and until then an account's notebooks are readable by whoever runs the server. Each person only ever sees their own (a test with two accounts and the same id), and deleting the account deletes them.
+
+## Keeping a notebook in step (the app's side: `web/src/account/sync.ts`, `sync-ui.ts`)
+
+With an account, the notebook menu has **Keep this notebook on the server…** (an open notebook only: an encrypted one is never offered, a test checks the menu), **Sync this notebook now**,
+**Stop keeping this notebook on the server…** (with the choice to delete the server's copy) and **Open a notebook from the server…** (copies it to this device and links it).
+
+- What is kept is the notebook as its **files** (the same ones the zip export makes: `notebook.zim`, pages with their byte-order mark and line endings, attachments). The dialog says that it is stored in clear.
+- A linked notebook remembers, in this browser (`zim:sync:<notebook id>`: two ids, a revision, a digest and the account's address, nothing of the content), the revision it last agreed with the server on and a SHA-256 of its files then.
+  From that and the server's revision now there is one answer: nothing to do, **send** (only this device changed), **fetch** (only the server did), or **both changed**.
+- Sending is automatic 6 s after the last change; fetching happens at start (for a linked notebook) and on *Sync now* — never while typing is unsaved. Both changed: a question (*Use the server's copy* / *Keep this device's copy* / Cancel),
+  and nothing is touched until it is answered; the server also refuses a write made from an old revision (409), so a race between two devices can't overwrite either.
+- A link belongs to the account that made it (a different account signed in on the same browser does not see it); a notebook that the server no longer has is unlinked, not recreated.
+- Not there: merging two versions of a page (one copy replaces the other, and the dialog says the other's pages are lost), per-page sync (a notebook is sent whole, so 1 MB is the whole account), several destinations, and sync for folder notebooks of the desktop program or the phone shell (no account there yet).
+- Verified by the browser scenario "with an account server a notebook is kept on it…": two browsers, one account, the real server: keep, open on the second, write on each way, both changed (each of the two answers), sending by itself, an encrypted notebook has no line about the server, stop keeping. Mutants (conflicts overwriting, an encrypted notebook offered, no automatic send) are caught.
+  Not tried: a flaky network half way through a send, two tabs of one browser on one notebook, a real phone.
 
 ## Run it
 
@@ -84,4 +99,4 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## Not yet
 
-The app's side of sync (what to upload, when, merging a conflict; the server side above exists), encrypted copies with a passphrase, connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).
+Merging two versions of a page (today one copy replaces the other), sending only what changed, encrypted copies, encrypted copies with a passphrase, connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).

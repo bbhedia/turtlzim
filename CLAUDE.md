@@ -212,8 +212,8 @@ docker compose up                   # Postgres + server (define compose file)
   `window.__zimShell.folders`; the page names a folder only by the id the program gave it, and `desktop/src-tauri/src/folders.rs` (no Tauri in it, `cargo test` in
   `desktop/src-tauri`) is all the program knows of one: paths are checked there, links are not followed, and a change is made entirely or not at all, with a journal. A
   folder is the person's: only what is listed and read as a page or an attachment is written, and removing a notebook only unlists it.
-- **Accounts** (`server/`, `docs/zim-server.md`; decided 2026-10-15: Google + GitHub first, a mailed code only at sign-up, on this server): optional, and **an account only exists so far**:
-  notebooks stay on the device, nothing of them goes to the server. The web app talks to `/api/` on its own address only (`web/src/account/`), shows account items only when
+- **Accounts** (`server/`, `docs/zim-server.md`; decided 2026-10-15: Google + GitHub first, a mailed code only at sign-up, on this server): optional;
+  a notebook goes to the server only if the person chose *Keep this notebook on the server* (open notebooks only, in clear, never an encrypted one: `SyncUi` checks `kind === "open"`, and the browser scenario checks the menu); both-changed is asked about, never overwritten. The web app talks to `/api/` on its own address only (`web/src/account/`), shows account items only when
   `/api/providers` answers, and a native shell shows none. Passwords are scrypt, sessions are `HttpOnly` cookies with only a hash stored, every change needs the `X-Requested-With: zim`
   header and a same-site origin: do not weaken any of it, and a new endpoint gets the same tests. Secrets (OAuth, SMTP) live in `~/.local/state/zim-server`, never in the repo.
 - **The desktop program** (`desktop/`) is the same web build in Tauri, not a second UI or branch: `web/dist` goes in as it is, the version is `web/package.json`'s, and what a

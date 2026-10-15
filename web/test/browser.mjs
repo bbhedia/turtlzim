@@ -5030,6 +5030,145 @@ try {
     }
   });
 
+  // --- notebooks kept on the account server: two devices (two browsers) of one account, against the real server ---
+  await scenario("with an account server a notebook is kept on it, opened on a second device, brought up to date both ways, and a change made in two places is asked about, not overwritten", async () => {
+    const { Accounts } = await import("../../server/src/accounts.mjs");
+    const { createApi } = await import("../../server/src/api.mjs");
+    const { openDatabase } = await import("../../server/src/db.mjs");
+    const { OutboxMailer } = await import("../../server/src/mail.mjs");
+    const { OAuth } = await import("../../server/src/oauth.mjs");
+    const { randomBytes } = await import("node:crypto");
+    const config = { baseUrl: "http://127.0.0.1", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: {} };
+    const db = openDatabase(":memory:");
+    const mailer = new OutboxMailer();
+    const accounts = new Accounts({ db, mailer, config });
+    const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+    const withAccounts = createStaticServer({ dir: dist, api });
+    await new Promise((resolve) => withAccounts.listen(0, "127.0.0.1", resolve));
+    const at = `http://127.0.0.1:${withAccounts.address().port}`;
+    config.baseUrl = at;
+    await accounts.register("ada@example.org", "correct horse battery");
+    accounts.verify("ada@example.org", /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1]);
+    const devices = [];
+    try {
+      const device = async () => {
+        const made = await openApp({ at });
+        devices.push(made);
+        const { page } = made.ui;
+        const says = (text, timeout = 20_000) =>
+          page.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout }).catch(async () => {
+            throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await page.locator("#status").innerText())}`);
+          });
+        const choose = async (name) => {
+          // (so that what the status line says afterwards is what this did, not what the last thing did)
+          await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+          await made.ui.openMenu();
+          await made.ui.menu().getByRole("menuitem", { name }).click();
+        };
+        const dialog = () => topDialog(page);
+        return { ...made, page, says, choose, dialog };
+      };
+      const signIn = async (d) => {
+        await d.choose("Sign in or create an account…");
+        await d.dialog().getByLabel("E-mail address", { exact: true }).fill("ada@example.org");
+        await d.dialog().getByLabel("Password", { exact: true }).fill("correct horse battery");
+        await d.dialog().getByRole("button", { name: "Sign in" }).click();
+        await d.says("Signed in as ada@example.org");
+      };
+      const write = async (d, text) => {
+        await d.ui.typeAtEnd(text);
+        await d.ui.flush();
+      };
+      const A = await device();
+      await signIn(A);
+      await write(A, "written on A\n");
+      await A.choose("Keep this notebook on the server…");
+      assert((await A.dialog().innerText()).includes("anyone who runs this server can read it"), "the dialog says that the copy is in clear");
+      if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, "sync-keep.png") });
+      await A.dialog().getByRole("button", { name: "Keep on the server" }).click();
+      await A.says("is kept on the server");
+      assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 1, "the server has the notebook");
+
+      // a second device opens it
+      const B = await device();
+      await signIn(B);
+      await B.choose("Open a notebook from the server…");
+      await B.dialog().getByRole("button", { name: "Open" }).click();
+      await B.says("was copied from the server");
+      assert((await B.ui.text()).includes("written on A"), "B has what A wrote");
+      assertEqual(await B.page.locator(".notebook-title").innerText(), "Sample notebook", "and its name");
+
+      // B writes and sends; A brings itself up to date
+      await write(B, "written on B\n");
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to the server");
+      await A.choose("Sync this notebook now");
+      await A.says("was brought up to date from the server");
+      assert((await A.ui.text()).includes("written on B"), "A has what B wrote");
+      await A.choose("Sync this notebook now");
+      await A.says("up to date on the server");
+
+      // both change: nothing is overwritten until a choice is made; the server's copy can be taken ...
+      await write(A, "A alone one\n");
+      await write(B, "B alone one\n");
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to the server");
+      await A.choose("Sync this notebook now");
+      await A.page.getByRole("heading", { name: "This notebook changed in two places" }).waitFor();
+      assertEqual(db.prepare("select revision from notebooks").get().revision, 3, "the server was not touched by the conflict");
+      if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, "sync-conflict.png") });
+      await A.dialog().getByRole("button", { name: "Use the server's copy" }).click();
+      await A.says("was brought up to date from the server");
+      const text = await A.ui.text();
+      assert(text.includes("B alone one") && !text.includes("A alone one"), "A has the server's copy");
+      // ... or this device's copy kept
+      await write(A, "A alone two\n");
+      await write(B, "B alone two\n");
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to the server");
+      await A.choose("Sync this notebook now");
+      await A.page.getByRole("heading", { name: "This notebook changed in two places" }).waitFor();
+      await A.dialog().getByRole("button", { name: "Keep this device's copy" }).click();
+      await A.says("was sent to the server");
+      await B.choose("Sync this notebook now");
+      await B.says("was brought up to date from the server");
+      assert((await B.ui.text()).includes("A alone two") && !(await B.ui.text()).includes("B alone two"), "B has A's copy");
+
+      // typing is sent by itself once it pauses
+      const before = db.prepare("select revision from notebooks").get().revision;
+      await write(A, "sent by itself\n");
+      // (the status line still holds the last message: what shows that it was sent is the server's revision)
+      for (let waited = 0; db.prepare("select revision from notebooks").get().revision === before; waited += 250) {
+        assert(waited < 25_000, "the server never got what was typed");
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      await B.choose("Sync this notebook now");
+      await B.says("was brought up to date from the server");
+      assert((await B.ui.text()).includes("sent by itself"), "B has what A's pause sent");
+
+      // an encrypted notebook is never offered to the server
+      await newEncryptedNotebook(A.ui, "Private");
+      await A.ui.openMenu();
+      const lines = await A.ui.menu().getByRole("menuitem").allInnerTexts();
+      assert(!lines.some((l) => /Keep this notebook|Sync this notebook/.test(l)), `an encrypted notebook has no line about the server (${lines.join(" | ")})`);
+      assert(lines.includes("Open a notebook from the server…"), "but the server's notebooks can still be opened");
+      await A.page.keyboard.press("Escape");
+      assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 1, "and the server has no other notebook");
+
+      // stop keeping it
+      await B.choose("Stop keeping this notebook on the server…");
+      await B.dialog().getByRole("button", { name: "Stop" }).click();
+      await B.says("The copy on the server was deleted");
+      assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 0, "the server's copy is gone");
+      await A.page.locator(".lock-button").click().catch(() => {});
+    } finally {
+      for (const d of devices) await d.context.close();
+      withAccounts.closeAllConnections?.();
+      withAccounts.close();
+      db.close();
+    }
+  });
+
   for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"} ${r.name}${r.ok ? ` (${r.ms} ms)` : `\n    ${r.error}`}`);
   const failed = results.length === 0 || results.some((r) => !r.ok);
   console.log(`\n${results.filter((r) => r.ok).length} of ${results.length} scenarios passed`);

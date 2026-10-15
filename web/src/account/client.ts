@@ -21,6 +21,8 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code?: string,
     readonly retryAfter?: number,
+    /** The rest of what the server said (a conflict says which revision the server has). */
+    readonly data: Record<string, unknown> = {},
   ) {
     super(message);
   }
@@ -34,6 +36,21 @@ export const SIGN_IN_PROBLEMS: Record<string, string> = {
   failed: "The sign-in did not work. Try again.",
   "unverified-email": "That service did not confirm an e-mail address for you, so an account can't be made from it. Confirm one there, or sign up with your e-mail address.",
 };
+
+/** A notebook the server keeps. */
+export interface RemoteNotebook {
+  id: string;
+  title: string;
+  revision: number;
+  updatedAt: number;
+  bytes?: number;
+}
+
+/** A file as it travels: its path in the notebook and its bytes in base64. */
+export interface WireFile {
+  path: string;
+  base64: string;
+}
 
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -51,7 +68,7 @@ export class AccountClient {
     const data = type.includes("json") ? ((await response.json().catch(() => null)) as Record<string, unknown> | null) : null;
     if (!response.ok) {
       const retry = typeof data?.retryAfter === "number" ? data.retryAfter : undefined;
-      throw new ApiError(typeof data?.error === "string" ? data.error : "The server answered something unexpected.", response.status, typeof data?.code === "string" ? data.code : undefined, retry);
+      throw new ApiError(typeof data?.error === "string" ? data.error : "The server answered something unexpected.", response.status, typeof data?.code === "string" ? data.code : undefined, retry, data ?? {});
     }
     if (data === null) throw new ApiError("The server answered something unexpected.", response.status);
     return data as T;
@@ -97,6 +114,18 @@ export class AccountClient {
   }
   deleteAccount(password: string): Promise<unknown> {
     return this.call("/api/account/delete", { password });
+  }
+  listNotebooks(): Promise<{ notebooks: RemoteNotebook[]; usedBytes: number; quotaBytes: number }> {
+    return this.call("/api/sync/notebooks");
+  }
+  getNotebook(id: string): Promise<RemoteNotebook & { files: WireFile[] }> {
+    return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}`);
+  }
+  putNotebook(id: string, body: { title: string; baseRevision: number; files: WireFile[] }): Promise<{ revision: number; usedBytes: number }> {
+    return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}`, body, "PUT");
+  }
+  deleteNotebook(id: string): Promise<unknown> {
+    return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}`, {}, "DELETE");
   }
   /** Everything the server keeps about the person, as the text of a JSON file. */
   async exportData(): Promise<string> {
