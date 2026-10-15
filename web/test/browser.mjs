@@ -5083,9 +5083,9 @@ try {
       await signIn(A);
       await write(A, "written on A\n");
       await A.choose("Keep this notebook on the server…");
-      assert((await A.dialog().innerText()).includes("anyone who runs this server can read it"), "the dialog says that the copy is in clear");
+      assert((await A.dialog().innerText()).includes("anyone who runs the server"), "the dialog says that the copy is in clear");
       if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, "sync-keep.png") });
-      await A.dialog().getByRole("button", { name: "Keep on the server" }).click();
+      await A.dialog().getByRole("button", { name: "Keep it there" }).click();
       await A.says("is kept on the server");
       assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 1, "the server has the notebook");
 
@@ -5158,7 +5158,7 @@ try {
       // stop keeping it
       await B.choose("Stop keeping this notebook on the server…");
       await B.dialog().getByRole("button", { name: "Stop" }).click();
-      await B.says("The copy on the server was deleted");
+      await B.says("The copy was deleted");
       assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 0, "the server's copy is gone");
       await A.page.locator(".lock-button").click().catch(() => {});
     } finally {
@@ -5283,7 +5283,7 @@ try {
       await B.ui.flush();
       // (the sealed copy is not one of the notebooks that can be opened, while it is on the server)
       await B.choose("Open a notebook from the server…");
-      assert((await B.dialog().innerText()).includes("There is nothing on the server yet"), "no sealed copy among the notebooks that can be opened");
+      assert((await B.dialog().innerText()).includes("There is nothing to open"), "no sealed copy among the notebooks that can be opened");
       await B.dialog().getByRole("button", { name: "Close" }).click();
       await B.choose("Back up the encrypted notebooks to the server…");
       assert((await B.dialog().innerText()).includes("It replaces the copy that is on the server"), "it says that it replaces one");
@@ -5303,6 +5303,163 @@ try {
       for (const d of devices) await d.context.close();
       withAccounts.closeAllConnections?.();
       withAccounts.close();
+      db.close();
+    }
+  });
+
+  // --- a connected service (a Nextcloud, here a WebDAV server in memory): the server reaches it for the person; two devices keep a notebook in step through it ---
+  await scenario("with an account server a notebook is kept on a connected WebDAV service: connect it (a wrong password is refused), send only what changed, open it on a second device, update both ways, settle a conflict, stop, disconnect", async () => {
+    const { Accounts } = await import("../../server/src/accounts.mjs");
+    const { createApi } = await import("../../server/src/api.mjs");
+    const { openDatabase } = await import("../../server/src/db.mjs");
+    const { OutboxMailer } = await import("../../server/src/mail.mjs");
+    const { OAuth } = await import("../../server/src/oauth.mjs");
+    const { fakeWebdav } = await import("../../server/test/fake-webdav.mjs");
+    const { randomBytes } = await import("node:crypto");
+    const dav = fakeWebdav();
+    const davUrl = await dav.start();
+    const config = { baseUrl: "http://127.0.0.1", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: {}, connectorOptions: { allowInsecure: true, allowPrivate: true } };
+    const db = openDatabase(":memory:");
+    const mailer = new OutboxMailer();
+    const accounts = new Accounts({ db, mailer, config });
+    const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+    const withAccounts = createStaticServer({ dir: dist, api });
+    await new Promise((resolve) => withAccounts.listen(0, "127.0.0.1", resolve));
+    const at = `http://127.0.0.1:${withAccounts.address().port}`;
+    config.baseUrl = at;
+    await accounts.register("ada@example.org", "correct horse battery");
+    accounts.verify("ada@example.org", /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1]);
+    const devices = [];
+    try {
+      const device = async () => {
+        const made = await openApp({ at });
+        devices.push(made);
+        const { page } = made.ui;
+        const says = (text) =>
+          page.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout: 25_000 }).catch(async () => {
+            throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await page.locator("#status").innerText())}`);
+          });
+        const choose = async (name) => {
+          await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+          await made.ui.openMenu();
+          await made.ui.menu().getByRole("menuitem", { name }).click();
+        };
+        return { ...made, page, says, choose, dialog: () => topDialog(page) };
+      };
+      const signIn = async (d) => {
+        await d.choose("Sign in or create an account…");
+        await d.dialog().getByLabel("E-mail address", { exact: true }).fill("ada@example.org");
+        await d.dialog().getByLabel("Password", { exact: true }).fill("correct horse battery");
+        await d.dialog().getByRole("button", { name: "Sign in" }).click();
+        await d.says("Signed in as ada@example.org");
+      };
+      const write = async (d, text) => {
+        await d.ui.typeAtEnd(text);
+        await d.ui.flush();
+      };
+      const puts = (from) => dav.log.slice(from).filter((l) => l.startsWith("PUT ")).map((l) => decodeURIComponent(l.split(" ")[1].split("/").slice(-1)[0]));
+
+      const A = await device();
+      await signIn(A);
+      await write(A, "written on A\n");
+
+      // connect: a wrong password is refused with the reason and nothing is kept; the right one is
+      await A.choose("Connected services…");
+      await A.dialog().getByRole("button", { name: "Connect Nextcloud / ownCloud / WebDAV…" }).click();
+      const connect = A.dialog();
+      await connect.getByLabel("Name", { exact: true }).fill("My Nextcloud");
+      await connect.getByLabel("Folder address", { exact: true }).fill(davUrl);
+      await connect.getByLabel("User name", { exact: true }).fill("ada");
+      await connect.getByLabel("App password", { exact: true }).fill("wrong");
+      await connect.getByRole("button", { name: "Test and connect" }).click();
+      await connect.locator(".dialog-error").filter({ hasText: "refused that user name and password" }).waitFor();
+      assertEqual(db.prepare("select count(*) as n from connectors").get().n, 0, "nothing was kept");
+      await connect.getByLabel("App password", { exact: true }).fill("app-password");
+      if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, "connect-webdav.png") });
+      await connect.getByRole("button", { name: "Test and connect" }).click();
+      await A.says("Connected: My Nextcloud");
+      assert(!Buffer.from(db.prepare("select config from connectors").get().config).includes("app-password"), "the password is sealed in the server's database");
+
+      // keep the notebook there
+      await A.choose("Keep this notebook on the server…");
+      await A.dialog().getByLabel("Where").selectOption({ index: 1 });
+      await A.dialog().getByRole("button", { name: "Keep it there" }).click();
+      await A.says("is kept on My Nextcloud");
+      const folders = [...dav.folders].filter((f) => f && !f.includes("/"));
+      assertEqual(folders.length, 1, "one folder was made on the service");
+      assert(dav.files.has(`${folders[0]}/Home.txt`) && dav.files.has(`${folders[0]}/notebook.zim`), "with the pages and notebook.zim as Zim has them");
+      assert(dav.files.get(`${folders[0]}/Home.txt`).bytes.toString().includes("written on A"), "readable there, as a Zim page");
+
+      // a second device finds it through the account, and opens it
+      const B = await device();
+      await signIn(B);
+      await B.choose("Open a notebook from the server…");
+      await B.dialog().waitFor();
+      assert((await B.dialog().locator("option").allTextContents()).some((o) => o.includes("My Nextcloud")), "the connected service's notebook is offered");
+      await B.dialog().getByRole("button", { name: "Open" }).click();
+      await B.says("was copied from My Nextcloud");
+      assert((await B.ui.text()).includes("written on A"), "B has what A wrote");
+
+      // B changes one page and sends: only that file goes
+      await write(B, "written on B\n");
+      const before = dav.log.length;
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to My Nextcloud");
+      assertDeepEqual(puts(before), ["Home.txt"], "only the page that changed was written");
+      await A.choose("Sync this notebook now");
+      await A.says("was brought up to date from My Nextcloud");
+      assert((await A.ui.text()).includes("written on B"), "A has what B wrote");
+
+      // both change: asked, nothing overwritten; the other copy is taken
+      await write(A, "A alone\n");
+      await write(B, "B alone\n");
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to My Nextcloud");
+      const kept = dav.files.get(`${folders[0]}/Home.txt`).bytes.toString();
+      await A.choose("Sync this notebook now");
+      await A.page.getByRole("heading", { name: "This notebook changed in two places" }).waitFor();
+      assertEqual(dav.files.get(`${folders[0]}/Home.txt`).bytes.toString(), kept, "the service was not touched by the conflict");
+      await A.dialog().getByRole("button", { name: "Use the other copy" }).click();
+      await A.says("was brought up to date from My Nextcloud");
+      assert((await A.ui.text()).includes("B alone") && !(await A.ui.text()).includes("A alone"), "A has the service's copy");
+
+      // a page made on A reaches the service as a new file, and one deleted is removed there
+      const before3 = dav.log.length;
+      await A.page.evaluate(() => window.__zim.app.session.save("Extra page", "Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== Extra page ======\n"));
+      await A.choose("Sync this notebook now");
+      await A.says("was sent to My Nextcloud");
+      assertDeepEqual(puts(before3), ["Extra_page.txt"], "only the new page was written");
+      assert(dav.files.has(`${folders[0]}/Extra_page.txt`), "it is there");
+      await A.page.evaluate(() => window.__zim.app.session.delete("Extra page"));
+      await A.choose("Sync this notebook now");
+      await A.says("was sent to My Nextcloud");
+      assert(!dav.files.has(`${folders[0]}/Extra_page.txt`), "a page deleted on A is deleted on the service");
+      // (the service is what it was when B last looked: nothing for B to fetch)
+      await B.choose("Sync this notebook now");
+      await B.says("up to date on My Nextcloud");
+
+      // stop keeping it (and delete its files there), then disconnect
+      await B.choose("Stop keeping this notebook on the server…");
+      await B.dialog().getByRole("button", { name: "Stop" }).click();
+      await B.says("The copy was deleted");
+      assertEqual([...dav.files.keys()].filter((k) => k.startsWith(`${folders[0]}/`)).length, 0, "the notebook's files are gone from the service");
+      // A is still linked to it: disconnecting from A makes A forget the link (the notebook is kept on the device, as it is)
+      await A.choose("Connected services…");
+      await A.dialog().getByRole("button", { name: "Disconnect" }).click();
+      await A.says("Disconnected. 1 notebook is no longer kept there");
+      assertEqual(db.prepare("select count(*) as n from connectors").get().n, 0, "the server forgot the connection (and its password)");
+      await A.ui.openMenu();
+      assert((await A.ui.menu().getByRole("menuitem").allInnerTexts()).includes("Keep this notebook on the server…"), "and the notebook is offered to be kept again");
+      await A.page.keyboard.press("Escape");
+      // (the browser logs the one refusal that this scenario asked for: the wrong password)
+      const refusals = problems.filter((p) => /Failed to load resource: the server responded with a status of 400/.test(p));
+      assertEqual(refusals.length, 1, `one refusal was asked for (${problems.join(" | ")})`);
+      problems = problems.filter((p) => !refusals.includes(p));
+    } finally {
+      for (const d of devices) await d.context.close();
+      withAccounts.closeAllConnections?.();
+      withAccounts.close();
+      dav.stop();
       db.close();
     }
   });

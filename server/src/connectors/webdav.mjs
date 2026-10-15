@@ -80,6 +80,27 @@ export const webdav = {
     return files.map((f) => ({ ...f, path: f.path.slice(dir.length + 1) })).sort((a, b) => (a.path < b.path ? -1 : 1));
   },
 
+  /** The folders at the root of the connected folder: each one may be a notebook. */
+  async folders(config, options) {
+    const response = await this.request(config, options, "PROPFIND", "", { headers: { depth: "1", "content-type": "application/xml" } });
+    if (response.status !== 207) throw new ConnectorError(`The server answered ${response.status} when listing the folder.`);
+    const base = new URL(config.url).pathname;
+    const names = [];
+    for (const block of response.body.toString("utf8").split(/<(?:\w+:)?response[\s>]/i).slice(1)) {
+      const href = /<(?:\w+:)?href[^>]*>([^<]*)</i.exec(block)?.[1];
+      if (!href || !/<(?:\w+:)?collection\s*\/?>/i.test(block)) continue;
+      try {
+        const path = new URL(decode(href), config.url).pathname;
+        if (!path.startsWith(base)) continue;
+        const name = decodeURIComponent(path.slice(base.length)).replace(/\/+$/, "");
+        if (name && !name.includes("/") && !name.startsWith(".")) names.push(name);
+      } catch {
+        // not an address of this folder
+      }
+    }
+    return names.sort();
+  },
+
   async read(config, options, dir, path) {
     const response = await this.request(config, options, "GET", `${dir}/${path}`);
     if (response.status !== 200) throw new ConnectorError(`The server answered ${response.status} when reading ${path}.`);

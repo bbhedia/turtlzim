@@ -141,6 +141,13 @@ describe("connected services, through the API", () => {
     assert.equal(dav.files.get("Garden-abc123/Help/Editor page.txt").bytes.toString(), "deep", "the service has it where a person would look");
   });
 
+  it("lists the folders at the root of the service, which are the notebooks there", async () => {
+    dav.folders.add("Other book-1");
+    dav.folders.add(".hidden");
+    const got = await call("ada", `/api/connectors/${id}/folders`, {});
+    assert.deepEqual(got.json.folders, ["Garden-abc123", "Other book-1"]);
+  });
+
   it("refuses a change made from a version that is not the service's, and changes nothing", async () => {
     const dir = "Garden-abc123";
     const current = (await call("ada", `/api/connectors/${id}/list`, { dir })).json.version;

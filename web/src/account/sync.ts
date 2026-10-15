@@ -8,8 +8,12 @@ import type { WireFile } from "./client";
 /** What a notebook remembers of its last agreement with the server. */
 export interface Link {
   remoteId: string;
-  /** The server's revision then. */
-  revision: number;
+  /** Where the copy is: the account's own space (nothing here), or a folder of a service that was connected. */
+  target?: { kind: "connector"; connectorId: number; dir: string };
+  /** The version of the copy then: the server's revision (a number) for the account's space, a mark of the folder (a string) for a service. */
+  revision: number | string;
+  /** For a service: a digest of each file then, so that only what changed is sent. */
+  files?: Record<string, string>;
   /** The digest of the notebook's files then. */
   digest: string;
   /** Whose account (the e-mail address): a link made under another account is not this person's. */
@@ -19,7 +23,7 @@ export interface Link {
 export type Decision = "nothing" | "send" | "fetch" | "conflict";
 
 /** What to do, given the link, the digest of the notebook now and the server's revision now. */
-export function decide(link: Pick<Link, "revision" | "digest">, localDigest: string, remoteRevision: number): Decision {
+export function decide(link: Pick<Link, "revision" | "digest">, localDigest: string, remoteRevision: number | string): Decision {
   const localChanged = localDigest !== link.digest;
   const remoteChanged = remoteRevision !== link.revision;
   if (localChanged && remoteChanged) return "conflict";
@@ -65,6 +69,22 @@ export function fromWire(files: WireFile[]): ImportedFile[] {
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return { path: file.path, bytes };
   });
+}
+
+/** A digest of each file, by its path (what a service has to be sent is what changed). */
+export async function fileDigests(entries: ZipEntry[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  for (const entry of entries) {
+    const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", entry.bytes as BufferSource));
+    out[entry.path] = [...hash].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  return out;
+}
+
+/** A folder name for a notebook on a service: its title, made safe, and a short random part so that two notebooks of one name do not meet. */
+export function folderNameFor(title: string): string {
+  const slug = title.replace(/[^\p{L}\p{N}._ -]+/gu, "_").replace(/^[._\s]+|\s+$/g, "").slice(0, 60) || "notebook";
+  return `${slug}-${newRemoteId().slice(0, 6)}`;
 }
 
 /** A new id for a notebook on the server (the server asks for 8 to 64 of letters, digits, `_` and `-`). */

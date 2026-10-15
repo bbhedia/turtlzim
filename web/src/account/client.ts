@@ -46,6 +46,14 @@ export interface RemoteNotebook {
   bytes?: number;
 }
 
+/** A service that the person connected (never its settings: the server keeps those). */
+export interface Connection {
+  id: number;
+  kind: string;
+  label: string;
+  service: string;
+}
+
 /** A file as it travels: its path in the notebook and its bytes in base64. */
 export interface WireFile {
   path: string;
@@ -126,6 +134,27 @@ export class AccountClient {
   }
   deleteNotebook(id: string): Promise<unknown> {
     return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}`, {}, "DELETE");
+  }
+  listConnectors(): Promise<{ connectors: Connection[]; services: Array<{ kind: string; label: string }> }> {
+    return this.call("/api/connectors");
+  }
+  addConnector(kind: string, label: string, settings: Record<string, string>): Promise<Connection> {
+    return this.call("/api/connectors", { kind, label, settings });
+  }
+  deleteConnector(id: number): Promise<unknown> {
+    return this.call(`/api/connectors/${id}`, {}, "DELETE");
+  }
+  connectorFolders(id: number): Promise<{ folders: string[] }> {
+    return this.call(`/api/connectors/${id}/folders`, {});
+  }
+  connectorList(id: number, dir: string): Promise<{ version: string; files: Array<{ path: string; size: number }> }> {
+    return this.call(`/api/connectors/${id}/list`, { dir });
+  }
+  connectorRead(id: number, dir: string): Promise<{ version: string; files: WireFile[] }> {
+    return this.call(`/api/connectors/${id}/read`, { dir });
+  }
+  connectorWrite(id: number, dir: string, body: { baseVersion: string; put: WireFile[]; remove: string[] }): Promise<{ version: string }> {
+    return this.call(`/api/connectors/${id}/write`, { dir, ...body });
   }
   /** Everything the server keeps about the person, as the text of a JSON file. */
   async exportData(): Promise<string> {

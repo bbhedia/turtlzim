@@ -3,7 +3,7 @@
 `server/`: a Node 24 program (no framework; `node:sqlite`, `node:crypto`, and `nodemailer` for SMTP) that serves the web app **and** `/api/`, in one
 process. It exists so that a person can have an **account**; an account is optional, and without one nothing changes: notebooks stay on the device.
 Accounts can keep **open notebooks on the server, in clear**, in step with other devices (below; 1 MB per user). A sealed copy of the encrypted notebooks (below) and
-the connectors (Dropbox, Google Drive, …) are later steps (`docs/zim-cloud-feasibility.md`, roadmap lots 3 to 6). Decided 2026-10-15: Google and GitHub
+connected services (Nextcloud / WebDAV; Dropbox, Google Drive, GitHub, GitLab are later steps (`docs/zim-cloud-feasibility.md`, roadmap lots 3 to 6). Decided 2026-10-15: Google and GitHub
 first, a mailed code **only at sign-up**, and run on this server (a VPS later if the project succeeds; the shared hosting idea is dropped).
 
 ## What it does
@@ -75,6 +75,29 @@ kept on the device, which only the notebooks' passphrase opens. No new way of en
   (revision 2), delete empties the server; locked, a browser that has the vault is offered neither line. Mutants (revision not sent, the lines offered where they should not be, the sealed copy listed as a notebook) are caught.
 - **Not done**, from the study (§6): sealing each file separately with a key hierarchy (master key wrapped by the passphrase, a recovery key, hidden names) so that encrypted notebooks could **sync** page by page between devices, and a vault-wide passphrase for an account that is not the account's password. That needs new commands in the Rust core (`LOCAL_COMMANDS`), shared test vectors for native and wasm, and a merge rule; it is the next step if sync of encrypted notebooks is wanted.
 
+## Connected services (Nextcloud, ownCloud, any WebDAV server) — `server/src/connectors/`
+
+A browser page can't talk to a service of yours (the page's content policy lets it ask only its own server, and those services do not allow it), so **the server does it for the person**.
+*Connected services…* in the menu connects one (`POST /api/connectors`): the address of a folder, a user name, an app password. The server **tests them against the service before keeping anything**,
+and keeps the settings **sealed** (AES-256-GCM, a key derived from the server's own `secret.key`, never sent back to a page, deleted with the account or with the connection).
+Then *Keep this notebook on the server…* offers the account's space (1 MB) or any connected service as **Where**, and *Open a notebook from the server…* lists the notebooks found on each.
+
+- A notebook is a folder of Zim files on the service (`<title>-<random>/Page.txt`, `notebook.zim`, attachments at their paths): Zim itself, or Nextcloud's own sync, can open it. It is stored **in clear**: the dialog says so.
+  Unlike the account's space, a service has no 1 MB limit of ours (up to 8 MB a notebook can be fetched, 3000 files).
+- Only what changed is written (a digest of each file at the last agreement is kept in the browser's link, next to the service's own version mark of the folder), and a page deleted here is deleted there. The same decision as for the
+  account's space applies (send / fetch / both changed → asked), and the server refuses a change made from a version of the folder that is not the service's now (409). *Not atomic*: WebDAV has no way to say “only if nobody wrote”, so two
+  devices that write in the same instant can still interleave; the version check shortens that window to the length of one sync.
+- **The server calls an address that a person typed**, which is the most dangerous thing it does. So (`safe-fetch.mjs`): https only; the address a name resolves to is checked **when connecting** (and a literal address is judged too: Node
+  does not look those up), private, loopback, link-local and reserved ranges refused in both IP versions; no redirect is followed; no password in the address; a time limit, and limits on the size of an answer and of what is sent; folder
+  and file names are checked (no `..`, nothing hidden, no more than four levels) before the service is called; connections belong to their owner (another account gets “no such connection”); limits per account. An operator who runs the server inside
+  their own network can allow private addresses (`connectorOptions.allowPrivate`, in code or tests only: there is no setting for it in `config.json` on purpose).
+- The password is the service's, so a server that is hacked gives it away: **use an app password** (Nextcloud: Settings → Security), revocable without touching the main one.
+- Verified by `server/test/connectors.test.mjs` (a WebDAV server in memory; 13 tests, 10 mutants of the guards, the sealing, the version check and the ownership all caught) and the browser scenario "…a connected WebDAV service…" (connect with a wrong
+  password refused, then right; keep; open on a second device; only the changed page written; a new page and a deleted page reach the service; a conflict is asked about; stop deletes its files; disconnect from a linked device unlinks it).
+  **Not tried against a real Nextcloud or ownCloud** (only the protocol as the fake speaks it: PROPFIND, MKCOL, GET, PUT, DELETE, basic authentication; a real server may answer details differently).
+- Not done: Dropbox, Google Drive, GitHub, GitLab (each needs OAuth apps of yours, or a token, and its own driver: the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what they plug into), connecting a service
+  for the encrypted notebooks' sealed copy, and a sync of connected services from the native apps.
+
 ## Run it
 
 ```bash
@@ -118,4 +141,4 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## Not yet
 
-Merging two versions of a page (today one copy replaces the other), sending only what changed with a passphrase, connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).
+Merging two versions of a page (today one copy replaces the other), the Dropbox / Google Drive / GitHub / GitLab connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).

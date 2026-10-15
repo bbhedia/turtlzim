@@ -145,7 +145,7 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
         }
         return void send(res, 405, { error: "Not that way." }, { allow: "GET, PUT, DELETE" });
       }
-      const connectorRoute = /^\/api\/connectors(?:\/(\d{1,9})(?:\/(list|read|write))?)?$/.exec(route);
+      const connectorRoute = /^\/api\/connectors(?:\/(\d{1,9})(?:\/(list|read|write|folders))?)?$/.exec(route);
       if (connectorRoute) {
         const found = sessionOf(req);
         if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
@@ -164,6 +164,7 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
         if (id !== null && action && method === "POST") {
           accounts.limit(`connector:io:${userId}`, 600, 600);
           const body = await readJson(req, MAX_CONNECTOR_BODY);
+          if (action === "folders") return void send(res, 200, await connectors.folders(userId, id));
           if (!validDir(body.dir)) throw new AccountError("That is not a folder name that can be used.", 400, { code: "bad-dir" });
           if (action === "list") return void send(res, 200, await connectors.files(userId, id, body.dir));
           if (action === "read") return void send(res, 200, await connectors.read(userId, id, body.dir));

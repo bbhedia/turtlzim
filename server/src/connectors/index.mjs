@@ -86,6 +86,11 @@ export class Connectors {
     }
   }
 
+  async folders(userId, id) {
+    const { driver, settings } = this.open(userId, id);
+    return { folders: (await this.guard(() => driver.folders(settings, this.options))).filter((name) => validDir(name)) };
+  }
+
   async files(userId, id, dir) {
     const { driver, settings } = this.open(userId, id);
     const files = await this.guard(() => driver.list(settings, this.options, dir));
