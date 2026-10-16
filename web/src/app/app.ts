@@ -24,6 +24,7 @@ import { TurtlStore } from "../vault/turtl-store";
 import { createZip, readZip } from "../zip";
 import { SealedUi } from "../account/sealed";
 import { SyncUi } from "../account/sync-ui";
+import type { SyncState } from "../account/sync-ui";
 import { AccountUi } from "../account/ui";
 import { closeAllDialogs, showDialog, showMessage } from "./dialogs";
 import type { Phase, Pwa } from "../pwa/register";
@@ -296,6 +297,10 @@ export class App {
       this.account,
       { get: (id) => prefs.get(`sync:${id}`), set: (id, value) => prefs.set(`sync:${id}`, value), remove: (id) => prefs.remove(`sync:${id}`) },
     );
+    // (what a notebook's button says of where it is kept follows what happens to it)
+    this.sync.onStatus = () => {
+      if (this.session) this.renderNotebookButton();
+    };
     this.els = this.build(root);
     vault.onChange((event) => this.onVaultChange(event));
     vault.onSettled((finished) => void this.tellSettled(finished));
@@ -661,7 +666,6 @@ export class App {
     if (isEncryptedId(id)) prefs.set("vault-notebook", id);
     this.trail.clear();
     this.renderNotebookButton();
-    this.els.notebookButton.title = "Notebooks";
     // sections start folded, until the person has chosen otherwise
     this.tree.setNodes(session.tree());
     this.tree.setFolded(this.savedFolds(id));
@@ -678,9 +682,33 @@ export class App {
     // (a browser that offers to translate the page sends it to a service on the internet; the editor itself is never offered: CodeMirror marks it so)
     document.documentElement.translate = !this.isPrivate;
     const children: Node[] = [h("span", { class: "notebook-title", text: this.session.title })];
-    if (this.isPrivate) children.push(h("span", { class: "badge", text: "encrypted" }));
+    if (this.isPrivate) children.push(h("span", { class: "badge enc", text: "encrypted" }));
+    // (a notebook that is kept elsewhere says so next to its title; one that is only here says nothing: that is the usual case, and the menu says it for every notebook)
+    const where = this.session.info.kind === "open" ? this.notebookBadges(this.session.info).find((b) => b.kind === "where" && b.synced) : undefined;
+    if (where) {
+      // (the word “synced” and the state are two parts, so that a narrow screen can keep only the state, and only when it needs the person)
+      const [first, ...rest] = where.short.split(" · ");
+      children.push(h("span", { class: "badge sync", "data-state": where.state ?? "unknown", title: where.text }, h("span", { class: "where", text: first ?? "synced" }), rest.length ? h("span", { class: "state", text: rest.join(" · ") }) : null));
+    }
     children.push(h("span", { class: "caret-down", "aria-hidden": "true" }));
     this.els.notebookButton.replaceChildren(...children);
+    this.els.notebookButton.title = `${this.session.title}${this.isPrivate ? " · encrypted" : ""}${this.session.info.kind === "open" ? ` · ${this.notebookBadges(this.session.info).find((b) => b.kind === "where")?.text ?? ""}` : ""} — notebooks`;
+  }
+
+  /**
+   * What the interface says of where a notebook is, and whether it is encrypted: two worded badges (a word, not only an icon, so that it is read out and needs no font): “Encrypted”, and “This device only”,
+   * a folder of this computer, or “Synced · where” with its state when it is known. An encrypted notebook is never synced (yet): it is kept in the vault.
+   */
+  private notebookBadges(info: NotebookInfo): Array<{ kind: "enc" | "where"; text: string; short: string; synced: boolean; state?: SyncState }> {
+    const badges: Array<{ kind: "enc" | "where"; text: string; short: string; synced: boolean; state?: SyncState }> = [];
+    if (info.kind === "encrypted") badges.push({ kind: "enc", text: "Encrypted", short: "encrypted", synced: false });
+    const status = info.kind === "open" ? this.sync.statusOf(info.id) : null;
+    if (status) {
+      const words: Record<SyncState, string> = { ok: "up to date", pending: "waiting to be sent", sending: "syncing…", conflict: "needs you", error: "problem", offline: "offline" };
+      const state = status.state ? ` · ${words[status.state]}` : "";
+      badges.push({ kind: "where", text: `Synced · ${status.place}${state}`, short: status.state && status.state !== "ok" ? `synced · ${words[status.state]}` : "synced", synced: true, ...(status.state ? { state: status.state } : {}) });
+    } else badges.push({ kind: "where", text: info.kind === "folder" ? "Folder of this computer" : "This device only", short: "this device", synced: false });
+    return badges;
   }
 
   /**
@@ -749,11 +777,11 @@ export class App {
     // (what the account server says is asked when the menu opens, not before; a server that is slow does not hold the menu back for long)
     const accounts = shellPlatform() === null ? Promise.race([this.account.refresh(), new Promise<void>((resolve) => setTimeout(resolve, 1500))]) : Promise.resolve();
     Promise.all([this.store.listNotebooks(), accounts]).then(([notebooks]) => {
-      const item = (text: string, onClick: () => void, extra: Record<string, unknown> = {}, badge?: string) =>
-        h("button", { type: "button", role: "menuitem", class: "menu-item", on: { click: () => { this.closeNotebookMenu(); onClick(); } }, ...extra }, h("span", { text }), badge ? h("span", { class: "badge", text: badge }) : null);
+      const item = (text: string, onClick: () => void, extra: Record<string, unknown> = {}, badges: Array<{ kind: string; text: string; state?: SyncState }> = []) =>
+        h("button", { type: "button", role: "menuitem", class: "menu-item", on: { click: () => { this.closeNotebookMenu(); onClick(); } }, ...extra }, h("span", { text }), badges.length ? h("span", { class: "badges" }, ...badges.map((b) => h("span", { class: `badge ${b.kind === "enc" ? "enc" : "sync"}`, ...(b.state ? { "data-state": b.state } : {}), text: b.text }))) : null);
       clear(this.els.notebookMenu);
       for (const notebook of notebooks) {
-        this.els.notebookMenu.append(item(notebook.title, () => void this.openNotebook(notebook.id).catch((error: unknown) => this.say(`Couldn't open ${notebook.title}: ${error instanceof Error ? error.message : String(error)}`)), { role: "menuitemradio", "aria-checked": String(notebook.id === this.session.info.id) }, notebook.kind === "encrypted" ? "encrypted" : notebook.kind === "folder" ? "folder" : undefined));
+        this.els.notebookMenu.append(item(notebook.title, () => void this.openNotebook(notebook.id).catch((error: unknown) => this.say(`Couldn't open ${notebook.title}: ${error instanceof Error ? error.message : String(error)}`)), { role: "menuitemradio", "aria-checked": String(notebook.id === this.session.info.id) }, this.notebookBadges(notebook)));
       }
       if (this.vault.unlocked) this.els.notebookMenu.append(h("hr", {}), item("Lock encrypted notebooks", () => void this.lockVault()), item("Change the passphrase…", () => void this.changePassphraseDialog()), item("Back up the encrypted notebooks…", () => void this.backupDialog()));
       else if (this.vaultKnown()) this.els.notebookMenu.append(h("hr", {}), item("Unlock encrypted notebooks…", () => void this.unlockFromMenu()));
@@ -793,18 +821,31 @@ export class App {
 
   private async newNotebook(): Promise<void> {
     const folders = shellHooks().folders;
+    // where a notebook can live: here (the browser, or the program), a folder of this computer (the program only), or, for someone who is signed in, the server or a connected service
+    const remote = shellPlatform() === null && this.account.account ? await this.sync.whereOptions() : [];
+    const places = [
+      ...(folders ? [{ value: "folder", label: "In a folder of this computer: Zim files that Zim opens too (only here)" }] : []),
+      { value: "device", label: folders ? "On this device only: kept in this program" : "On this device only: kept in this browser" },
+      ...remote,
+    ];
     await showDialog({
       title: "New notebook",
+      body: ["A notebook is either encrypted or not, and either only on this device or kept elsewhere: it is never a mix of the two. (Pages of the notebook can be in sections, as many as you like.)"],
       fields: [{ name: "title", label: "Name", value: "My notebook", validate: (v) => (v.trim() ? null : "Give the notebook a name.") }],
       choices: [
-        { name: "kind", label: "Kind", value: folders ? "folder" : "open", options: [...(folders ? [{ value: "folder", label: "Folder: Zim files in a folder of this computer, which Zim opens too" }] : []), { value: "open", label: folders ? "Open: plain pages, kept in this program" : "Open: plain pages, kept in this browser" }, { value: "encrypted", label: "Encrypted: needs a passphrase to open" }] },
+        { name: "kind", label: "Encryption", value: "open", options: [{ value: "open", label: "Not encrypted: plain pages" }, { value: "encrypted", label: "Encrypted: needs the passphrase of the encrypted notebooks to open" }] },
+        { name: "where", label: "Where", value: folders ? "folder" : "device", options: places },
         { name: "start", label: "Start with", value: "empty", options: [{ value: "empty", label: "An empty notebook" }, { value: "sample", label: "The sample notebook" }] },
       ],
       confirm: "Create",
       working: "Creating…",
       submit: async (values) => {
         const title = String(values.title).trim();
-        const kind = values.kind === "encrypted" ? "encrypted" : values.kind === "folder" && folders ? "folder" : "open";
+        const where = String(values.where);
+        const encrypted = values.kind === "encrypted";
+        // (an encrypted notebook is kept in the vault, on this device: sending one is not done yet, and a folder of Zim files is plain by its nature)
+        if (encrypted && where !== "device") return where === "folder" ? "A folder of Zim files can't be encrypted. Choose “On this device only”, or make the notebook not encrypted." : "An encrypted notebook can only be kept on this device for now: sending encrypted notebooks to a server or a service is not done yet. Choose “On this device only”.";
+        const kind = encrypted ? "encrypted" : where === "folder" && folders ? "folder" : "open";
         if (kind === "encrypted") {
           const problem = await this.prepareVault();
           if (problem) return problem;
@@ -815,6 +856,11 @@ export class App {
         const info = values.start === "sample" ? await createSampleNotebook(this.store, title, kind, root?.id) : await createEmptyNotebook(this.store, title, "Home", kind, root?.id);
         await this.openNotebook(info.id);
         if (kind === "encrypted") void this.warnIfNotKept();
+        // (the notebook is made here and then sent for the first time: until that is done it is in both places, which is the one moment that it may be)
+        if (kind === "open" && where !== "device" && where !== "folder") {
+          const problem = await this.sync.keepIn(where);
+          if (problem) this.say(`“${title}” was made here, but it could not be kept elsewhere: ${problem} Choose “Keep this notebook on the server…” to try again.`);
+        }
       },
     });
   }

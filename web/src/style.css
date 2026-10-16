@@ -144,9 +144,31 @@ button.secondary { background: transparent; }
 .menu hr { border: 0; border-top: 1px solid var(--zim-border); margin: 0.3rem 0; }
 .menu-item { display: flex; align-items: center; gap: 0.6rem; width: 100%; text-align: left; border: 0; background: none; padding: 0.4rem 0.6rem; border-radius: 5px; white-space: nowrap; }
 .menu-item > span:first-of-type { overflow: hidden; text-overflow: ellipsis; }
-.menu-item > .badge { margin-left: auto; }
+.menu-item > .badge, .menu-item > .badges { margin-left: auto; }
+.badges { display: inline-flex; gap: 0.3rem; flex: none; }
 /* what marks an encrypted notebook, in the menu and next to the title: a word, not an icon, so that it needs no font and is read out */
 .badge { flex: none; font-size: 0.7rem; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; padding: 0.05rem 0.4rem; border-radius: 999px; border: 1px solid var(--zim-border); color: var(--zim-muted); background: var(--bar-bg); }
+/* where a notebook is kept, next to the lock: a dot that says how it stands (the word says it too) */
+.badge.enc { color: var(--zim-fg); border-color: var(--zim-muted); }
+.badge.sync { text-transform: none; letter-spacing: 0; }
+.badge.sync[data-state]::before { content: ""; display: inline-block; width: 0.5em; height: 0.5em; margin-right: 0.35em; border-radius: 50%; background: currentColor; vertical-align: 0.05em; }
+.badge.sync[data-state="ok"] { color: var(--zim-done); border-color: var(--zim-done); }
+.badge.sync[data-state="pending"], .badge.sync[data-state="sending"] { color: var(--zim-link); border-color: var(--zim-link); }
+.badge.sync[data-state="sending"]::before { animation: syncpulse 1s ease-in-out infinite; }
+.badge.sync[data-state="conflict"], .badge.sync[data-state="error"] { color: var(--danger); border-color: var(--danger); font-weight: 700; }
+.badge.sync[data-state="offline"] { border-style: dashed; }
+.badge.sync .state::before { content: " · "; white-space: pre; }
+@keyframes syncpulse { 50% { opacity: 0.25; } }
+/* on a narrow screen the title is what matters: the badge by it is a dot, and the word of its state only when the notebook needs the person (the menu says it all in words) */
+@media (max-width: 640px) {
+  .notebook-button .badge.sync .where { display: none; }
+  .notebook-button .badge.sync[data-state="ok"] .state, .notebook-button .badge.sync[data-state="pending"] .state, .notebook-button .badge.sync[data-state="sending"] .state { display: none; }
+  .notebook-button .badge.sync .state::before { content: none; }
+  .notebook-button .badge.sync[data-state="ok"], .notebook-button .badge.sync[data-state="pending"], .notebook-button .badge.sync[data-state="sending"] { padding: 0.15rem; }
+  .notebook-button .badge.sync[data-state]::before { margin-right: 0; }
+  .notebook-button .badge.sync[data-state="conflict"]::before, .notebook-button .badge.sync[data-state="error"]::before, .notebook-button .badge.sync[data-state="offline"]::before { margin-right: 0.3em; }
+}
+@media (prefers-reduced-motion: reduce) { .badge.sync[data-state="sending"]::before { animation: none; } }
 .lock-button { font-weight: 600; }
 .menu-item:hover { background: var(--row-hover); }
 .menu-item[aria-checked="true"]::before { content: "\2713\00a0"; }

@@ -1653,8 +1653,8 @@ try {
     assert((await ui.text()).includes("This notebook is empty."), "which says so");
     assertDeepEqual(await lists(), { tags: "", noTags: true, daysWithPages: 0, headings: ["Home"] }, "and the lists beside the page are its own, not the other notebook's");
     await ui.openMenu();
-    const listed = await ui.menu().getByRole("menuitemradio").evaluateAll((items) => items.map((i) => [i.textContent, i.getAttribute("aria-checked")]).sort());
-    assertDeepEqual(listed, [["Garden notes", "true"], ["Sample notebook", "false"]], "the menu lists both, with the open one checked");
+    const listed = await ui.menu().getByRole("menuitemradio").evaluateAll((items) => items.map((i) => [i.querySelector("span").textContent, i.getAttribute("aria-checked"), i.querySelector(".badges")?.textContent]).sort());
+    assertDeepEqual(listed, [["Garden notes", "true", "This device only"], ["Sample notebook", "false", "This device only"]], "the menu lists both, with the open one checked, and each says that it is only on this device");
     await ui.menu().getByRole("menuitemradio", { name: "Sample notebook" }).click();
     await page.waitForFunction(() => document.querySelector(".notebook-title")?.textContent === "Sample notebook");
     assertDeepEqual(await ui.rows(), ["Help", "Home", "Ideas", "Journal", "Projects"], "the sample notebook is as it was");
@@ -3028,7 +3028,7 @@ try {
     await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
     const dialog = topDialog(page);
     await dialog.getByLabel("Name").fill(title);
-    await dialog.getByLabel("Kind").selectOption("encrypted");
+    await dialog.getByLabel("Encryption").selectOption("encrypted");
     await dialog.getByLabel("Start with").selectOption(start);
     await dialog.getByRole("button", { name: "Create", exact: true }).click();
     if (first) {
@@ -3077,6 +3077,10 @@ try {
     assert(await page.locator(".notebook-button .badge").isVisible(), "and marked as encrypted");
     assert(await page.locator(".lock-button").isVisible(), "the Lock button is there");
     assertEqual(await ui.current(), "Home", "it opens at its home page");
+    await ui.openMenu();
+    const diaryRow = (await ui.menu().getByRole("menuitemradio").evaluateAll((items) => items.map((i) => ({ title: i.querySelector("span").textContent, badges: [...i.querySelectorAll(".badge")].map((b) => b.textContent) })))).find((r) => r.title === "Diary");
+    assertDeepEqual(diaryRow.badges, ["Encrypted", "This device only"], "the list says that it is encrypted and only here");
+    await page.keyboard.press("Escape");
 
     await ui.typeAtEnd("The vault door code is 739104826.\n");
     await ui.goto("Secrets:Plans");
@@ -3493,7 +3497,7 @@ try {
     await ui.openMenu();
     await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
     const dialog = topDialog(page);
-    await dialog.getByLabel("Kind").selectOption("encrypted");
+    await dialog.getByLabel("Encryption").selectOption("encrypted");
     await dialog.getByRole("button", { name: "Create", exact: true }).click();
     const making = vaultDialog(page, "Encrypted notebooks");
     await making.waitFor();
@@ -3715,7 +3719,7 @@ try {
         await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
         const dialog = topDialog(page);
         await dialog.getByLabel("Name").fill("Kept");
-        await dialog.getByLabel("Kind").selectOption("encrypted");
+        await dialog.getByLabel("Encryption").selectOption("encrypted");
         await dialog.getByRole("button", { name: "Create", exact: true }).click();
         const making = vaultDialog(page, "Encrypted notebooks");
         await making.waitFor();
@@ -4173,7 +4177,7 @@ try {
       await ui.openMenu();
       await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
       const dialog = topDialog(page);
-      await dialog.getByLabel("Kind").selectOption("encrypted");
+      await dialog.getByLabel("Encryption").selectOption("encrypted");
       await dialog.getByRole("button", { name: "Create", exact: true }).click();
       await dialog.locator(".dialog-error").filter({ hasText: "secure page" }).waitFor();
       assert(await dialog.isVisible(), "the dialog stays open with the reason");
@@ -4785,7 +4789,7 @@ try {
       await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
       const dialog = ui.dialog();
       await dialog.waitFor();
-      assertEqual(await dialog.locator("#choice-kind").inputValue(), "folder", "a new notebook is a folder in the program");
+      assertEqual(await dialog.locator("#choice-where").inputValue(), "folder", "a new notebook is a folder in the program");
       await dialog.locator("#field-title").fill("Fresh");
       await page.evaluate((id) => (window.__fake.next = id), fresh);
       await dialog.getByRole("button", { name: "Create", exact: true }).click();
@@ -4793,6 +4797,10 @@ try {
       await page.waitForFunction(() => document.querySelector(".notebook-title")?.textContent === "Fresh");
       assertDeepEqual(await page.evaluate((id) => window.__fake.paths(id), fresh), ["Home.txt", "notebook.zim"], "it is the files of a Zim notebook");
       assert((await page.evaluate((id) => window.__fake.text(id, "notebook.zim"), fresh)).includes("name=Fresh"), "named in notebook.zim");
+      await ui.openMenu();
+      const freshRow = (await ui.menu().getByRole("menuitemradio").evaluateAll((items) => items.map((i) => ({ title: i.querySelector("span").textContent, badges: [...i.querySelectorAll(".badge")].map((b) => b.textContent) })))).find((r) => r.title === "Fresh");
+      assertDeepEqual(freshRow.badges, ["Folder of this computer"], "the list says that it is a folder of the computer");
+      await page.keyboard.press("Escape");
 
       // a folder that was not chosen is no notebook
       await ui.openMenu();
@@ -5931,6 +5939,145 @@ try {
     writes: (fake) => fake.requests.filter((r) => r.startsWith("POST /upload/") || r.startsWith("PATCH /upload/")).length,
     edit: (fake, folder, text) => fake.put(`Zim Notebooks/${folder}/Home.txt`, fake.files()[`Zim Notebooks/${folder}/Home.txt`].toString() + text),
     revoked: (fake) => fake.state.revoked.length,
+  });
+
+  // --- E16c: every notebook says whether it is encrypted and where it is kept, and a new one is made with both choices ---
+  await scenario("with an account server every notebook says whether it is encrypted and where it is kept, with its state; a new notebook is made with both choices, and an encrypted one is not offered to a server", async () => {
+    const { Accounts } = await import("../../server/src/accounts.mjs");
+    const { createApi } = await import("../../server/src/api.mjs");
+    const { openDatabase } = await import("../../server/src/db.mjs");
+    const { OutboxMailer } = await import("../../server/src/mail.mjs");
+    const { OAuth } = await import("../../server/src/oauth.mjs");
+    const { Sync } = await import("../../server/src/sync.mjs");
+    const { randomBytes } = await import("node:crypto");
+    const config = { baseUrl: "http://127.0.0.1", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: {} };
+    const db = openDatabase(":memory:");
+    const mailer = new OutboxMailer();
+    const accounts = new Accounts({ db, mailer, config });
+    const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+    const withAccounts = createStaticServer({ dir: dist, api });
+    await new Promise((resolve) => withAccounts.listen(0, "127.0.0.1", resolve));
+    const at = `http://127.0.0.1:${withAccounts.address().port}`;
+    config.baseUrl = at;
+    await accounts.register("ada@example.org", "correct horse battery");
+    accounts.verify("ada@example.org", /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1]);
+    const { context, ui } = await openApp({ at });
+    try {
+      const { page } = ui;
+      const says = (text) =>
+        page.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout: 25_000 }).catch(async () => {
+          throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await page.locator("#status").innerText())}`);
+        });
+      const choose = async (name) => {
+        await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+        await ui.openMenu();
+        await ui.menu().getByRole("menuitem", { name }).click();
+      };
+      const rows = async () => {
+        await ui.openMenu();
+        const found = await ui.menu().getByRole("menuitemradio").evaluateAll((items) => items.map((i) => ({ title: i.querySelector("span").textContent, badges: [...i.querySelectorAll(".badge")].map((b) => b.textContent), states: [...i.querySelectorAll(".badge[data-state]")].map((b) => b.getAttribute("data-state")) })));
+        await page.keyboard.press("Escape");
+        return found;
+      };
+      const topBadge = () => page.locator(".notebook-button .badge.sync");
+
+      // signed out: only the places that need no account, and every notebook says that it is only here
+      assertDeepEqual(await rows(), [{ title: "Sample notebook", badges: ["This device only"], states: [] }], "a notebook that is only here says so");
+      assertEqual(await topBadge().count(), 0, "and the button says nothing more of it");
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+      await ui.dialog().waitFor();
+      assertDeepEqual(await ui.dialog().locator("#choice-where option").allTextContents(), ["On this device only: kept in this browser"], "signed out, a notebook can only be made here");
+      assertDeepEqual(await ui.dialog().locator("#choice-kind option").allTextContents(), ["Not encrypted: plain pages", "Encrypted: needs the passphrase of the encrypted notebooks to open"], "and it is encrypted or not");
+      await ui.dialog().getByRole("button", { name: "Cancel" }).click();
+
+      // signed in: the server is a place to make a notebook in
+      await choose("Sign in or create an account…");
+      await topDialog(page).getByLabel("E-mail address", { exact: true }).fill("ada@example.org");
+      await topDialog(page).getByLabel("Password", { exact: true }).fill("correct horse battery");
+      await topDialog(page).getByRole("button", { name: "Sign in" }).click();
+      await says("Signed in as ada@example.org");
+      await ui.openMenu();
+      await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+      await ui.dialog().waitFor();
+      const places = await ui.dialog().locator("#choice-where option").allTextContents();
+      assertEqual(places.length, 2, `this device and the server (${places.join(" | ")})`);
+      assert(places[1].startsWith("On the server"), "the second place is the server");
+      if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, "new-notebook-two-choices.png") });
+      // an encrypted notebook can't be sent: refused with the reason, and nothing is made
+      await ui.dialog().locator("#field-title").fill("Secret");
+      await ui.dialog().locator("#choice-kind").selectOption("encrypted");
+      await ui.dialog().locator("#choice-where").selectOption({ index: 1 });
+      await ui.dialog().getByRole("button", { name: "Create", exact: true }).click();
+      await ui.dialog().locator(".dialog-error").filter({ hasText: "An encrypted notebook can only be kept on this device for now" }).waitFor();
+      // (the same dialog, with the choice put right: not encrypted, on the server)
+      await ui.dialog().locator("#choice-kind").selectOption("open");
+      await ui.dialog().locator("#field-title").fill("Shared one");
+      await ui.dialog().locator("#choice-where").selectOption({ index: 1 });
+      await ui.dialog().getByRole("button", { name: "Create", exact: true }).click();
+      await says("“Shared one” is kept on the server");
+      assertEqual(db.prepare("select title from notebooks").get().title, "Shared one", "the server has it");
+      assertDeepEqual(await rows(), [{ title: "Sample notebook", badges: ["This device only"], states: [] }, { title: "Shared one", badges: ["Synced · server · up to date"], states: ["ok"] }], "it says where it is kept and that it is up to date");
+      assertEqual(await topBadge().getAttribute("data-state"), "ok", "the button says it too, with a dot");
+      assertEqual(await topBadge().innerText(), "synced", "in one word");
+      if (process.env.SCREENSHOTS) {
+        await ui.openMenu();
+        await page.screenshot({ path: join(process.env.SCREENSHOTS, "notebook-list-badges.png") });
+        await page.keyboard.press("Escape");
+      }
+
+      // typing is waiting to be sent, and then it is
+      await ui.typeAtEnd("a change\n");
+      await ui.flush();
+      await page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "pending");
+      assert((await topBadge().innerText()).includes("waiting to be sent"), "waiting to be sent, in words");
+      await page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "ok", null, { timeout: 25_000 });
+      assertEqual(await topBadge().innerText(), "synced", "and up to date again once it is sent");
+
+      // the same page changed here and on the server: a question that is left for later shows as needing the person
+      const sync = new Sync({ db });
+      const userId = db.prepare("select id from users").get().id;
+      const remote = db.prepare("select id, revision from notebooks").get();
+      sync.patch(userId, config.quotaBytes, remote.id, { title: "Shared one", baseRevision: remote.revision, put: [{ path: "Home.txt", base64: Buffer.from("Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== Home ======\nchanged on the server\n").toString("base64") }], remove: [] });
+      await ui.typeAtEnd("and changed here\n");
+      await ui.flush();
+      await choose("Sync this notebook now");
+      await page.getByRole("heading", { name: "Some pages changed in two places" }).waitFor();
+      await topDialog(page).getByRole("button", { name: "Cancel" }).click();
+      await page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "conflict");
+      assert((await topBadge().innerText()).includes("needs you"), "it says that it needs the person");
+      if (process.env.SCREENSHOTS) {
+        await page.screenshot({ path: join(process.env.SCREENSHOTS, "notebook-conflict-badge.png") });
+        await page.setViewportSize({ width: 390, height: 800 });
+        await page.screenshot({ path: join(process.env.SCREENSHOTS, "notebook-conflict-badge-phone.png") });
+        await page.setViewportSize({ width: 1100, height: 900 });
+      }
+      const conflicted = (await rows()).find((r) => r.title === "Shared one");
+      assertDeepEqual(conflicted.states, ["conflict"], "the list says it too");
+      await choose("Sync this notebook now");
+      await topDialog(page).getByRole("button", { name: "Keep both" }).click();
+      await page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "ok");
+
+      // the server not there: offline, in words, and the notebook is still here
+      withAccounts.closeAllConnections?.();
+      withAccounts.close();
+      await ui.typeAtEnd("typed with no server\n");
+      await ui.flush();
+      await page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "offline", null, { timeout: 25_000 });
+      assert((await topBadge().innerText()).includes("offline"), "offline, in words");
+      assertEqual((await rows()).find((r) => r.title === "Shared one").badges[0], "Synced · server · offline", "and the list says it, the notebook still being a synced one");
+      assert((await ui.text()).includes("typed with no server"), "and what was typed is still here");
+      await ui.openMenu();
+      assert((await ui.menu().getByRole("menuitem", { name: "Sync this notebook now" }).count()) === 1, "the way to sync is still offered, for when the network is back");
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(100);
+      problems = problems.filter((p) => !/Failed to load resource: (net::ERR_(FAILED|CONNECTION_REFUSED)|Could not connect to)/.test(p));
+    } finally {
+      await context.close();
+      withAccounts.closeAllConnections?.();
+      withAccounts.close();
+      db.close();
+    }
   });
 
   for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"} ${r.name}${r.ok ? ` (${r.ms} ms)` : `\n    ${r.error}`}`);

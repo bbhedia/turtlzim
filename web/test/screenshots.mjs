@@ -228,7 +228,7 @@ await restoring.getByRole("button", { name: "Cancel" }).click();
 await page.locator(".notebook-button").click();
 await page.getByRole("menuitem", { name: "New notebook…" }).click();
 await topDialog().getByLabel("Name").fill("Diary");
-await topDialog().getByLabel("Kind").selectOption("encrypted");
+await topDialog().getByLabel("Encryption").selectOption("encrypted");
 await shot(page, "13-new-encrypted-notebook");
 await topDialog().getByRole("button", { name: "Create", exact: true }).click();
 const making = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Encrypted notebooks", exact: true }) });

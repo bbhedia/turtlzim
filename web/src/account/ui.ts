@@ -48,13 +48,17 @@ export class AccountUi {
 
   /** Ask the server what it offers and who is signed in (a server that doesn't answer is no account server: nothing is shown). */
   async refresh(): Promise<void> {
-    this.offer = await this.client.offer();
-    this.account = null;
-    if (!this.offer) return;
+    const offer = await this.client.offer();
+    // (a server that can't be reached right now is not a server that is not there: what was known of the account stays, so that a notebook that is kept elsewhere does not look as if it were not)
+    if (!offer) {
+      if (!this.account) this.offer = null;
+      return;
+    }
+    this.offer = offer;
     try {
       this.account = await this.client.me();
     } catch {
-      this.account = null;
+      // (the same: nobody is signed out because the network is down)
     }
   }
 

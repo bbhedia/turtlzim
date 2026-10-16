@@ -39,6 +39,17 @@ export interface LinkStorage {
 /** How long after the last change a linked notebook is sent. */
 export const AUTO_SEND_MS = 6000;
 
+/** Where a kept notebook stands with its other copy: up to date, changes waiting to be sent, being synced, two sides that changed the same page, a problem, or no network. */
+export type SyncState = "ok" | "pending" | "sending" | "conflict" | "error" | "offline";
+
+/** What the interface says of a notebook that is kept elsewhere. */
+export interface SyncStatus {
+  /** In words: “server”, or the name of the connected service. */
+  place: string;
+  /** Not known until the notebook has been synced in this session. */
+  state?: SyncState;
+}
+
 type Version = string | number;
 
 /** What the other copy holds now: its version, and a mark for each of its files (a mark changes when the file's content does). */
@@ -73,6 +84,10 @@ export class SyncUi {
   /** Notebooks whose two copies both changed and have not been settled: not touched again until the person chooses. */
   private readonly held = new Set<string>();
   private connections: Connection[] = [];
+  /** What is known of each linked notebook's state (only what happened in this session). */
+  private readonly states = new Map<string, SyncState>();
+  /** Told when a notebook's state changed or a link was made or ended, so that the screen can say so. */
+  onStatus: (() => void) | null = null;
 
   constructor(
     private readonly host: SyncHost,
@@ -93,6 +108,30 @@ export class SyncUi {
 
   private saveLink(id: string, link: Link): void {
     this.links.set(id, JSON.stringify(link));
+    this.onStatus?.();
+  }
+
+  private setState(id: string, state: SyncState | null): void {
+    if (state === null) this.states.delete(id);
+    else this.states.set(id, state);
+    this.onStatus?.();
+  }
+
+  /** What to say of a notebook: null if it is only on this device. */
+  statusOf(id: string): SyncStatus | null {
+    const link = this.linkOf(id);
+    if (!link) return null;
+    const place = link.target ? (this.connections.find((c) => c.id === link.target?.connectorId)?.label ?? "service") : "server";
+    const state = this.states.get(id);
+    return state ? { place, state } : { place };
+  }
+
+  /** The services that were connected, as last known (they are asked for when a dialog needs them). */
+  async whereOptions(): Promise<Array<{ value: string; label: string }>> {
+    const account = this.account.account;
+    if (!account) return [];
+    await this.loadConnections();
+    return [{ value: ACCOUNT, label: `On the server: this account's space (${Math.floor(account.quotaBytes / 1024)} KB)` }, ...this.connections.map((c) => ({ value: String(c.id), label: `On ${nameOf(c)}` }))];
   }
 
   private remoteFor(link: Link): Remote {
@@ -159,6 +198,7 @@ export class SyncUi {
     const notebook = this.host.notebook();
     window.clearTimeout(this.timer);
     if (!notebook || notebook.kind !== "open" || !this.linkOf(notebook.id) || this.held.has(notebook.id)) return;
+    if (this.states.get(notebook.id) !== "pending" && this.states.get(notebook.id) !== "sending") this.setState(notebook.id, "pending");
     this.timer = window.setTimeout(() => void this.syncNow(true), AUTO_SEND_MS);
   }
 
@@ -185,36 +225,45 @@ export class SyncUi {
     const notebook = this.host.notebook();
     const account = this.account.account;
     if (!notebook || !account || notebook.kind !== "open") return;
-    await this.loadConnections();
-    const where = [{ value: ACCOUNT, label: `The account's space on this server (${Math.floor(account.quotaBytes / 1024)} KB)` }, ...this.connections.map((c) => ({ value: String(c.id), label: nameOf(c) }))];
+    const where = await this.whereOptions();
     await showDialog({
       title: "Keep this notebook on the server",
       body: [
         `A copy of “${notebook.title}” is kept, so that you can open it from another device. It is sent each time you stop typing, and fetched when the copy is newer.`,
         "The copy is stored as it is, not encrypted: anyone who runs the server, or who has access to the service you choose, can read it. (Notebooks that you encrypt can't be kept like this.)",
       ],
-      choices: [{ name: "where", label: "Where", value: ACCOUNT, options: where }],
+      choices: [{ name: "where", label: "Where", value: ACCOUNT, options: where.map((w) => ({ ...w, label: w.label.replace(/^On the server: /, "").replace(/^On /, "") })) }],
       confirm: "Keep it there",
       working: "Sending…",
-      submit: async (values) => {
-        try {
-          await this.host.flush();
-          const files = await this.host.files();
-          const digest = await digestOf(files);
-          const first: Link = values.where === ACCOUNT
-            ? { remoteId: newRemoteId(), revision: 0, digest, account: account.email }
-            : { remoteId: folderNameFor(notebook.title), target: { kind: "connector", connectorId: Number(values.where), dir: "" }, revision: "", digest, account: account.email };
-          if (first.target) first.target.dir = first.remoteId;
-          const remote = this.remoteFor(first);
-          await remote.write(notebook.title, files, [], first.revision);
-          const made = await remote.manifest();
-          this.saveLink(notebook.id, { ...first, revision: made?.version ?? first.revision, files: await fileDigests(files), marks: made?.marks ?? {} });
-        } catch (error) {
-          return this.explain(error);
-        }
-        this.host.say(`“${notebook.title}” is kept ${values.where === ACCOUNT ? "on the server" : `on ${this.connections.find((c) => String(c.id) === values.where)?.label ?? "the service"}`}.`);
-      },
+      submit: async (values) => this.keepIn(String(values.where)),
     });
+  }
+
+  /**
+   * Send the open notebook for the first time, to the account's space (`ACCOUNT`) or to a connected service (its id): from then on it is kept in step. Gives the message to show if it
+   * can't be done. (While it is sent the notebook is both here and there: that is the one moment a notebook is in two places, and it ends with the first send.)
+   */
+  async keepIn(where: string): Promise<string | void> {
+    const notebook = this.host.notebook();
+    const account = this.account.account;
+    if (!notebook || !account || notebook.kind !== "open") return "Only a notebook that is not encrypted can be kept on a server.";
+    try {
+      await this.host.flush();
+      const files = await this.host.files();
+      const digest = await digestOf(files);
+      const first: Link = where === ACCOUNT
+        ? { remoteId: newRemoteId(), revision: 0, digest, account: account.email }
+        : { remoteId: folderNameFor(notebook.title), target: { kind: "connector", connectorId: Number(where), dir: "" }, revision: "", digest, account: account.email };
+      if (first.target) first.target.dir = first.remoteId;
+      const remote = this.remoteFor(first);
+      await remote.write(notebook.title, files, [], first.revision);
+      const made = await remote.manifest();
+      this.saveLink(notebook.id, { ...first, revision: made?.version ?? first.revision, files: await fileDigests(files), marks: made?.marks ?? {} });
+      this.setState(notebook.id, "ok");
+    } catch (error) {
+      return this.explain(error);
+    }
+    this.host.say(`“${notebook.title}” is kept ${where === ACCOUNT ? "on the server" : `on ${this.connections.find((c) => String(c.id) === where)?.label ?? "the service"}`}.`);
   }
 
   private async stopDialog(): Promise<void> {
@@ -240,6 +289,7 @@ export class SyncUi {
         }
         this.links.remove(notebook.id);
         this.held.delete(notebook.id);
+        this.setState(notebook.id, null);
         this.host.say(values.delete ? "The copy was deleted." : `This notebook is no longer sent to ${remote.place}.`);
       },
     });
@@ -276,6 +326,8 @@ export class SyncUi {
     if (!link) return;
     if (auto && this.held.has(notebook.id)) return;
     const remote = this.remoteFor(link);
+    const id = notebook.id;
+    this.setState(id, "sending");
     try {
       await this.host.flush();
       const start = await this.host.files();
@@ -284,6 +336,7 @@ export class SyncUi {
       const now = await remote.manifest();
       if (!now) {
         this.links.remove(notebook.id);
+        this.setState(id, null);
         this.host.say(auto ? `“${notebook.title}” is no longer on ${remote.place}.` : `“${notebook.title}” is no longer on ${remote.place}, so it is no longer kept there. “Keep this notebook on the server…” sends it again.`);
         return;
       }
@@ -292,11 +345,15 @@ export class SyncUi {
       const upgraded = link.files === undefined || link.marks === undefined;
       if (plan.length === 0) {
         if (upgraded) this.saveLink(notebook.id, { ...link, revision: now.version, digest: whole, files: local, marks: now.marks });
+        this.setState(id, "ok");
         if (!auto) this.host.say(`This notebook is up to date on ${remote.place}.`);
         return;
       }
       // (what is brought here replaces pages on the screen: not while typing that is not saved yet could be lost with them)
-      if (plan.some((p) => p.action !== "push" && p.action !== "pushDelete" && p.action !== "settled") && this.host.unsaved()) return;
+      if (plan.some((p) => p.action !== "push" && p.action !== "pushDelete" && p.action !== "settled") && this.host.unsaved()) {
+        this.setState(id, "pending");
+        return;
+      }
       // the notebook's own file (its name and home page) is this device's when both sides changed it
       plan = plan.map((p) => (p.path === "notebook.zim" && p.action === "conflict" ? { path: p.path, action: local[p.path] === undefined ? ("pull" as const) : ("push" as const) } : p));
 
@@ -315,6 +372,7 @@ export class SyncUi {
         const answer = await this.askConflicts(notebook, remote, asked);
         if (answer === null) {
           this.held.add(notebook.id);
+          this.setState(id, "conflict");
           this.host.say("Not synced: some pages changed in two places. Choose “Sync this notebook now” to settle it.");
           return;
         }
@@ -383,6 +441,7 @@ export class SyncUi {
       for (const path of identical) known[path] = local[path]!;
       this.saveLink(notebook.id, { ...link, revision: after.version, digest: await digestOf(await this.host.files()), files: known, marks: after.marks });
       this.held.delete(notebook.id);
+      this.setState(id, "ok");
 
       const sentCount = push.size + pushDelete.size + copyPaths.size;
       const broughtCount = pull.size + pullDelete.size + copies.size;
@@ -394,10 +453,14 @@ export class SyncUi {
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         this.host.say(`The copy on ${remote.place} changed while this was being sent. It will be looked at again.`);
+        this.setState(id, "pending");
         this.again = true;
         return;
       }
-      if (auto && error instanceof ApiError && error.code === "offline") return;
+      if (error instanceof ApiError && error.code === "offline") {
+        this.setState(id, "offline");
+        if (auto) return;
+      } else this.setState(id, "error");
       this.host.say(`Couldn't sync “${notebook.title}”: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
