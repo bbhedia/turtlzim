@@ -12,8 +12,10 @@ export interface Link {
   target?: { kind: "connector"; connectorId: number; dir: string };
   /** The version of the copy then: the server's revision (a number) for the account's space, a mark of the folder (a string) for a service. */
   revision: number | string;
-  /** For a service: a digest of each file then, so that only what changed is sent. */
+  /** A digest of each of this notebook's files when it last agreed with the other copy (the base that this side's changes are told from). */
   files?: Record<string, string>;
+  /** The other copy's mark for each of its files then (the base that its changes are told from). */
+  marks?: Record<string, string>;
   /** The digest of the notebook's files then. */
   digest: string;
   /** Whose account (the e-mail address): a link made under another account is not this person's. */
@@ -21,6 +23,58 @@ export interface Link {
 }
 
 export type Decision = "nothing" | "send" | "fetch" | "conflict";
+
+/** What the two copies have to be told about one file, once the base they last agreed on is known. */
+export type PathAction = "push" | "pushDelete" | "pull" | "pullDelete" | "conflict" | "settled";
+
+/** The files of the notebook as the last agreement left them: this side's digest of each, and the other side's mark of each. */
+export interface MergeBase {
+  local: Record<string, string>;
+  remote: Record<string, string>;
+}
+
+/**
+ * Tell, for each file, what changed since the base on each side, and so what to do: nothing (left out), send it, delete it there, bring it here, delete it here, or ask (both sides
+ * changed it); and "settled" for what both sides deleted (nothing to move, but the base must forget it). A file changed on one side only goes to the other; changed on both is a conflict.
+ * (A file the other side has that this side never took in, a hidden file, say, is unchanged on both sides as long as its mark is the one remembered: it is never deleted.)
+ */
+export function planMerge(base: MergeBase, local: Record<string, string>, remote: Record<string, string>): Array<{ path: string; action: PathAction }> {
+  const paths = new Set([...Object.keys(base.local), ...Object.keys(base.remote), ...Object.keys(local), ...Object.keys(remote)]);
+  const plan: Array<{ path: string; action: PathAction }> = [];
+  for (const path of [...paths].sort()) {
+    const mine = local[path];
+    const theirs = remote[path];
+    const mineChanged = mine !== base.local[path];
+    const theirsChanged = theirs !== base.remote[path];
+    if (!mineChanged && !theirsChanged) continue;
+    if (mineChanged && !theirsChanged) plan.push({ path, action: mine === undefined ? "pushDelete" : "push" });
+    else if (!mineChanged && theirsChanged) plan.push({ path, action: theirs === undefined ? "pullDelete" : "pull" });
+    else plan.push({ path, action: mine === undefined && theirs === undefined ? "settled" : "conflict" });
+  }
+  return plan;
+}
+
+/**
+ * The base for a link: what was remembered at the last agreement; for a link made before pages were told apart, what can be worked out. A copy that has not changed since (this side:
+ * the whole digest is the one remembered; the other: its version is) is its own base; one that has changed has no known base, so every file that differs is then a conflict, which is asked about.
+ */
+export function baseOf(link: Pick<Link, "files" | "marks" | "digest" | "revision">, local: Record<string, string>, whole: string, version: number | string, marks: Record<string, string>): MergeBase {
+  return {
+    local: link.files ?? (whole === link.digest ? local : {}),
+    remote: link.marks ?? (version === link.revision ? marks : {}),
+  };
+}
+
+/** Where the other copy of a conflicting file is kept here, beside the file: `Help/Page.txt` becomes `Help/Page_(conflict_copy).txt` (the page “Page (conflict copy)”). */
+export function conflictCopyPath(path: string, taken: (path: string) => boolean): string {
+  const dot = path.lastIndexOf(".");
+  const slash = path.lastIndexOf("/");
+  const [stem, ext] = dot > slash ? [path.slice(0, dot), path.slice(dot)] : [path, ""];
+  for (let n = 1; ; n++) {
+    const candidate = `${stem}_(conflict_copy${n > 1 ? `_${n}` : ""})${ext}`;
+    if (!taken(candidate)) return candidate;
+  }
+}
 
 /** What to do, given the link, the digest of the notebook now and the server's revision now. */
 export function decide(link: Pick<Link, "revision" | "digest">, localDigest: string, remoteRevision: number | string): Decision {

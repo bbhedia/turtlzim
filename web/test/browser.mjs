@@ -5114,10 +5114,10 @@ try {
       await B.choose("Sync this notebook now");
       await B.says("was sent to the server");
       await A.choose("Sync this notebook now");
-      await A.page.getByRole("heading", { name: "This notebook changed in two places" }).waitFor();
+      await A.page.getByRole("heading", { name: "Some pages changed in two places" }).waitFor();
       assertEqual(db.prepare("select revision from notebooks").get().revision, 3, "the server was not touched by the conflict");
       if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, "sync-conflict.png") });
-      await A.dialog().getByRole("button", { name: "Use the server's copy" }).click();
+      await A.dialog().getByRole("button", { name: "Use the other versions" }).click();
       await A.says("was brought up to date from the server");
       const text = await A.ui.text();
       assert(text.includes("B alone one") && !text.includes("A alone one"), "A has the server's copy");
@@ -5127,12 +5127,60 @@ try {
       await B.choose("Sync this notebook now");
       await B.says("was sent to the server");
       await A.choose("Sync this notebook now");
-      await A.page.getByRole("heading", { name: "This notebook changed in two places" }).waitFor();
-      await A.dialog().getByRole("button", { name: "Keep this device's copy" }).click();
+      await A.page.getByRole("heading", { name: "Some pages changed in two places" }).waitFor();
+      await A.dialog().getByRole("button", { name: "Use this device's versions" }).click();
       await A.says("was sent to the server");
       await B.choose("Sync this notebook now");
       await B.says("was brought up to date from the server");
       assert((await B.ui.text()).includes("A alone two") && !(await B.ui.text()).includes("B alone two"), "B has A's copy");
+
+      // different pages changed on the two devices merge by themselves: no question, and each side ends with both
+      const hasPage = (d, name) => d.page.evaluate((n) => window.__zim.app.session.has(n), name);
+      const pageText = (d, name) => d.page.evaluate((n) => window.__zim.app.session.text(n), name);
+      const makePage = (d, name, body) => d.page.evaluate(([n, b]) => window.__zim.app.session.save(n, `Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== ${n} ======\n${b}\n`), [name, body]);
+      await makePage(A, "Page from A", "made on A");
+      await makePage(B, "Page from B", "made on B");
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to the server");
+      await A.choose("Sync this notebook now");
+      await A.says("was merged with the server (1 sent, 1 brought here)");
+      assertEqual(await A.page.locator("dialog.dialog[open]").count(), 0, "no question was asked");
+      assert((await hasPage(A, "Page from A")) && (await hasPage(A, "Page from B")), "A has both pages");
+      await B.choose("Sync this notebook now");
+      await B.says("was brought up to date from the server");
+      assert((await hasPage(B, "Page from A")) && (await hasPage(B, "Page from B")), "B has both pages");
+
+      // a page deleted on one side is deleted on the other
+      await B.page.evaluate(() => window.__zim.app.session.delete("Page from A"));
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to the server");
+      await A.choose("Sync this notebook now");
+      await A.says("was brought up to date from the server");
+      assert(!(await hasPage(A, "Page from A")) && (await hasPage(A, "Page from B")), "the deleted page is gone from A, the other stays");
+
+      // the same page changed on both sides: keeping both keeps this device's page and saves the other version beside it, and both reach everyone
+      await makePage(A, "Shared", "first");
+      await A.choose("Sync this notebook now");
+      await A.says("was sent to the server");
+      await B.choose("Sync this notebook now");
+      await B.says("was brought up to date from the server");
+      await makePage(A, "Shared", "A's version");
+      await makePage(B, "Shared", "B's version");
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to the server");
+      await A.choose("Sync this notebook now");
+      const asking = A.page.getByRole("heading", { name: "Some pages changed in two places" });
+      await asking.waitFor();
+      assert((await A.dialog().innerText()).includes("Shared"), "the page is named");
+      await A.dialog().getByRole("button", { name: "Keep both" }).click();
+      await A.says("was merged with the server");
+      assert((await pageText(A, "Shared")).includes("A's version"), "A keeps its own version");
+      assert((await pageText(A, "Shared (conflict copy)")).includes("B's version"), "and has the other one beside it");
+      await B.choose("Sync this notebook now");
+      await B.says("was brought up to date from the server");
+      assert((await pageText(B, "Shared")).includes("A's version") && (await pageText(B, "Shared (conflict copy)")).includes("B's version"), "B ends with the same two pages");
+      await A.choose("Sync this notebook now");
+      await A.says("up to date on the server");
 
       // typing is sent by itself once it pauses
       const before = db.prepare("select revision from notebooks").get().revision;
@@ -5417,11 +5465,36 @@ try {
       await B.says("was sent to My Nextcloud");
       const kept = dav.files.get(`${folders[0]}/Home.txt`).bytes.toString();
       await A.choose("Sync this notebook now");
-      await A.page.getByRole("heading", { name: "This notebook changed in two places" }).waitFor();
+      await A.page.getByRole("heading", { name: "Some pages changed in two places" }).waitFor();
       assertEqual(dav.files.get(`${folders[0]}/Home.txt`).bytes.toString(), kept, "the service was not touched by the conflict");
-      await A.dialog().getByRole("button", { name: "Use the other copy" }).click();
+      await A.dialog().getByRole("button", { name: "Use the other versions" }).click();
       await A.says("was brought up to date from My Nextcloud");
       assert((await A.ui.text()).includes("B alone") && !(await A.ui.text()).includes("A alone"), "A has the service's copy");
+
+      // different pages changed on the two devices merge by themselves, through the service's own marks (not hashes of ours) ...
+      const makePage = (d, name, body) => d.page.evaluate(([n, b]) => window.__zim.app.session.save(n, `Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== ${n} ======\n${b}\n`), [name, body]);
+      const hasPage = (d, name) => d.page.evaluate((n) => window.__zim.app.session.has(n), name);
+      await makePage(A, "From A", "a");
+      await makePage(B, "From B", "b");
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to My Nextcloud");
+      await A.choose("Sync this notebook now");
+      await A.says("was merged with My Nextcloud (1 sent, 1 brought here)");
+      assertEqual(await A.page.locator("dialog.dialog[open]").count(), 0, "no question was asked");
+      assert((await hasPage(A, "From B")) && (await hasPage(B, "From A") === false), "A has B's page");
+      await B.choose("Sync this notebook now");
+      await B.says("was brought up to date from My Nextcloud");
+      assert(await hasPage(B, "From A"), "and B has A's");
+      // ... and a page that both sides made the same way is not a conflict
+      await makePage(A, "Twin", "the same words");
+      await A.choose("Sync this notebook now");
+      await A.says("was sent to My Nextcloud");
+      await makePage(B, "Twin", "the same words");
+      await B.choose("Sync this notebook now");
+      await B.says("up to date on My Nextcloud");
+      assertEqual(await B.page.locator("dialog.dialog[open]").count(), 0, "no question for a page that is the same on both sides");
+      await A.choose("Sync this notebook now");
+      await A.says("up to date on My Nextcloud");
 
       // a page made on A reaches the service as a new file, and one deleted is removed there
       const before3 = dav.log.length;

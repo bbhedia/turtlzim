@@ -149,6 +149,15 @@ export class AccountClient {
   getNotebook(id: string): Promise<RemoteNotebook & { files: WireFile[] }> {
     return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}`);
   }
+  getManifest(id: string): Promise<{ id: string; title: string; revision: number; files: Array<{ path: string; size: number; mark: string }> }> {
+    return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}/manifest`);
+  }
+  readNotebookFiles(id: string, paths: string[]): Promise<{ title: string; revision: number; files: WireFile[] }> {
+    return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}/read`, { paths });
+  }
+  patchNotebook(id: string, body: { title: string; baseRevision: number; put: WireFile[]; remove: string[] }): Promise<{ revision: number; usedBytes: number }> {
+    return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}`, body, "PATCH");
+  }
   putNotebook(id: string, body: { title: string; baseRevision: number; files: WireFile[] }): Promise<{ revision: number; usedBytes: number }> {
     return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}`, body, "PUT");
   }
@@ -167,11 +176,11 @@ export class AccountClient {
   connectorFolders(id: number): Promise<{ folders: string[] }> {
     return this.call(`/api/connectors/${id}/folders`, {});
   }
-  connectorList(id: number, dir: string): Promise<{ version: string; files: Array<{ path: string; size: number }> }> {
+  connectorList(id: number, dir: string): Promise<{ version: string; files: Array<{ path: string; size: number; mark: string }> }> {
     return this.call(`/api/connectors/${id}/list`, { dir });
   }
-  connectorRead(id: number, dir: string): Promise<{ version: string; files: WireFile[] }> {
-    return this.call(`/api/connectors/${id}/read`, { dir });
+  connectorRead(id: number, dir: string, paths?: string[]): Promise<{ version: string; files: WireFile[] }> {
+    return this.call(`/api/connectors/${id}/read`, paths ? { dir, paths } : { dir });
   }
   connectorWrite(id: number, dir: string, body: { baseVersion: string; put: WireFile[]; remove: string[] }): Promise<{ version: string }> {
     return this.call(`/api/connectors/${id}/write`, { dir, ...body });

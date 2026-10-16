@@ -48,3 +48,53 @@ describe("files on the wire", () => {
     for (const id of ids) expect(id).toMatch(/^[A-Za-z0-9_-]{8,64}$/);
   });
 });
+
+import { baseOf, conflictCopyPath, planMerge } from "../src/account/sync";
+
+describe("telling what changed, page by page", () => {
+  const base: { local: Record<string, string>; remote: Record<string, string> } = { local: { "A.txt": "a1", "B.txt": "b1", "C.txt": "c1", "D.txt": "d1" }, remote: { "A.txt": "ma1", "B.txt": "mb1", "C.txt": "mc1", "D.txt": "md1" } };
+  const plan = (local: Record<string, string>, remote: Record<string, string>, b = base) => Object.fromEntries(planMerge(b, local, remote).map((p) => [p.path, p.action]));
+
+  it("leaves what no side changed", () => {
+    expect(plan(base.local, base.remote)).toEqual({});
+  });
+
+  it("sends what only this side changed, deleted or made, and brings what only the other did", () => {
+    expect(plan({ "A.txt": "a2", "B.txt": "b1", "D.txt": "d1", "N.txt": "n" }, base.remote)).toEqual({ "A.txt": "push", "C.txt": "pushDelete", "N.txt": "push" });
+    expect(plan(base.local, { ...base.remote, "A.txt": "ma2", "N.txt": "mn", "D.txt": undefined as unknown as string })).toEqual({ "A.txt": "pull", "N.txt": "pull", "D.txt": "pullDelete" });
+  });
+
+  it("merges changes to different pages by itself, and asks only for a page that both sides changed", () => {
+    const result = plan({ "A.txt": "a2", "B.txt": "b2", "C.txt": "c1", "D.txt": "d1" }, { "A.txt": "ma1", "B.txt": "mb2", "C.txt": "mc2", "D.txt": "md1" });
+    expect(result).toEqual({ "A.txt": "push", "B.txt": "conflict", "C.txt": "pull" });
+  });
+
+  it("asks when one side deleted a page that the other changed, and lets a page that both deleted go", () => {
+    const local = { "A.txt": "a1", "C.txt": "c1", "D.txt": "d1" } as Record<string, string>; // B deleted here
+    const remote = { "A.txt": "ma1", "B.txt": "mb2", "D.txt": "md1" } as Record<string, string>; // B changed there, C deleted there
+    expect(plan(local, remote)).toEqual({ "B.txt": "conflict", "C.txt": "pullDelete" });
+    expect(plan({ "A.txt": "a1" }, { "A.txt": "ma1" }, { local: { "A.txt": "a1", "Z.txt": "z" }, remote: { "A.txt": "ma1", "Z.txt": "mz" } })).toEqual({ "Z.txt": "settled" });
+  });
+
+  it("never deletes a file of the other side that this side never took in", () => {
+    // (a hidden file there: its mark is the one remembered, and it was never here)
+    expect(plan(base.local, { ...base.remote, "hidden.dat": "m" }, { local: base.local, remote: { ...base.remote, "hidden.dat": "m" } })).toEqual({});
+  });
+
+  it("works out a base for a link made before pages were told apart", () => {
+    const old = { digest: "whole", revision: 3 };
+    const local = { "A.txt": "a" };
+    const marks = { "A.txt": "m" };
+    expect(baseOf(old, local, "whole", 3, marks)).toEqual({ local, remote: marks });
+    expect(baseOf(old, local, "other", 3, marks)).toEqual({ local: {}, remote: marks });
+    expect(baseOf(old, local, "whole", 4, marks)).toEqual({ local, remote: {} });
+    expect(baseOf({ ...old, files: { "X.txt": "x" }, marks: { "X.txt": "mx" } }, local, "other", 4, marks)).toEqual({ local: { "X.txt": "x" }, remote: { "X.txt": "mx" } });
+  });
+
+  it("names the other copy of a conflicting file beside it, and never over a file that is there", () => {
+    expect(conflictCopyPath("Help/Page.txt", () => false)).toBe("Help/Page_(conflict_copy).txt");
+    expect(conflictCopyPath("Page.txt", (p) => p === "Page_(conflict_copy).txt")).toBe("Page_(conflict_copy_2).txt");
+    expect(conflictCopyPath("Folder.v2/noext", () => false)).toBe("Folder.v2/noext_(conflict_copy)");
+    expect(conflictCopyPath("pic.png", () => false)).toBe("pic_(conflict_copy).png");
+  });
+});

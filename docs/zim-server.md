@@ -34,6 +34,9 @@ Safeguards (each has a test that fails without it; the mutants were tried):
 |---|---|
 | `GET /api/sync/notebooks` | the person's notebooks (id, title, revision, size), what is used and the quota |
 | `GET /api/sync/notebooks/<id>` | one notebook: its files (path, base64 bytes) and its revision |
+| `GET /api/sync/notebooks/<id>/manifest` | what it holds without the bytes: each file's path, size and mark (the SHA-256 of its bytes) |
+| `POST /api/sync/notebooks/<id>/read` | some of its files (`{paths}`; a path it does not have is left out) |
+| `PATCH /api/sync/notebooks/<id>` | change some of its files: `{title, baseRevision, put, remove}`, refused for an old revision, counted against the quota by what is kept after the change |
 | `PUT /api/sync/notebooks/<id>` | replace its files; `{title, baseRevision, files}`; `baseRevision` is the revision the copy was made from (0 for a new notebook) |
 | `DELETE /api/sync/notebooks/<id>` | remove it |
 
@@ -47,14 +50,22 @@ With an account, the notebook menu has **Keep this notebook on the server…** (
 **Stop keeping this notebook on the server…** (with the choice to delete the server's copy) and **Open a notebook from the server…** (copies it to this device and links it).
 
 - What is kept is the notebook as its **files** (the same ones the zip export makes: `notebook.zim`, pages with their byte-order mark and line endings, attachments). The dialog says that it is stored in clear.
-- A linked notebook remembers, in this browser (`zim:sync:<notebook id>`: two ids, a revision, a digest and the account's address, nothing of the content), the revision it last agreed with the server on and a SHA-256 of its files then.
-  From that and the server's revision now there is one answer: nothing to do, **send** (only this device changed), **fetch** (only the server did), or **both changed**.
-- Sending is automatic 6 s after the last change; fetching happens at start (for a linked notebook) and on *Sync now* — never while typing is unsaved. Both changed: a question (*Use the server's copy* / *Keep this device's copy* / Cancel),
-  and nothing is touched until it is answered; the server also refuses a write made from an old revision (409), so a race between two devices can't overwrite either.
-- A link belongs to the account that made it (a different account signed in on the same browser does not see it); a notebook that the server no longer has is unlinked, not recreated.
-- Not there: merging two versions of a page (one copy replaces the other, and the dialog says the other's pages are lost), per-page sync (a notebook is sent whole, so 1 MB is the whole account), several destinations, and sync for folder notebooks of the desktop program or the phone shell (no account there yet).
-- Verified by the browser scenario "with an account server a notebook is kept on it…": two browsers, one account, the real server: keep, open on the second, write on each way, both changed (each of the two answers), sending by itself, an encrypted notebook has no line about the server, stop keeping. Mutants (conflicts overwriting, an encrypted notebook offered, no automatic send) are caught.
-  Not tried: a flaky network half way through a send, two tabs of one browser on one notebook, a real phone.
+- **Page by page** (since 2026-10-16). A linked notebook remembers, in this browser (`zim:sync:<notebook id>`, nothing of the content), the revision it last agreed on and, for each file, **this side's digest** and **the other copy's mark** at that moment.
+  A sync tells, for each file, what changed on each side since then (`planMerge`, a three-way comparison): changed here only → sent; changed there only → brought here; deleted on one side → deleted on the other; changed on **both** → asked, unless the two
+  versions are the same (checked by content: a page both devices wrote the same way is not a conflict). Pages changed on the two devices that are *different pages* merge by themselves, with no question.
+- **A page changed on both sides** is asked about: *Keep both* (the default: this device's page stays, and the other version is saved beside it as “Name (conflict copy)” and goes to everyone), *Use this device's versions*, *Use the other versions*, or leave it for
+  later (nothing is sent or replaced until a choice; automatic sending is paused for that notebook meanwhile). A page deleted on one side and changed on the other is asked about the same way (keeping both restores the changed page).
+- Only the changed files travel: the account's space has `manifest`, `read` (some files) and `PATCH` (write some, delete some); a connected service is told the same through its own file listing. The notebook's own file (`notebook.zim`: name and home page) is this
+  device's when both sides changed it. A file the other side has that the app never took in (a hidden file) is left alone and never deleted.
+- What is brought here is applied **before** what is sent, so that what is sent is this side as it then is; what is remembered afterwards is what was sent as it was sent, what was brought as it is here, and everything else as it was when the sync began, so typing
+  during a sync shows as a change at the next one. A write refused for an old revision (409) is looked at again at once.
+- Sending is automatic 6 s after the last change; fetching happens at start (for a linked notebook) and on *Sync now* — never while typing is unsaved. A link made before pages were told apart works out its base (`baseOf`): a copy that has not changed since is its own base, and one that has has none, so every file that differs is asked about once.
+- A link belongs to the account that made it; a notebook that the server no longer has is unlinked, not recreated.
+- **Limits**: the list of digests and marks is kept in `localStorage` (about 150 bytes a page: a few thousand pages is the most it should hold; moving it to IndexedDB is a later step); merging is by page, not by line (two edits to one page are a conflict, with the other version kept beside it);
+  the carnets of the desktop's folders and of the phone shell do not sync yet.
+- Verified by `web/test/account-sync.test.ts` (the plan for every combination of change on the two sides, the base for an old link, the names of conflict copies) and the browser scenarios with two browsers on the real server: *keep, open on the second, write both ways, different
+  pages merging with no question, a delete passing across, a page changed on both sides (each of the three answers, and the copy reaching the other device), the same page made the same way on both sides, sending by itself, an encrypted notebook with no line about the server, stop keeping*,
+  and the same through a Nextcloud's own marks. Mutants (identical pages asked about, no copy made, the notebook not reopened after a pull, deletes not applied or not sent) are caught. Not tried: a flaky network half way through a sync, two tabs of one browser on one notebook, a real phone.
 
 ## The encrypted notebooks on the server (`web/src/account/sealed.ts`)
 
@@ -154,7 +165,7 @@ cd web && npm run build                      # the files of the app (server/ ser
 cd ../server && npm install                  # nodemailer
 ZIM_BASE_URL=https://localhost:8443 scripts/run.sh start --host :: --port 8443 --tls --name ADDRESS [--download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk]
 scripts/run.sh status | log | stop | restart
-npm test                                     # 49 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage
+npm test                                     # 103 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage
 ```
 
 `ZIM_BASE_URL` is the address people **type**: the services send the browser back to it, and it decides `Secure` cookies. From your own computer to this
@@ -184,7 +195,7 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## What verifies it, and what does not
 
-- `server/test`: 49 tests with a real HTTP server, cookies, a clock the test moves, and stand-ins for Google and GitHub; mutants of the HTTP layer (a check removed, `HttpOnly` dropped, the body limit off, a session not replaced, …) are caught.
+- `server/test`: 103 tests with a real HTTP server, cookies, a clock the test moves, and stand-ins for Google and GitHub; mutants of the HTTP layer (a check removed, `HttpOnly` dropped, the body limit off, a session not replaced, …) are caught.
 - The browser scenario "with an account server…" (`npm run test:browser`): the real server serves the real app; an account is made with the code read from the mailer, a wrong code and a wrong password are refused, the session survives a reload and is not readable by script, sign out and in, a GitHub round trip (stand-in service) and a failed one that echoes nothing of the address.
 - **Not verified**: a real Google or GitHub sign-in (needs your apps), real SMTP delivery, more than one process, any load. The server has had no outside review.
 

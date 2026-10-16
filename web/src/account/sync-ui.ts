@@ -2,14 +2,16 @@
 // account's own space on the server (1 MB), or a folder of a service that was connected (Nextcloud and the like, which the server reaches for the person). What is decided is in sync.ts;
 // the app gives this what it has of the open notebook (`SyncHost`). Only an open notebook is ever sent (never an encrypted one), and what is sent is in clear: the dialog says so.
 import { showDialog } from "../app/dialogs";
+import { h } from "../app/dom";
 import type { NotebookInfo, NotebookStore } from "../notebook/store";
-import { fileKey } from "../notebook/store";
+import { pathToPage } from "../notebook-core";
 import { pagesFromFiles } from "../notebook/zim-files";
+import type { ImportedFile } from "../notebook/zim-files";
 import type { ZipEntry } from "../zip";
 import { ApiError } from "./client";
 import type { Connection, WireFile } from "./client";
 import { SEALED_ID } from "./sealed";
-import { decide, digestOf, fileDigests, folderNameFor, fromWire, newRemoteId, toWire } from "./sync";
+import { baseOf, conflictCopyPath, digestOf, fileDigests, folderNameFor, fromWire, newRemoteId, planMerge, toWire } from "./sync";
 import type { Link } from "./sync";
 import type { AccountUi } from "./ui";
 
@@ -39,15 +41,22 @@ export const AUTO_SEND_MS = 6000;
 
 type Version = string | number;
 
+/** What the other copy holds now: its version, and a mark for each of its files (a mark changes when the file's content does). */
+interface Manifest {
+  version: Version;
+  marks: Record<string, string>;
+}
+
 /** Where a notebook's copy is kept. */
 interface Remote {
   /** In words, for what is said to the person: “the server”, “My Nextcloud”. */
   place: string;
-  /** The copy's version now, or null if it is not there. */
-  version(): Promise<Version | null>;
-  read(): Promise<{ title?: string; files: WireFile[]; version: Version }>;
-  /** Replace the copy by `files` (only what changed from `previous`, where a service can be told so); `base` is the version this was made from. */
-  write(title: string, files: ZipEntry[], base: Version, previous: Link | null): Promise<{ version: Version }>;
+  /** What the copy holds now, or null if it is not there. */
+  manifest(): Promise<Manifest | null>;
+  /** Some of its files (all of them if no paths are given). */
+  read(paths?: string[]): Promise<{ title?: string; files: WireFile[]; version: Version }>;
+  /** Write these files and delete those, on top of the version `base` (the first write of a notebook has the base that a new one has: 0, or ""). */
+  write(title: string, put: ZipEntry[], remove: string[], base: Version): Promise<{ version: Version }>;
   remove(): Promise<void>;
 }
 
@@ -92,34 +101,38 @@ export class SyncUi {
     if (!target) {
       return {
         place: "the server",
-        version: async () => (await client.listNotebooks()).notebooks.find((n) => n.id === link.remoteId)?.revision ?? null,
-        read: async () => {
-          const copy = await client.getNotebook(link.remoteId);
+        manifest: async () => {
+          try {
+            const m = await client.getManifest(link.remoteId);
+            return { version: m.revision, marks: Object.fromEntries(m.files.map((f) => [f.path, f.mark])) };
+          } catch (error) {
+            if (error instanceof ApiError && error.status === 404) return null;
+            throw error;
+          }
+        },
+        read: async (paths) => {
+          const copy = paths ? await client.readNotebookFiles(link.remoteId, paths) : await client.getNotebook(link.remoteId);
           return { title: copy.title, files: copy.files, version: copy.revision };
         },
-        write: async (title, files, base) => ({ version: (await client.putNotebook(link.remoteId, { title, baseRevision: Number(base), files: toWire(files) })).revision }),
+        write: async (title, put, remove, base) =>
+          base === 0
+            ? { version: (await client.putNotebook(link.remoteId, { title, baseRevision: 0, files: toWire(put) })).revision }
+            : { version: (await client.patchNotebook(link.remoteId, { title, baseRevision: Number(base), put: toWire(put), remove })).revision },
         remove: async () => void (await client.deleteNotebook(link.remoteId)),
       };
     }
     const name = this.connections.find((c) => c.id === target.connectorId)?.label ?? "the connected service";
     return {
       place: name,
-      version: async () => {
+      manifest: async () => {
         const listed = await client.connectorList(target.connectorId, target.dir);
-        return listed.version === "" ? null : listed.version;
+        return listed.version === "" ? null : { version: listed.version, marks: Object.fromEntries(listed.files.map((f) => [f.path, f.mark])) };
       },
-      read: async () => {
-        const copy = await client.connectorRead(target.connectorId, target.dir);
+      read: async (paths) => {
+        const copy = await client.connectorRead(target.connectorId, target.dir, paths);
         return { files: copy.files, version: copy.version };
       },
-      write: async (_title, files, base, previous) => {
-        const digests = await fileDigests(files);
-        const before = previous?.files;
-        const changed = files.filter((f) => !before || before[f.path] !== digests[f.path]);
-        const gone = before ? Object.keys(before).filter((path) => !(path in digests)) : [];
-        const sent = await client.connectorWrite(target.connectorId, target.dir, { baseVersion: String(base), put: toWire(changed), remove: gone });
-        return { version: sent.version };
-      },
+      write: async (_title, put, remove, base) => ({ version: (await client.connectorWrite(target.connectorId, target.dir, { baseVersion: String(base), put: toWire(put), remove })).version }),
       remove: async () => {
         const listed = await client.connectorList(target.connectorId, target.dir);
         await client.connectorWrite(target.connectorId, target.dir, { baseVersion: listed.version, put: [], remove: listed.files.map((f) => f.path) });
@@ -188,18 +201,14 @@ export class SyncUi {
           await this.host.flush();
           const files = await this.host.files();
           const digest = await digestOf(files);
-          if (values.where === ACCOUNT) {
-            const remoteId = newRemoteId();
-            const link: Link = { remoteId, revision: 0, digest, account: account.email };
-            const sent = await this.remoteFor(link).write(notebook.title, files, 0, null);
-            this.saveLink(notebook.id, { ...link, revision: sent.version });
-          } else {
-            const connectorId = Number(values.where);
-            const dir = folderNameFor(notebook.title);
-            const link: Link = { remoteId: dir, target: { kind: "connector", connectorId, dir }, revision: "", digest, account: account.email };
-            const sent = await this.remoteFor(link).write(notebook.title, files, "", null);
-            this.saveLink(notebook.id, { ...link, revision: sent.version, files: await fileDigests(files) });
-          }
+          const first: Link = values.where === ACCOUNT
+            ? { remoteId: newRemoteId(), revision: 0, digest, account: account.email }
+            : { remoteId: folderNameFor(notebook.title), target: { kind: "connector", connectorId: Number(values.where), dir: "" }, revision: "", digest, account: account.email };
+          if (first.target) first.target.dir = first.remoteId;
+          const remote = this.remoteFor(first);
+          await remote.write(notebook.title, files, [], first.revision);
+          const made = await remote.manifest();
+          this.saveLink(notebook.id, { ...first, revision: made?.version ?? first.revision, files: await fileDigests(files), marks: made?.marks ?? {} });
         } catch (error) {
           return this.explain(error);
         }
@@ -254,31 +263,134 @@ export class SyncUi {
     return this.running;
   }
 
+  /**
+   * Bring the two copies together, page by page, from what each side has changed since they last agreed (`planMerge`): pages changed on one side only go to the other, pages changed on
+   * both sides are asked about, and what is brought here is applied before what is sent, so that what is sent is this side as it is then. `auto`: nothing is said unless something happened,
+   * and a network that is not there is not an error.
+   */
   private async sync(auto: boolean): Promise<void> {
     const notebook = this.host.notebook();
     const account = this.account.account;
     if (!notebook || !account || notebook.kind !== "open") return;
     const link = this.linkOf(notebook.id);
     if (!link) return;
+    if (auto && this.held.has(notebook.id)) return;
     const remote = this.remoteFor(link);
     try {
       await this.host.flush();
-      const files = await this.host.files();
-      const digest = await digestOf(files);
-      const version = await remote.version();
-      if (version === null) {
+      const start = await this.host.files();
+      const local = await fileDigests(start);
+      const whole = await digestOf(start);
+      const now = await remote.manifest();
+      if (!now) {
         this.links.remove(notebook.id);
         this.host.say(auto ? `“${notebook.title}” is no longer on ${remote.place}.` : `“${notebook.title}” is no longer on ${remote.place}, so it is no longer kept there. “Keep this notebook on the server…” sends it again.`);
         return;
       }
-      const what = this.held.has(notebook.id) ? "conflict" : decide(link, digest, version);
-      if (what === "nothing") {
+      const base = baseOf(link, local, whole, now.version, now.marks);
+      let plan = planMerge(base, local, now.marks);
+      const upgraded = link.files === undefined || link.marks === undefined;
+      if (plan.length === 0) {
+        if (upgraded) this.saveLink(notebook.id, { ...link, revision: now.version, digest: whole, files: local, marks: now.marks });
         if (!auto) this.host.say(`This notebook is up to date on ${remote.place}.`);
-      } else if (what === "send") await this.send(notebook, link, remote, files, digest, version);
-      else if (what === "fetch") {
-        if (this.host.unsaved()) return; // (typing that is not saved yet is not replaced: the next time)
-        await this.fetch(notebook, link, remote);
-      } else await this.conflict(notebook, link, remote, files, digest, version);
+        return;
+      }
+      // (what is brought here replaces pages on the screen: not while typing that is not saved yet could be lost with them)
+      if (plan.some((p) => p.action !== "push" && p.action !== "pushDelete" && p.action !== "settled") && this.host.unsaved()) return;
+      // the notebook's own file (its name and home page) is this device's when both sides changed it
+      plan = plan.map((p) => (p.path === "notebook.zim" && p.action === "conflict" ? { path: p.path, action: local[p.path] === undefined ? ("pull" as const) : ("push" as const) } : p));
+
+      // a page changed on both sides may have been changed the same way: only what really differs is asked about
+      const maybe = plan.filter((p) => p.action === "conflict" && now.marks[p.path] !== undefined).map((p) => p.path);
+      const theirs = new Map<string, Uint8Array>();
+      if (maybe.length) for (const f of fromWire((await remote.read(maybe)).files)) theirs.set(f.path, f.bytes as Uint8Array);
+      const identical = new Set<string>();
+      for (const path of maybe) {
+        const bytes = theirs.get(path);
+        if (bytes && local[path] !== undefined && (await fileDigests([{ path, bytes }]))[path] === local[path]) identical.add(path);
+      }
+      const asked = plan.filter((p) => p.action === "conflict" && !identical.has(p.path)).map((p) => p.path);
+      let choice: "both" | "mine" | "theirs" = "both";
+      if (asked.length) {
+        const answer = await this.askConflicts(notebook, remote, asked);
+        if (answer === null) {
+          this.held.add(notebook.id);
+          this.host.say("Not synced: some pages changed in two places. Choose “Sync this notebook now” to settle it.");
+          return;
+        }
+        choice = answer;
+      }
+
+      // what each side is to be told, file by file
+      const push = new Set<string>();
+      const pushDelete = new Set<string>();
+      const pull = new Set<string>();
+      const pullDelete = new Set<string>();
+      const copies = new Map<string, string>();
+      const taken = (path: string) => local[path] !== undefined || now.marks[path] !== undefined || [...copies.values()].includes(path);
+      for (const { path, action } of plan) {
+        if (action === "push") push.add(path);
+        else if (action === "pushDelete") pushDelete.add(path);
+        else if (action === "pull") pull.add(path);
+        else if (action === "pullDelete") pullDelete.add(path);
+        else if (action === "conflict" && !identical.has(path)) {
+          const mine = local[path] !== undefined;
+          const there = now.marks[path] !== undefined;
+          if (choice === "mine") (mine ? push : pushDelete).add(path);
+          else if (choice === "theirs") (there ? pull : pullDelete).add(path);
+          else if (mine && there) {
+            push.add(path);
+            copies.set(path, conflictCopyPath(path, taken));
+          } else if (there) pull.add(path);
+          else push.add(path);
+        }
+      }
+      for (const path of [...pushDelete]) if (now.marks[path] === undefined) pushDelete.delete(path); // (already gone there)
+
+      // 1. bring here what is to be brought, and show it
+      const incoming = [...pull, ...copies.keys()].filter((path) => !theirs.has(path));
+      if (incoming.length) for (const f of fromWire((await remote.read(incoming)).files)) theirs.set(f.path, f.bytes as Uint8Array);
+      const put: ImportedFile[] = [...pull].filter((path) => theirs.has(path)).map((path) => ({ path, bytes: theirs.get(path) }));
+      for (const [path, copy] of copies) if (theirs.has(path)) put.push({ path: copy, bytes: theirs.get(path) });
+      const removed = [...pullDelete].filter((path) => path !== "notebook.zim");
+      if (put.length || removed.length) {
+        await this.applyLocal(notebook, put, removed);
+        await this.host.open(notebook.id);
+      }
+
+      // 2. send what is to be sent, as this side is now (with the copies it just made, which the other side has not got)
+      const now2 = await this.host.files();
+      const sentDigests = await fileDigests(now2);
+      const copyPaths = new Set(put.filter((f) => [...copies.values()].includes(f.path)).map((f) => f.path));
+      const toSend = now2.filter((f) => push.has(f.path) || copyPaths.has(f.path));
+      const toDelete = [...pushDelete];
+      let after: Manifest = now;
+      const current = this.host.notebook() ?? notebook;
+      if (toSend.length || toDelete.length) {
+        await remote.write(current.title, toSend, toDelete, now.version);
+        after = (await remote.manifest()) ?? now;
+      }
+
+      // 3. remember where the two sides agree now: what was sent as it was sent, what was brought as it is here, the rest as it was when this began (so typing since then shows as a change)
+      const final = await fileDigests(await this.host.files());
+      const known: Record<string, string> = { ...local };
+      for (const path of push) if (sentDigests[path] !== undefined) known[path] = sentDigests[path]!;
+      for (const path of copyPaths) if (sentDigests[path] !== undefined) known[path] = sentDigests[path]!;
+      for (const path of pushDelete) delete known[path];
+      for (const path of pull) if (final[path] !== undefined) known[path] = final[path]!;
+      for (const path of pullDelete) delete known[path];
+      for (const { path, action } of plan) if (action === "settled") delete known[path];
+      for (const path of identical) known[path] = local[path]!;
+      this.saveLink(notebook.id, { ...link, revision: after.version, digest: await digestOf(await this.host.files()), files: known, marks: after.marks });
+      this.held.delete(notebook.id);
+
+      const sentCount = push.size + pushDelete.size + copyPaths.size;
+      const broughtCount = pull.size + pullDelete.size + copies.size;
+      const title = (this.host.notebook() ?? notebook).title;
+      if (sentCount && broughtCount) this.host.say(`“${title}” was merged with ${remote.place} (${sentCount} sent, ${broughtCount} brought here${copies.size ? `; ${copies.size} other ${copies.size === 1 ? "copy was" : "copies were"} kept beside the page` : ""}).`);
+      else if (sentCount) this.host.say(`“${title}” was sent to ${remote.place}.`);
+      else if (broughtCount) this.host.say(`“${title}” was brought up to date from ${remote.place}.`);
+      else if (!auto) this.host.say(`This notebook is up to date on ${remote.place}.`);
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         this.host.say(`The copy on ${remote.place} changed while this was being sent. It will be looked at again.`);
@@ -290,58 +402,54 @@ export class SyncUi {
     }
   }
 
-  private async send(notebook: Pick<NotebookInfo, "id" | "title">, link: Link, remote: Remote, files: ZipEntry[], digest: string, base: Version): Promise<void> {
-    const sent = await remote.write(notebook.title, files, base, link);
-    this.saveLink(notebook.id, { ...link, revision: sent.version, digest, ...(link.target ? { files: await fileDigests(files) } : {}) });
-    this.held.delete(notebook.id);
-    this.host.say(`“${notebook.title}” was sent to ${remote.place}.`);
-  }
-
-  /** Replace this device's copy by the other one. */
-  private async fetch(notebook: Pick<NotebookInfo, "id" | "title" | "home">, link: Link, remote: Remote): Promise<void> {
-    const copy = await remote.read();
-    const imported = pagesFromFiles(fromWire(copy.files));
-    if (imported.pages.length === 0) throw new Error(`The copy on ${remote.place} has no pages, so it was not used.`);
+  /** Put what was brought into this device's copy of the notebook: pages written or deleted, files written or deleted, and its name and home page where the other side changed them. */
+  private async applyLocal(notebook: Pick<NotebookInfo, "id" | "title" | "home">, put: ImportedFile[], removePaths: string[]): Promise<void> {
+    const empty = new Uint8Array();
+    const hasConfig = put.some((f) => f.path === "notebook.zim");
+    // (a notebook file in the list makes the folder's top the notebook's top, whichever files are in it: the importer reads the paths relative to it)
+    const incoming = pagesFromFiles([...(hasConfig ? [] : [{ path: "notebook.zim", bytes: empty }]), ...put]);
+    const gone = pagesFromFiles([{ path: "notebook.zim", bytes: empty }, ...removePaths.map((path) => ({ path, bytes: empty }))]);
     const store = this.host.store;
-    const pages = await store.loadPages(notebook.id);
-    const present = await store.listFiles(notebook.id);
-    const newPages = new Set(imported.pages.map((p) => p.name.toLowerCase()));
-    const newFiles = new Set(imported.files.map((f) => fileKey(f.path)));
-    await store.replacePages(notebook.id, {
-      remove: pages.filter((p) => !newPages.has(p.name.toLowerCase())).map((p) => p.name),
-      put: imported.pages,
-      files: { remove: present.filter((f) => !newFiles.has(fileKey(f.path))).map((f) => f.path), put: imported.files },
-    });
-    const home = imported.config.home && newPages.has(imported.config.home.toLowerCase()) ? imported.config.home : newPages.has(notebook.home.toLowerCase()) ? notebook.home : (imported.pages[0] as { name: string }).name;
-    const title = copy.title ?? imported.config.name ?? notebook.title;
-    const info = (await store.listNotebooks()).find((n) => n.id === notebook.id);
-    if (info) await store.updateNotebook({ ...info, title, home });
-    await this.host.open(notebook.id);
-    const local = await this.host.files();
-    this.saveLink(notebook.id, { ...link, revision: copy.version, digest: await digestOf(local), ...(link.target ? { files: await fileDigests(local) } : {}) });
-    this.held.delete(notebook.id);
-    this.host.say(`“${title}” was brought up to date from ${remote.place}.`);
+    await store.replacePages(notebook.id, { remove: gone.pages.map((p) => p.name), put: incoming.pages, files: { remove: gone.files.map((f) => f.path), put: incoming.files } });
+    if (hasConfig && (incoming.config.name || incoming.config.home)) {
+      const info = (await store.listNotebooks()).find((n) => n.id === notebook.id);
+      if (info) {
+        const pages = new Set((await store.loadPages(notebook.id)).map((p) => p.name.toLowerCase()));
+        const home = incoming.config.home && pages.has(incoming.config.home.toLowerCase()) ? incoming.config.home : info.home;
+        await store.updateNotebook({ ...info, title: incoming.config.name || info.title, home });
+      }
+    }
   }
 
-  private async conflict(notebook: Pick<NotebookInfo, "id" | "title" | "home">, link: Link, remote: Remote, files: ZipEntry[], digest: string, version: Version): Promise<void> {
-    this.held.add(notebook.id);
-    let choice: "mine" | "theirs" | null = null;
+  /** Pages that were changed on both sides: what to do with them, or null if the person would rather decide later. */
+  private async askConflicts(notebook: Pick<NotebookInfo, "title">, remote: Remote, paths: string[]): Promise<"both" | "mine" | "theirs" | null> {
+    const nameOf = (path: string): string => {
+      try {
+        return path.endsWith(".txt") ? pathToPage(path) : path;
+      } catch {
+        return path;
+      }
+    };
+    const shown = paths.slice(0, 8).map((path) => h("li", { text: nameOf(path) }));
+    if (paths.length > 8) shown.push(h("li", { text: `… and ${paths.length - 8} more` }));
+    let choice: "both" | "mine" | "theirs" | null = null;
     await showDialog({
-      title: "This notebook changed in two places",
+      title: "Some pages changed in two places",
       body: [
-        `“${notebook.title}” was changed on this device and also on ${remote.place} (from another device) since they last agreed. One copy has to replace the other; the pages of the copy that is not kept are lost.`,
-        "Nothing is sent or replaced until you choose.",
+        `${paths.length === 1 ? "A page" : `${paths.length} pages`} of “${notebook.title}” changed on this device and also on ${remote.place} since they last agreed. Everything else has merged by itself.`,
+        h("ul", { class: "skipped" }, ...shown),
+        "Keeping both keeps this device's version of each page and saves the other one next to it as “… (conflict copy)”, so that nothing is lost. Nothing is sent or replaced until you choose.",
       ],
-      confirm: "Keep this device's copy",
-      danger: true,
-      actions: [{ label: remote.place === "the server" ? "Use the server's copy" : "Use the other copy", run: (close) => ((choice = "theirs"), close()) }],
+      confirm: "Keep both",
+      actions: [
+        { label: "Use this device's versions", run: (close) => ((choice = "mine"), close()) },
+        { label: "Use the other versions", run: (close) => ((choice = "theirs"), close()) },
+      ],
       submit: () => {
-        choice = "mine";
+        choice = "both";
       },
     });
-    if (choice === "mine") await this.send(notebook, link, remote, files, digest, version);
-    else if (choice === "theirs") await this.fetch(notebook, link, remote);
-    else this.host.say("Not synced: this notebook changed in two places. Choose “Sync this notebook now” to settle it.");
+    return choice;
   }
 
   // ---------------------------------------------------------------------------------------------- fetching another
@@ -388,6 +496,8 @@ export class SyncUi {
         try {
           const link: Link = kind === "a" ? { remoteId: String(first), revision: 0, digest: "", account: account.email } : { remoteId: rest.join(":"), target: { kind: "connector", connectorId: Number(first), dir: rest.join(":") }, revision: "", digest: "", account: account.email };
           const remote = this.remoteFor(link);
+          const listed = await remote.manifest();
+          if (!listed) return "That notebook is not there any more.";
           const copy = await remote.read();
           const imported = pagesFromFiles(fromWire(copy.files));
           if (imported.pages.length === 0) return "That copy has no pages.";
@@ -397,7 +507,7 @@ export class SyncUi {
           const info = await this.host.store.createNotebook({ title, home, kind: "open" }, imported.pages, imported.files);
           await this.host.open(info.id);
           const local = await this.host.files();
-          this.saveLink(info.id, { ...link, revision: copy.version, digest: await digestOf(local), ...(link.target ? { files: await fileDigests(local) } : {}) });
+          this.saveLink(info.id, { ...link, revision: listed.version, digest: await digestOf(local), files: await fileDigests(local), marks: listed.marks });
           this.host.say(`“${title}” was copied from ${remote.place}.`);
         } catch (error) {
           return this.explain(error);
