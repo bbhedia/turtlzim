@@ -276,7 +276,7 @@ export class Accounts {
   exportData(userId) {
     const user = this.db.prepare("select * from users where id = ?").get(userId);
     if (!user) throw new AccountError("No such account.", 404);
-    return { email: user.email, createdAt: user.created_at, confirmedAt: user.verified_at, quotaBytes: user.quota_bytes, hasPassword: !!user.password_hash, signIns: this.identities(userId), sessions: this.db.prepare("select count(*) as n from sessions where user_id = ?").get(userId).n };
+    return { email: user.email, createdAt: user.created_at, confirmedAt: user.verified_at, quotaBytes: user.quota_bytes, hasPassword: !!user.password_hash, signIns: this.identities(userId), sessions: this.db.prepare("select count(*) as n from sessions where user_id = ?").get(userId).n, sealedKey: !!this.db.prepare("select 1 from cloud_keys where user_id = ?").get(userId) };
   }
 
   /** Delete the account and everything of it. A password account asks for the password; one that has none asks for a session of the last ten minutes. */

@@ -257,28 +257,38 @@ fn string_arg(data: &Value, at: usize, what: &str) -> TResult<String> {
     }
 }
 
-/// Whether this vault has a key for sealed copies.
-pub fn master_status(turtl: &Turtl) -> TResult<Value> {
-    Ok(json!({"has": master_key(turtl)?.is_some()}))
+/// A short value that says which master key it is without saying anything of it (the first 16 bytes of an HMAC of a constant): two places that hold keys can tell whether they hold the
+/// same one, without a passphrase. (The key is 256 bits of randomness: this is no way in.)
+pub fn key_check(master: &[u8]) -> CResult<String> {
+    Ok(crypto::to_hex(&derive(master, "check", b"")?[..16].to_vec())?)
 }
 
-/// Make this account's master key (once), keep it in the vault, and give it back wrapped by the passphrase (to be kept wherever the account keeps its copies).
-pub fn master_create(turtl: &Turtl, data: &Value) -> TResult<Value> {
+/// Whether this vault has a key for sealed copies, and its check value.
+pub fn master_status(turtl: &Turtl) -> TResult<Value> {
+    Ok(match master_key(turtl)? {
+        Some(master) => json!({"has": true, "check": key_check(master.data())?}),
+        None => json!({"has": false}),
+    })
+}
+
+/// Make a master key for the account, and give it back wrapped by the passphrase (to be kept wherever the account keeps its copies). Nothing is kept in the vault: the key is taken
+/// into the vault (`seal:master:unwrap`) once the place that keeps the wrapped one has accepted it, so that two devices that make a key at the same moment do not end up with two.
+/// The passphrase has to be the vault's: a key wrapped by another would not open with the passphrase that opens everything else.
+pub fn master_make(turtl: &Turtl, data: &Value) -> TResult<Value> {
     let passphrase = string_arg(data, 2, "the passphrase")?;
-    if master_key(turtl)?.is_some() {
-        return TErr!(TError::BadValue(String::from("this vault has a key for sealed copies already")));
-    }
+    master_key(turtl)?; // (the vault has to be unlocked)
+    user::verify_local_passphrase(turtl, &passphrase)?;
     let master = Key::new(crypto::rand_bytes(MASTER_LEN)?);
     let wrapped = wrap_master(master.data(), &passphrase, &user::local_kdf())?;
-    keep_master(turtl, &master)?;
-    Ok(json!({"wrapped": crypto::to_base64(&wrapped)?}))
+    Ok(json!({"wrapped": crypto::to_base64(&wrapped)?, "check": key_check(master.data())?}))
 }
 
-/// The master key again, wrapped by a passphrase (the one that was just chosen, after the vault's was changed).
+/// The master key of this vault again, wrapped by a passphrase (the vault's, which is the new one after it was changed). Whoever asks has to know the vault's passphrase: wrapping hands the key out.
 pub fn master_wrap(turtl: &Turtl, data: &Value) -> TResult<Value> {
     let passphrase = string_arg(data, 2, "the passphrase")?;
     let master = need_master(turtl)?;
-    Ok(json!({"wrapped": crypto::to_base64(&wrap_master(master.data(), &passphrase, &user::local_kdf())?)?}))
+    user::verify_local_passphrase(turtl, &passphrase)?;
+    Ok(json!({"wrapped": crypto::to_base64(&wrap_master(master.data(), &passphrase, &user::local_kdf())?)?, "check": key_check(master.data())?}))
 }
 
 /// Take the master key out of a wrapped one with its passphrase and keep it in the vault. A vault that has another master key is not given a second.
@@ -287,12 +297,13 @@ pub fn master_unwrap(turtl: &Turtl, data: &Value) -> TResult<Value> {
     let passphrase = string_arg(data, 3, "the passphrase")?;
     let existing = master_key(turtl)?;
     let master = Key::new(unwrap_master(&wrapped, &passphrase)?);
+    let check = key_check(master.data())?;
     match existing {
         Some(have) if have.data() != master.data() => TErr!(TError::BadValue(String::from("this vault has a different key for sealed copies already"))),
-        Some(_) => Ok(json!({"kept": false})),
+        Some(_) => Ok(json!({"kept": false, "check": check})),
         None => {
             keep_master(turtl, &master)?;
-            Ok(json!({"kept": true}))
+            Ok(json!({"kept": true, "check": check}))
         }
     }
 }
@@ -408,6 +419,8 @@ mod tests {
         let k = keys();
         assert_eq!(hex(&k.names), "11bb10ce9b9a5429699e4586b66ac861a7bed16da02ef5766f181feb8593446a");
         assert_eq!(hex(&k.content), "ba2cfcccb9ba3a479b5e6b9991e21728047f62972ef618651f9f88d95cebce37");
+        assert_eq!(key_check(&master()).unwrap(), "3195bbd92ea74f2364421dcde9feeab6");
+        assert_ne!(key_check(&master()).unwrap(), key_check(&[9u8; 32]).unwrap(), "two keys have two check values");
         assert_eq!(object_name(&k, "Home.txt").unwrap(), "cff7659136e2e49f1123e6edc5771425.zseal");
         assert_eq!(object_name(&k, "Help/Editor page.txt").unwrap(), "5b50d35ddf905d637922e62c23ddae39.zseal");
         let sealed = seal_with_nonce(&k, "cff7659136e2e49f1123e6edc5771425.zseal", "Hello é\n".as_bytes(), &nonce()).unwrap();

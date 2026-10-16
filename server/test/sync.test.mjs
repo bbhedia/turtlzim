@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import http from "node:http";
 import { after, before, describe, it } from "node:test";
 import { createApi } from "../src/api.mjs";
@@ -183,6 +184,78 @@ describe("notebooks kept on the server", () => {
       assert.equal(done.status, 200, done.text);
       const files = (await manifest()).json.files.map((f) => f.path);
       assert.equal(files.filter((p) => p.toLowerCase() === "a.txt").length, 1, `one file for A.txt and a.txt (${files.join(", ")})`);
+    });
+  });
+
+  describe("the key for sealed copies", () => {
+    const wrappedOf = (fill) => Buffer.concat([Buffer.from("ZSW1"), Buffer.alloc(100, fill)]);
+    const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+    const CHECK = "0123456789abcdef0123456789abcdef";
+    const put = (who, body, headers) => call(who, "/api/sync/keychain", body, "PUT", headers);
+    before(async () => {
+      await call("dora", "/api/register", { email: "dora@example.org", password: PASSWORD });
+      await call("dora", "/api/verify", { email: "dora@example.org", code: lastCode(parts.mailer, "dora@example.org") });
+    });
+
+    it("is there for the account that signed in, and for nobody else", async () => {
+      assert.equal((await call("nobody", "/api/sync/keychain")).status, 401);
+      assert.equal((await put("nobody", { wrapped: wrappedOf(1).toString("base64"), check: CHECK, expect: "none" })).status, 401);
+      assert.deepEqual((await call("dora", "/api/sync/keychain")).json, { wrapped: null });
+      assert.equal((await put("dora", { wrapped: wrappedOf(1).toString("base64"), check: CHECK, expect: "none" }, { "content-type": "application/json" })).status, 403, "the site's header is needed");
+    });
+
+    it("keeps the first key, and refuses a second that is made without having seen it", async () => {
+      const first = wrappedOf(1);
+      assert.equal((await put("dora", { wrapped: first.toString("base64"), check: CHECK, expect: "none" })).status, 200);
+      const got = (await call("dora", "/api/sync/keychain")).json;
+      assert.equal(got.wrapped, first.toString("base64"));
+      assert.equal(got.check, CHECK);
+      const raced = await put("dora", { wrapped: wrappedOf(2).toString("base64"), check: "f".repeat(32), expect: "none" });
+      assert.equal(raced.status, 409);
+      assert.equal(raced.json.code, "conflict");
+      assert.equal(raced.json.wrapped, first.toString("base64"), "it says which key is there, so that the other device can take it");
+      assert.equal((await call("dora", "/api/sync/keychain")).json.wrapped, first.toString("base64"), "and nothing was replaced");
+    });
+
+    it("replaces a key only for a device that saw it", async () => {
+      const first = wrappedOf(1);
+      const second = wrappedOf(2);
+      const wrong = await put("dora", { wrapped: second.toString("base64"), check: CHECK, expect: sha(wrappedOf(9)) });
+      assert.equal(wrong.status, 409);
+      const done = await put("dora", { wrapped: second.toString("base64"), check: CHECK, expect: sha(first) });
+      assert.equal(done.status, 200);
+      assert.equal((await call("dora", "/api/sync/keychain")).json.wrapped, second.toString("base64"));
+      assert.equal((await put("dora", { wrapped: first.toString("base64"), check: CHECK, expect: sha(first) })).status, 409, "the old one is not what is there now");
+    });
+
+    it("refuses what is not a wrapped key, whatever the rest says", async () => {
+      const there = sha(wrappedOf(2));
+      for (const [why, body] of [
+        ["too short", { wrapped: Buffer.concat([Buffer.from("ZSW1"), Buffer.alloc(99, 1)]).toString("base64"), check: CHECK, expect: there }],
+        ["too long", { wrapped: Buffer.concat([Buffer.from("ZSW1"), Buffer.alloc(101, 1)]).toString("base64"), check: CHECK, expect: there }],
+        ["not the magic", { wrapped: Buffer.concat([Buffer.from("XXXX"), Buffer.alloc(100)]).toString("base64"), check: CHECK, expect: there }],
+        ["not base64", { wrapped: "!!!", check: CHECK, expect: there }],
+        ["a number", { wrapped: 5, check: CHECK, expect: there }],
+        ["no check value", { wrapped: wrappedOf(3).toString("base64"), expect: there }],
+        ["a check value that is not hex", { wrapped: wrappedOf(3).toString("base64"), check: "zz", expect: there }],
+        ["no expectation", { wrapped: wrappedOf(3).toString("base64"), check: CHECK }],
+        ["an expectation that is not a sum", { wrapped: wrappedOf(3).toString("base64"), check: CHECK, expect: "yes" }],
+      ]) assert.equal((await put("dora", body)).status, 400, why);
+      assert.equal((await call("dora", "/api/sync/keychain")).json.wrapped, wrappedOf(2).toString("base64"), "nothing was changed by the refusals");
+    });
+
+    it("is one account's own, is in the export, and goes with the account", async () => {
+      assert.deepEqual((await call("bob", "/api/sync/keychain")).json, { wrapped: null });
+      assert.equal((await call("dora", "/api/account/export")).json.sealedKey, true);
+      assert.equal((await call("bob", "/api/account/export")).json.sealedKey, false);
+      // another account's first key is its own first, whatever is kept for others, and a replacement is compared with its own key only
+      const bobs = wrappedOf(7);
+      assert.equal((await put("bob", { wrapped: bobs.toString("base64"), check: CHECK, expect: "none" })).status, 200);
+      assert.equal((await call("dora", "/api/sync/keychain")).json.wrapped, wrappedOf(2).toString("base64"), "which does not touch the other account's");
+      assert.equal((await put("bob", { wrapped: wrappedOf(8).toString("base64"), check: CHECK, expect: sha(bobs) })).status, 200);
+      assert.equal((await call("bob", "/api/account/export")).json.sealedKey, true);
+      assert.equal((await call("dora", "/api/account/delete", { password: PASSWORD })).status, 200);
+      assert.equal(parts.db.prepare("select count(*) as n from cloud_keys").get().n, 1, "what is left is the other account's");
     });
   });
 

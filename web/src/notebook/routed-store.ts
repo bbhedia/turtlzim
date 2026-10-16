@@ -84,6 +84,19 @@ export class RoutedStore implements NotebookStore {
     return store.replacePages(inner, change);
   }
 
+  /** The link of an encrypted notebook (see `NotebookStore.readLink`); an open notebook has none here. */
+  async readLink(id: string): Promise<string | null> {
+    if (!isEncryptedId(id)) return null;
+    this.assertOpen();
+    return (await this.encrypted.readLink?.(id.slice(ENCRYPTED_PREFIX.length))) ?? null;
+  }
+
+  async writeLink(id: string, text: string | null): Promise<void> {
+    if (!isEncryptedId(id)) throw new Error("Only an encrypted notebook keeps its link in the vault.");
+    this.assertOpen();
+    await this.encrypted.writeLink?.(id.slice(ENCRYPTED_PREFIX.length), text);
+  }
+
   private assertOpen(): void {
     if (!this.vaultOpen()) throw new Error("The encrypted notebooks are locked.");
   }

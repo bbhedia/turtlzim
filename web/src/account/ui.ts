@@ -12,12 +12,18 @@ export class AccountUi {
   /** What the server offers: null while not known and where there is no account server. */
   offer: Offer | null = null;
   account: Account | null = null;
+  /** Told, once the dialog that did it is over, when who is signed in was changed by the person (signing in or out, an account made or deleted): what the screen says of the notebooks kept on it follows. */
+  onChange: (() => void) | null = null;
 
   constructor(
     private readonly say: (text: string) => void,
     private readonly saveFile: (fileName: string, blob: Blob) => void,
     readonly client = new AccountClient(),
   ) {}
+
+  private changed(): void {
+    window.setTimeout(() => this.onChange?.(), 0);
+  }
 
   /** Whether the menu has anything to say about accounts. */
   get available(): boolean {
@@ -103,6 +109,7 @@ export class AccountUi {
           return this.explain(error);
         }
         this.say(`Signed in as ${this.account.email}.`);
+        this.changed();
       },
     });
     if (!done && next === "create") await this.createDialog(email);
@@ -161,6 +168,7 @@ export class AccountUi {
           return this.explain(error);
         }
         this.say(`Account created. Signed in as ${this.account.email}.`);
+        this.changed();
       },
     });
   }
@@ -236,6 +244,7 @@ export class AccountUi {
     }
     this.account = null;
     this.say("Signed out. Your notebooks on this device are as they were.");
+    this.changed();
   }
 
   private async download(): Promise<void> {
@@ -264,6 +273,7 @@ export class AccountUi {
         }
         this.account = null;
         this.say("The account was deleted.");
+        this.changed();
       },
     });
   }

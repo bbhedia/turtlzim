@@ -35,28 +35,51 @@ export interface SealedIndex {
   files: IndexFile[];
 }
 
+/** Whether this vault has a key for sealed copies, and which one it is (a check value that two places can compare without a passphrase). */
+export interface KeyStatus {
+  has: boolean;
+  check?: string;
+}
+
+/** A key wrapped by a passphrase, as it is kept where the account keeps its copies, and its check value. */
+export interface WrappedKey {
+  wrapped: Uint8Array;
+  check: string;
+}
+
 /** The commands of the engine for sealed copies, over the core of an unlocked vault. */
 export class VaultSeal {
   constructor(private readonly core: () => CoreClient) {}
 
   /** Whether this vault has a key for sealed copies. */
+  async status(): Promise<KeyStatus> {
+    const answer = await this.core().request<{ has: boolean; check?: string }>("seal:master:status");
+    return answer.has === true ? { has: true, check: String(answer.check) } : { has: false };
+  }
+
   async hasKey(): Promise<boolean> {
-    return (await this.core().request<{ has: boolean }>("seal:master:status")).has === true;
+    return (await this.status()).has;
   }
 
-  /** Make the key (once), and give it back wrapped by the passphrase. */
-  async createKey(passphrase: string): Promise<Uint8Array> {
-    return base64ToBytes((await this.core().request<{ wrapped: string }>("seal:master:create", normalizePassphrase(passphrase))).wrapped);
+  /**
+   * Make a key for the account, wrapped by the passphrase, and keep nothing: the key goes into the vault (`takeKey`) once the place that keeps the wrapped one has accepted it. The passphrase
+   * has to be the vault's, which the engine checks (it fails like a wrong passphrase at unlocking does).
+   */
+  async makeKey(passphrase: string): Promise<WrappedKey> {
+    const made = await this.core().request<{ wrapped: string; check: string }>("seal:master:make", normalizePassphrase(passphrase));
+    return { wrapped: base64ToBytes(made.wrapped), check: made.check };
   }
 
-  /** The key again, wrapped by a passphrase (the one just chosen, after the vault's was changed). */
-  async wrapKey(passphrase: string): Promise<Uint8Array> {
-    return base64ToBytes((await this.core().request<{ wrapped: string }>("seal:master:wrap", normalizePassphrase(passphrase))).wrapped);
+  /** The vault's key again, wrapped by the vault's passphrase (the new one, after it was changed). */
+  async wrapKey(passphrase: string): Promise<WrappedKey> {
+    const made = await this.core().request<{ wrapped: string; check: string }>("seal:master:wrap", normalizePassphrase(passphrase));
+    return { wrapped: base64ToBytes(made.wrapped), check: made.check };
   }
 
-  /** Take the key out of a wrapped one with the passphrase that wrapped it, and keep it in this vault; false if this vault had it already. */
-  async takeKey(wrapped: Uint8Array, passphrase: string): Promise<boolean> {
-    return (await this.core().request<{ kept: boolean }>("seal:master:unwrap", bytesToBase64(wrapped), normalizePassphrase(passphrase))).kept === true;
+  /** Take the key out of a wrapped one with the passphrase that wrapped it, and keep it in this vault; `kept` is false if this vault had it already. */
+  async takeKey(wrapped: Uint8Array, passphrase: string): Promise<{ kept: boolean; check: string }> {
+    const taken = await this.core().request<{ kept: boolean; check: string }>("seal:master:unwrap", bytesToBase64(wrapped), normalizePassphrase(passphrase));
+    return { kept: taken.kept === true, check: taken.check };
   }
 
   async seal(notebook: string, files: PlainFile[]): Promise<SealedFile[]> {

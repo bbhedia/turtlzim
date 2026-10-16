@@ -23,6 +23,7 @@ import type { VaultEvent } from "../vault";
 import { TurtlStore } from "../vault/turtl-store";
 import { createZip, readZip } from "../zip";
 import { SealedUi } from "../account/sealed";
+import { VaultSeal } from "../vault/seal";
 import { SyncUi } from "../account/sync-ui";
 import type { SyncState } from "../account/sync-ui";
 import { AccountUi } from "../account/ui";
@@ -175,6 +176,10 @@ export class App {
   private readonly sync: SyncUi;
   /** The encrypted notebooks' sealed backup, kept on the account server. */
   private readonly sealed: SealedUi;
+  /** The vault's engine for the keys of sealed copies (what an encrypted notebook kept elsewhere is sealed with). */
+  private readonly sealer: VaultSeal;
+  /** The notebook is being shown because a sync changed it, not because a person went to it. */
+  private syncOpening = false;
   private pwaPhase: Phase | null = null;
   /** The new version that the person said "Not now" to, so that it is not offered again on this page. */
   private updateDismissedFor: string | null = null;
@@ -273,6 +278,12 @@ export class App {
       panel.addEventListener("toggle", () => prefs.set(`panel:${name}`, panel.open ? "open" : "closed"));
     }
     this.account = new AccountUi((text) => this.say(text), (name, blob) => this.saveFile(name, blob));
+    // (who is signed in changed: what the title says of where the notebook is kept follows, and a notebook that is kept for the account that has just signed in is brought up to date)
+    this.account.onChange = () => {
+      if (this.session) this.renderNotebookButton();
+      if (this.account.account) void this.sync.catchUp();
+    };
+    this.sealer = new VaultSeal(() => vault.core);
     this.sealed = new SealedUi(
       {
         say: (text) => this.say(text),
@@ -291,8 +302,20 @@ export class App {
         files: () => this.session.exportFiles(),
         flush: () => this.flush(),
         unsaved: () => this.dirty || this.saving > 0,
-        open: (id) => this.openNotebook(id),
+        // (what the sync shows it does not take for a visit to the notebook: it is not asked to sync again by it)
+        open: async (id) => {
+          this.syncOpening = true;
+          try {
+            await this.openNotebook(id);
+          } finally {
+            this.syncOpening = false;
+          }
+        },
         store,
+        seal: () => (this.vault.unlocked ? this.sealer : null),
+        readVaultLink: async (id) => (await this.store.readLink?.(id)) ?? null,
+        writeVaultLink: async (id, text) => void (await this.store.writeLink?.(id, text)),
+        prepareVault: () => this.prepareVault(),
       },
       this.account,
       { get: (id) => prefs.get(`sync:${id}`), set: (id, value) => prefs.set(`sync:${id}`, value), remove: (id) => prefs.remove(`sync:${id}`) },
@@ -671,6 +694,8 @@ export class App {
     this.tree.setFolded(this.savedFolds(id));
     this.tagList.show(session.tags());
     await this.openPage(pageName && session.exists(pageName) ? pageName : session.home, { push: false, replace: true });
+    // (an encrypted notebook that is kept elsewhere is brought up to date when it is opened: the vault, which has its link, was just unlocked; one that a sync is showing is not asked again)
+    if (session.info.kind === "encrypted" && !this.syncOpening) void this.sync.catchUp();
   }
 
   /** Whether the open notebook is an encrypted one: nothing in it may be put anywhere outside the vault (the address, the tab's title, the browser's own storage). */
@@ -684,7 +709,7 @@ export class App {
     const children: Node[] = [h("span", { class: "notebook-title", text: this.session.title })];
     if (this.isPrivate) children.push(h("span", { class: "badge enc", text: "encrypted" }));
     // (a notebook that is kept elsewhere says so next to its title; one that is only here says nothing: that is the usual case, and the menu says it for every notebook)
-    const where = this.session.info.kind === "open" ? this.notebookBadges(this.session.info).find((b) => b.kind === "where" && b.synced) : undefined;
+    const where = this.session.info.kind === "open" || this.session.info.kind === "encrypted" ? this.notebookBadges(this.session.info).find((b) => b.kind === "where" && b.synced) : undefined;
     if (where) {
       // (the word “synced” and the state are two parts, so that a narrow screen can keep only the state, and only when it needs the person)
       const [first, ...rest] = where.short.split(" · ");
@@ -692,17 +717,17 @@ export class App {
     }
     children.push(h("span", { class: "caret-down", "aria-hidden": "true" }));
     this.els.notebookButton.replaceChildren(...children);
-    this.els.notebookButton.title = `${this.session.title}${this.isPrivate ? " · encrypted" : ""}${this.session.info.kind === "open" ? ` · ${this.notebookBadges(this.session.info).find((b) => b.kind === "where")?.text ?? ""}` : ""} — notebooks`;
+    this.els.notebookButton.title = `${this.session.title}${this.isPrivate ? " · encrypted" : ""}${this.session.info.kind === "open" || this.session.info.kind === "encrypted" ? ` · ${this.notebookBadges(this.session.info).find((b) => b.kind === "where")?.text ?? ""}` : ""} — notebooks`;
   }
 
   /**
    * What the interface says of where a notebook is, and whether it is encrypted: two worded badges (a word, not only an icon, so that it is read out and needs no font): “Encrypted”, and “This device only”,
-   * a folder of this computer, or “Synced · where” with its state when it is known. An encrypted notebook is never synced (yet): it is kept in the vault.
+   * a folder of this computer, or “Synced · where” with its state when it is known. An encrypted notebook that is kept elsewhere is kept sealed, and says so with the same two badges.
    */
   private notebookBadges(info: NotebookInfo): Array<{ kind: "enc" | "where"; text: string; short: string; synced: boolean; state?: SyncState }> {
     const badges: Array<{ kind: "enc" | "where"; text: string; short: string; synced: boolean; state?: SyncState }> = [];
     if (info.kind === "encrypted") badges.push({ kind: "enc", text: "Encrypted", short: "encrypted", synced: false });
-    const status = info.kind === "open" ? this.sync.statusOf(info.id) : null;
+    const status = info.kind === "open" || info.kind === "encrypted" ? this.sync.statusOf(info.id) : null;
     if (status) {
       const words: Record<SyncState, string> = { ok: "up to date", pending: "waiting to be sent", sending: "syncing…", conflict: "needs you", error: "problem", offline: "offline" };
       const state = status.state ? ` · ${words[status.state]}` : "";
@@ -809,9 +834,26 @@ export class App {
         this.els.notebookMenu.append(item("About this version…", () => void this.aboutDialog()));
       }
       this.els.notebookMenu.hidden = false;
+      this.fitMenu();
       this.els.notebookButton.setAttribute("aria-expanded", "true");
       (this.els.notebookMenu.querySelector("button") as HTMLElement | null)?.focus();
     }).catch((error: unknown) => this.say(`The notebooks can't be listed: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  /**
+   * The menu opens under its button, which on a narrow screen is not at the left edge, and it is long (more with an account, and more with encrypted notebooks): it is moved left as far as it needs
+   * not to run off the right edge (never past the left one), and made no taller than what is left of the screen, scrolling inside.
+   */
+  private fitMenu(): void {
+    const menu = this.els.notebookMenu;
+    menu.style.left = "";
+    menu.style.maxHeight = "";
+    const margin = 8;
+    const rect = menu.getBoundingClientRect();
+    const over = rect.right - (document.documentElement.clientWidth - margin);
+    if (over > 0) menu.style.left = `${-Math.min(over, Math.max(0, rect.left - margin))}px`;
+    const height = window.visualViewport?.height ?? window.innerHeight;
+    menu.style.maxHeight = `${Math.max(160, Math.floor(height - rect.top - margin))}px`;
   }
 
   private closeNotebookMenu(): void {
@@ -843,8 +885,8 @@ export class App {
         const title = String(values.title).trim();
         const where = String(values.where);
         const encrypted = values.kind === "encrypted";
-        // (an encrypted notebook is kept in the vault, on this device: sending one is not done yet, and a folder of Zim files is plain by its nature)
-        if (encrypted && where !== "device") return where === "folder" ? "A folder of Zim files can't be encrypted. Choose “On this device only”, or make the notebook not encrypted." : "An encrypted notebook can only be kept on this device for now: sending encrypted notebooks to a server or a service is not done yet. Choose “On this device only”.";
+        // (a folder of Zim files is plain by its nature; an encrypted notebook kept on the server or a service is kept sealed)
+        if (encrypted && where === "folder") return "A folder of Zim files can't be encrypted. Choose “On this device only”, or make the notebook not encrypted.";
         const kind = encrypted ? "encrypted" : where === "folder" && folders ? "folder" : "open";
         if (kind === "encrypted") {
           const problem = await this.prepareVault();
@@ -857,9 +899,10 @@ export class App {
         await this.openNotebook(info.id);
         if (kind === "encrypted") void this.warnIfNotKept();
         // (the notebook is made here and then sent for the first time: until that is done it is in both places, which is the one moment that it may be)
-        if (kind === "open" && where !== "device" && where !== "folder") {
+        if ((kind === "open" || kind === "encrypted") && where !== "device" && where !== "folder") {
           const problem = await this.sync.keepIn(where);
-          if (problem) this.say(`“${title}” was made here, but it could not be kept elsewhere: ${problem} Choose “Keep this notebook on the server…” to try again.`);
+          // (an encrypted notebook is not named once the vault is locked: a lock that came while it was being sent leaves a screen that names nothing)
+          if (problem && (kind === "open" || this.vault.unlocked)) this.say(`“${title}” was made here, but it could not be kept elsewhere: ${problem} Choose “Keep this notebook on the server…” to try again.`);
         }
       },
     });
@@ -1009,7 +1052,18 @@ export class App {
   private onVaultChange(event: VaultEvent): void {
     this.els.lock.hidden = !this.vault.unlocked;
     this.restartAutoLock();
+    // (the links of the encrypted notebooks are in the vault: read when it opens, and forgotten when it closes)
+    if (event.kind === "unlocked") void this.sync.loadVaultLinks().then(() => this.syncAfterUnlock());
+    else this.sync.dropVaultLinks();
     if (event.kind === "lost" && !this.locking) void this.vaultLost(event.reason);
+  }
+
+  /** Once the vault's links are read: if some notebook is kept elsewhere, the account (who is signed in) has to be known for them to say anything, and the open one is brought up to date. */
+  private async syncAfterUnlock(): Promise<void> {
+    if (shellPlatform() !== null || !this.sync.hasVaultLinks()) return;
+    if (!this.account.account) await this.account.refresh();
+    this.renderNotebookButton();
+    await this.sync.catchUp();
   }
 
   private restartAutoLock(): void {
@@ -1239,7 +1293,10 @@ export class App {
   private async changePassphraseDialog(): Promise<void> {
     if (!this.vault.unlocked) return;
     let unreadable = 0;
+    let rewrapProblem: string | null = null;
     let underWay: Promise<unknown> | null = null;
+    // (asked before the change: a lock that comes in the middle of it forgets what the vault was holding)
+    const keptKey = this.sync.hasKeptKey();
     const changed = await showDialog({
       title: "Change the passphrase",
       body: [
@@ -1270,6 +1327,8 @@ export class App {
           return `The passphrase was not changed: ${error instanceof Error ? error.message : String(error)}`;
         }
         unreadable = done.unreadable;
+        // the account keeps the key for sealed copies wrapped by this passphrase: it is wrapped again by the new one, so that a new device takes it with that
+        if (keptKey) rewrapProblem = (await this.sync.rewrap(String(values.passphrase))) ?? null;
       },
     });
     if (!changed) {
@@ -1277,11 +1336,12 @@ export class App {
       if (underWay && (await (underWay as Promise<unknown>).then(() => true, () => false))) {
         // (after the lock is over: it closes the questions that are open when it ends)
         for (let waited = 0; this.locking && waited < 60_000; waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
-        await showMessage("The passphrase was changed", "The encrypted notebooks were locked while their passphrase was being changed, and it was changed: they open with the new passphrase now.");
+        await showMessage("The passphrase was changed", `The encrypted notebooks were locked while their passphrase was being changed, and it was changed: they open with the new passphrase now.${keptKey ? " The key for sealed copies that your account keeps is still wrapped by the old one: once they are unlocked, sign in and choose “Update the passphrase of the sealed copies…” in the notebook menu." : ""}`);
       }
       return;
     }
     this.say("Changed the passphrase of the encrypted notebooks.");
+    if (rewrapProblem) await showMessage("The key for sealed copies is still wrapped by the old passphrase", `${rewrapProblem} Sign in, and choose “Update the passphrase of the sealed copies…” in the notebook menu, to wrap it with the new one: until then a new device would need the old passphrase to open sealed copies.`);
     if (unreadable > 0) await showMessage("Some keys could not be read", `The passphrase is changed. ${unreadable === 1 ? "One key" : `${unreadable} keys`} of the encrypted notebooks could not be read, so what it protected stays out of reach, as it was before.`);
   }
 

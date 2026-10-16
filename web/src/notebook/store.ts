@@ -89,6 +89,13 @@ export interface NotebookStore {
    * all (a rename moves and rewrites many pages and moves their files; half of it would lose links).
    */
   replacePages(id: string, change: PageChange): Promise<void>;
+  /**
+   * Where an encrypted notebook is kept elsewhere (its link, see account/sync-ui.ts) is kept with the notebook, in the vault: a hidden record that is not a page, goes with the notebook (and
+   * with a backup of the vault), and is sealed like the rest. Nothing about an encrypted notebook may be kept in the browser's own storage, and the link names its pages. Only the stores that
+   * keep encrypted notebooks have it.
+   */
+  readLink?(id: string): Promise<string | null>;
+  writeLink?(id: string, text: string | null): Promise<void>;
 }
 
 /** Notebooks kept in memory: for tests, and for a browser that won't let a page keep anything. */

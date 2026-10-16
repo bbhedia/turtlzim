@@ -108,6 +108,39 @@ describe("the encrypted store, beyond the contract", () => {
     expect(found.total).toBe(1 + 1 + 1);
   }, SLOW);
 
+  it("keeps where a notebook is kept as a note of its own that is neither a page nor a file: replaced in place, removed, found by another store, and gone with the notebook", async () => {
+    const core = await freshAccount();
+    const store = new TurtlStore(() => core, pageKey);
+    const n = await store.createNotebook({ title: "N", home: "A", kind: "encrypted" }, [page("A", "a")], [file("A/pic.png", "pic")]);
+    const total = async () => (await core.request<{ total: number }>("profile:find-notes", { space_id: n.id, per_page: 100 })).total;
+    const before = await total();
+    expect(await store.readLink(n.id)).toBeNull();
+    await store.writeLink(n.id, '{"remoteId":"zsl-1"}');
+    expect(await store.readLink(n.id)).toBe('{"remoteId":"zsl-1"}');
+    expect(await total()).toBe(before + 1);
+    // (it is not a page or a file: the notebook reads as it did)
+    expect(await names(store, n.id)).toEqual(["A"]);
+    expect(await paths(store, n.id)).toEqual(["A/pic.png"]);
+    // replaced where it is, not added beside
+    await store.writeLink(n.id, '{"remoteId":"zsl-2"}');
+    expect(await store.readLink(n.id)).toBe('{"remoteId":"zsl-2"}');
+    expect(await total()).toBe(before + 1);
+    // a store that knows nothing finds it, and a change of the pages leaves it alone
+    const other = new TurtlStore(() => core, pageKey);
+    expect(await other.readLink(n.id)).toBe('{"remoteId":"zsl-2"}');
+    await other.replacePages(n.id, { remove: [], put: [page("B", "b")] });
+    expect(await other.readLink(n.id)).toBe('{"remoteId":"zsl-2"}');
+    // removed, and removed again without complaint
+    await store.writeLink(n.id, null);
+    expect(await store.readLink(n.id)).toBeNull();
+    await store.writeLink(n.id, null);
+    expect(await total()).toBe(before + 1);
+    // it goes with the notebook
+    await store.writeLink(n.id, "again");
+    await store.deleteNotebook(n.id);
+    expect(await total()).toBe(0);
+  }, SLOW);
+
   it("edits a page where it is: a changed page is still one note, not two", async () => {
     const core = await freshAccount();
     const store = new TurtlStore(() => core, pageKey);

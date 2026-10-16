@@ -16,6 +16,10 @@ export interface Link {
   files?: Record<string, string>;
   /** The other copy's mark for each of its files then (the base that its changes are told from). */
   marks?: Record<string, string>;
+  /** The other copy is a sealed one: an encrypted notebook, whose pages are kept as objects that only this account's key opens (sealed-remote.ts). */
+  sealed?: boolean;
+  /** For a sealed copy: the highest counter of its index that this device has seen, so that an old copy put back is noticed. */
+  counter?: number;
   /** The digest of the notebook's files then. */
   digest: string;
   /** Whose account (the e-mail address): a link made under another account is not this person's. */

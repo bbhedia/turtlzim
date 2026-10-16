@@ -56,7 +56,7 @@ pub(crate) const LOCAL_COMMANDS: &[&str] = &[
     "vault:restore:commit",
     "vault:restore:cancel",
     "seal:master:status",
-    "seal:master:create",
+    "seal:master:make",
     "seal:master:wrap",
     "seal:master:unwrap",
     "seal:objects:seal",
@@ -260,9 +260,9 @@ async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             local_only_or_refuse(turtl, cmd)?;
             seal::master_status(turtl)
         }
-        "seal:master:create" => {
+        "seal:master:make" => {
             local_only_or_refuse(turtl, cmd)?;
-            seal::master_create(turtl, &data)
+            seal::master_make(turtl, &data)
         }
         "seal:master:wrap" => {
             local_only_or_refuse(turtl, cmd)?;

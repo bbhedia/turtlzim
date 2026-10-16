@@ -38,6 +38,7 @@ three apps: **desktop** (Win/macOS/Linux), **web** (browser), **mobile** (iOS/An
   (one key each); storage and sync of a remote notebook are **per page** (an object per page and attachment, with an index; only changed pages travel; different pages changed on two devices merge, the same page asks). An encrypted notebook reuses the
   **local vault's passphrase** (no second passphrase). The interface keeps one list with two worded badges (encrypted; synced where / this device only) and a state dot (done, E16c: `notebookBadges` in `web/src/app/app.ts`, states in `web/src/account/sync-ui.ts`; the *New notebook* dialog asks Encryption and Where apart). These are choices, to relax later if the use shows a need.
   The sealing of a remote encrypted notebook is in the core (`core/turtl-core-rs/src/seal.rs`, commands `seal:*` in `LOCAL_COMMANDS`, `web/src/vault/seal.ts`; `docs/zim-encrypted-notebooks.md`): the master key stays in the vault's keychain and is never handed out unwrapped; objects are sealed with the same libsodium primitives as everything else (no second crypto path), and its known answers are asserted on native and wasm32.
+  **Done, E16d**: an encrypted notebook can be kept on the account's server or on a connected service, sealed page by page (`web/src/account/sealed-remote.ts`: a `Remote` that seals what the sync sends and opens what it reads; the other place holds hashed `.zseal` objects and a sealed index, under the id `zsl-…` and the title "Encrypted notebook"). The master key is made by `seal:master:make` (which checks the vault's passphrase and keeps nothing), kept by the account wrapped by that passphrase (`/api/sync/keychain`, compare-and-swap so two devices that make a first key at the same moment end with one), and only then taken into the vault by `seal:master:unwrap`. A changed vault passphrase wraps it again (same key). The *link* of an encrypted notebook (where it is kept, its marks, the highest index counter seen) is a hidden `zim-link` note in the notebook's own space **in the vault**, never in `localStorage`, and is dropped from memory at a lock.
 - **Product license: GPL-3.0** (because it embeds `core-rs`, which is GPLv3).
 
 UI decision (confirmed by the user 2026-10-05, see Open issues #1): **shared web UI** — build
@@ -187,7 +188,7 @@ docker compose up                   # Postgres + server (define compose file)
   `core/zim-format/tests/golden_real_notebooks.rs`), and the corpus-free fuzz test runs in every
   `cargo test -p zim-format`. Run both after touching `core/zim-format`.
 - Never copy Zim source into this repo; reimplement the format from its documented syntax.
-- **An encrypted notebook's contents go nowhere but the vault** (the one exception: the person may send the vault's own *sealed backup* to their account server, `web/src/account/sealed.ts`, which holds nothing readable; the browser scenario checks every request and the stored file, and no page of an encrypted notebook is ever sent as a page). Not the address, the tab's title,
+- **An encrypted notebook's contents go nowhere but the vault** (the two exceptions, both by the person's choice and both sealed: the vault's own *sealed backup* sent to their account server, `web/src/account/sealed.ts`, and a notebook **kept sealed** on the server or a connected service, `web/src/account/sealed-remote.ts`, E16d: object by object, under hashed names, with the key wrapped by the vault's passphrase in the account. Nothing readable leaves the browser in either: the browser scenarios scan every request, the server's database, the service's files and both browsers' storage for a page's text, a page's name and the notebook's title, and no page of an encrypted notebook is ever sent as a page, whatever the remote. Anything new that talks to a remote about an encrypted notebook goes through `SealedRemote`, never around it). Not the address, the tab's title,
   `history.state`, `localStorage`/`sessionStorage`, IndexedDB, the Cache API, a log, or an error
   message that is kept. A new feature of the app that remembers, stores or exposes anything about a
   page (a name, text, a fold, a recent-pages list, a draft) has to check `App.isPrivate` and keep
@@ -223,7 +224,7 @@ docker compose up                   # Postgres + server (define compose file)
 - **The follow-up document** (`docs/suivi/suivi.tex` and its PDF): at the end of **every milestone**, in the same commit, change the state and the "reste à faire" of the points it touches, add a line to the journal with the commit ids, update the test counts in
   `docs/suivi/releves.tex`, run `scripts/suivi.sh` and commit the source and the PDF together. A point is *fait* only when tests ran it; what was never tried against the real thing says so in its "reste à faire". Written in French, for the user.
 - **Accounts** (`server/`, `docs/zim-server.md`; decided 2026-10-15: Google + GitHub first, a mailed code only at sign-up, on this server): optional;
-  a notebook goes to the server, or to a service the person connected (`server/src/connectors/`: WebDAV/Nextcloud, GitHub, GitLab, Dropbox and Google Drive; the server calls it for them, with settings sealed at rest and `safe-fetch.mjs` refusing private addresses: any new connector goes through it, never a bare `fetch`), only if the person chose *Keep this notebook on the server* (open notebooks only, in clear, never an encrypted one: `SyncUi` checks `kind === "open"`, and the browser scenario checks the menu); both-changed is asked about, never overwritten. The web app talks to `/api/` on its own address only (`web/src/account/`), shows account items only when
+  a notebook goes to the server, or to a service the person connected (`server/src/connectors/`: WebDAV/Nextcloud, GitHub, GitLab, Dropbox and Google Drive; the server calls it for them, with settings sealed at rest and `safe-fetch.mjs` refusing private addresses: any new connector goes through it, never a bare `fetch`), only if the person chose *Keep this notebook on the server* (an open notebook in clear; an encrypted one only sealed, through `SealedRemote`: `SyncUi.remoteFor` wraps the remote whenever the link says `sealed`, and the browser scenarios scan what the server and the services hold); both-changed is asked about, never overwritten. The web app talks to `/api/` on its own address only (`web/src/account/`), shows account items only when
   `/api/providers` answers, and a native shell shows none. Passwords are scrypt, sessions are `HttpOnly` cookies with only a hash stored, every change needs the `X-Requested-With: zim`
   header and a same-site origin: do not weaken any of it, and a new endpoint gets the same tests. Secrets (OAuth, SMTP) live in `~/.local/state/zim-server`, never in the repo.
 - **The desktop program** (`desktop/`) is the same web build in Tauri, not a second UI or branch: `web/dist` goes in as it is, the version is `web/package.json`'s, and what a
@@ -238,7 +239,8 @@ docker compose up                   # Postgres + server (define compose file)
   run (no second rule for anything), never takes the focus from the text (a press that did would put the keyboard
   away), and keeps nothing but whether it is wanted (`zim:formatbar`). On a touch screen a tap follows a link only while the
   editor does not have the focus, a page opened by a tap is not given the focus, and the app is as tall as
-  `visualViewport` (`web/src/app/viewport.ts`). The browser tests emulate a phone with touch events and a made-up
+  `visualViewport` (`web/src/app/viewport.ts`). The notebook menu is long, so it is moved in from the right edge of a narrow screen and scrolls inside
+  (`App.fitMenu`; a phone-sized browser test checks that its last line can be reached). The browser tests emulate a phone with touch events and a made-up
   keyboard; no real device has been tried, and the docs say what that leaves open.
 
 ---
@@ -261,7 +263,7 @@ docker compose up                   # Postgres + server (define compose file)
 4. **iOS FFI build does not exist yet** in upstream (only Android JNI). Needs to be created.
 5. **Open-notebook sync privacy:** decide policy — local-only, sync-with-disclosure, or
    server-side key (at-rest, not end-to-end). Encrypted notebooks are always end-to-end.
-   (Encrypted notebooks exist now, on one device; syncing them to the Turtl server is not done.)
+   (Encrypted notebooks can be kept, sealed page by page and end-to-end, on the account server or a connected service since E16d; the Turtl server itself is not used. An open notebook kept on the server or a service is stored in clear, and the dialog says so.)
 6. **Web-crypto trust model:** a served web app could ship malicious JS ("host-proof hosting"
    critique). Mitigated, not solved: the app can be installed and its code pinned by a service
    worker (every file checked against a list, a new version offered and waiting for approval,

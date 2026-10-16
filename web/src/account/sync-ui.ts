@@ -1,16 +1,24 @@
 // Keeping notebooks away from this device, as the person sees it: the menu's lines, the questions, and when a notebook is sent or fetched. Where a copy is kept is a `Remote`: the
 // account's own space on the server (1 MB), or a folder of a service that was connected (Nextcloud and the like, which the server reaches for the person). What is decided is in sync.ts;
-// the app gives this what it has of the open notebook (`SyncHost`). Only an open notebook is ever sent (never an encrypted one), and what is sent is in clear: the dialog says so.
+// the app gives this what it has of the open notebook (`SyncHost`). A notebook that is not encrypted is sent as it is, and the dialog says so. An encrypted one is sent **sealed**: every page is
+// sealed here (sealed-remote.ts, the engine's keys) before it leaves, and what the place that keeps it holds are objects that it can't read. The link of an encrypted notebook, which names its
+// pages, is kept in the vault with the notebook and nowhere else; the key for sealed copies is in the vault, and, wrapped by the vault's passphrase, in the account.
 import { showDialog } from "../app/dialogs";
 import { h } from "../app/dom";
 import type { NotebookInfo, NotebookStore } from "../notebook/store";
+import { isEncryptedId } from "../notebook/routed-store";
 import { pathToPage } from "../notebook-core";
 import { pagesFromFiles } from "../notebook/zim-files";
 import type { ImportedFile } from "../notebook/zim-files";
+import { CoreError } from "../vault/core-client";
+import { base64ToBytes, bytesToBase64 } from "../vault/base64";
+import type { KeyStatus, VaultSeal } from "../vault/seal";
 import type { ZipEntry } from "../zip";
 import { ApiError } from "./client";
-import type { Connection, WireFile } from "./client";
+import type { Connection } from "./client";
+import type { Manifest, Remote, Version } from "./remote";
 import { SEALED_ID } from "./sealed";
+import { SEALED_PREFIX, SealedCopyError, SealedRemote } from "./sealed-remote";
 import { baseOf, conflictCopyPath, digestOf, fileDigests, folderNameFor, fromWire, newRemoteId, planMerge, toWire } from "./sync";
 import type { Link } from "./sync";
 import type { AccountUi } from "./ui";
@@ -28,6 +36,13 @@ export interface SyncHost {
   /** Show a notebook (again, from the store). */
   open(id: string): Promise<void>;
   store: NotebookStore;
+  /** The vault's engine, for the keys of sealed copies; null while the encrypted notebooks are locked. */
+  seal(): VaultSeal | null;
+  /** An encrypted notebook's link is kept in the vault, with the notebook. */
+  readVaultLink(id: string): Promise<string | null>;
+  writeVaultLink(id: string, text: string | null): Promise<void>;
+  /** Get the vault unlocked (or made) for what is about to be done in it: null if it is, else what to tell the person. */
+  prepareVault(): Promise<string | null>;
 }
 
 export interface LinkStorage {
@@ -50,26 +65,8 @@ export interface SyncStatus {
   state?: SyncState;
 }
 
-type Version = string | number;
-
-/** What the other copy holds now: its version, and a mark for each of its files (a mark changes when the file's content does). */
-interface Manifest {
-  version: Version;
-  marks: Record<string, string>;
-}
-
-/** Where a notebook's copy is kept. */
-interface Remote {
-  /** In words, for what is said to the person: “the server”, “My Nextcloud”. */
-  place: string;
-  /** What the copy holds now, or null if it is not there. */
-  manifest(): Promise<Manifest | null>;
-  /** Some of its files (all of them if no paths are given). */
-  read(paths?: string[]): Promise<{ title?: string; files: WireFile[]; version: Version }>;
-  /** Write these files and delete those, on top of the version `base` (the first write of a notebook has the base that a new one has: 0, or ""). */
-  write(title: string, put: ZipEntry[], remove: string[], base: Version): Promise<{ version: Version }>;
-  remove(): Promise<void>;
-}
+/** The notebooks that can be kept elsewhere: ones that are not encrypted, as they are, and encrypted ones, sealed. (A folder of Zim files on the computer is its own copy.) */
+const kept = (kind: NotebookInfo["kind"]): boolean => kind === "open" || kind === "encrypted";
 
 /** A connection as the person is shown it: “Dropbox”, or “GitLab project: My notes”. */
 const nameOf = (c: Connection): string => (c.label === c.service ? c.service : `${c.service}: ${c.label}`);
@@ -88,6 +85,14 @@ export class SyncUi {
   private readonly states = new Map<string, SyncState>();
   /** Told when a notebook's state changed or a link was made or ended, so that the screen can say so. */
   onStatus: (() => void) | null = null;
+  /** The links of the encrypted notebooks, as read from the vault when it was unlocked (and forgotten when it is locked): nothing about them is kept anywhere else. */
+  private readonly vaultLinks = new Map<string, string>();
+  /** Writing a link into the vault, one at a time. */
+  private persisting: Promise<void> = Promise.resolve();
+  /** The links of the vault have been read. */
+  private linksReady: Promise<void> = Promise.resolve();
+  /** Whether the vault has a key for sealed copies (as last asked: for the menu, which can't wait). */
+  private keyStatus: KeyStatus | null = null;
 
   constructor(
     private readonly host: SyncHost,
@@ -99,7 +104,7 @@ export class SyncUi {
     const email = this.account.account?.email;
     if (!email) return null;
     try {
-      const link = JSON.parse(this.links.get(id) ?? "null") as Link | null;
+      const link = JSON.parse((isEncryptedId(id) ? this.vaultLinks.get(id) : this.links.get(id)) ?? "null") as Link | null;
       return link && link.account === email && typeof link.remoteId === "string" ? link : null;
     } catch {
       return null;
@@ -107,13 +112,73 @@ export class SyncUi {
   }
 
   private saveLink(id: string, link: Link): void {
-    this.links.set(id, JSON.stringify(link));
+    const text = JSON.stringify(link);
+    if (isEncryptedId(id)) {
+      // (a sync that was under way when the vault was locked does not put back what the lock took away)
+      if (!this.host.seal()) return;
+      this.vaultLinks.set(id, text);
+      this.persist(id, text);
+    } else this.links.set(id, text);
     this.onStatus?.();
   }
 
+  /** Forget a link (the notebook is no longer kept elsewhere). */
+  private dropLink(id: string): void {
+    if (isEncryptedId(id)) {
+      this.vaultLinks.delete(id);
+      this.persist(id, null);
+    } else this.links.remove(id);
+    this.onStatus?.();
+  }
+
+  /** Write an encrypted notebook's link into the vault, in order, and say if it can't be. */
+  private persist(id: string, text: string | null): void {
+    this.persisting = this.persisting
+      .then(() => (this.host.seal() ? this.host.writeVaultLink(id, text) : undefined))
+      .catch((error: unknown) => this.host.say(`Couldn't remember where an encrypted notebook is kept: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  /** Say something about a notebook; an encrypted one is not named once the vault is locked (what is on the screen after a lock names nothing, whatever was still under way). */
+  private tell(id: string, text: string): void {
+    if (isEncryptedId(id) && !this.host.seal()) return;
+    this.host.say(text);
+  }
+
   private setState(id: string, state: SyncState | null): void {
+    // (once the vault is locked, nothing of an encrypted notebook is held: not even what state it was in)
+    if (isEncryptedId(id) && !this.host.seal()) {
+      this.states.delete(id);
+      return;
+    }
     if (state === null) this.states.delete(id);
     else this.states.set(id, state);
+    this.onStatus?.();
+  }
+
+  /** The vault was unlocked: read the links of its notebooks (they are kept in it), and whether it has a key for sealed copies. */
+  loadVaultLinks(): Promise<void> {
+    this.linksReady = (async () => {
+      this.vaultLinks.clear();
+      try {
+        for (const n of (await this.host.store.listNotebooks()).filter((n) => n.kind === "encrypted")) {
+          const text = await this.host.readVaultLink(n.id);
+          if (text) this.vaultLinks.set(n.id, text);
+        }
+        this.keyStatus = (await this.host.seal()?.status()) ?? null;
+      } catch {
+        // (a vault that can't be read now has no links to show; the notebooks are as they were)
+      }
+      this.onStatus?.();
+    })();
+    return this.linksReady;
+  }
+
+  /** The vault was locked: nothing of its notebooks is held any more, and nothing is sent. */
+  dropVaultLinks(): void {
+    window.clearTimeout(this.timer);
+    this.vaultLinks.clear();
+    this.keyStatus = null;
+    for (const id of [...this.states.keys()]) if (isEncryptedId(id)) this.states.delete(id);
     this.onStatus?.();
   }
 
@@ -135,6 +200,15 @@ export class SyncUi {
   }
 
   private remoteFor(link: Link): Remote {
+    const base = this.objectsFor(link);
+    if (!link.sealed) return base;
+    const seal = this.host.seal();
+    if (!seal) throw new Error("The encrypted notebooks are locked.");
+    return new SealedRemote(base, seal, link.remoteId, link.counter ?? 0, () => this.host.notebook()?.title ?? "");
+  }
+
+  /** The place that keeps what a notebook's copy is made of: the account's own space, or a folder of a connected service. */
+  private objectsFor(link: Link): Remote {
     const client = this.account.client;
     const target = link.target;
     if (!target) {
@@ -184,12 +258,14 @@ export class SyncUi {
     const notebook = this.host.notebook();
     if (!this.account.account || !notebook) return [];
     const lines: Array<{ label: string; run: () => void }> = [];
-    if (notebook.kind === "open") {
+    if (kept(notebook.kind)) {
       if (this.linkOf(notebook.id)) {
         lines.push({ label: "Sync this notebook now", run: () => void this.syncNow(false) }, { label: "Stop keeping this notebook on the server…", run: () => void this.stopDialog() });
       } else lines.push({ label: "Keep this notebook on the server…", run: () => void this.keepDialog() });
     }
     lines.push({ label: "Open a notebook from the server…", run: () => void this.fetchDialog() }, { label: "Connected services…", run: () => void this.servicesDialog() });
+    // (the key for sealed copies is wrapped by the vault's passphrase wherever the account keeps it: when that is changed it has to be wrapped again)
+    if (this.keyStatus?.has) lines.push({ label: "Update the passphrase of the sealed copies…", run: () => void this.rewrapDialog() });
     return lines;
   }
 
@@ -197,15 +273,16 @@ export class SyncUi {
   changed(): void {
     const notebook = this.host.notebook();
     window.clearTimeout(this.timer);
-    if (!notebook || notebook.kind !== "open" || !this.linkOf(notebook.id) || this.held.has(notebook.id)) return;
+    if (!notebook || !kept(notebook.kind) || !this.linkOf(notebook.id) || this.held.has(notebook.id)) return;
     if (this.states.get(notebook.id) !== "pending" && this.states.get(notebook.id) !== "sending") this.setState(notebook.id, "pending");
     this.timer = window.setTimeout(() => void this.syncNow(true), AUTO_SEND_MS);
   }
 
   /** At the start, and when the account becomes known: bring the open notebook up to date, if it is linked. */
   async catchUp(): Promise<void> {
+    await this.linksReady;
     const notebook = this.host.notebook();
-    if (notebook && notebook.kind === "open" && this.linkOf(notebook.id)) {
+    if (notebook && kept(notebook.kind) && this.linkOf(notebook.id)) {
       await this.loadConnections();
       await this.syncNow(true);
     }
@@ -224,14 +301,20 @@ export class SyncUi {
   private async keepDialog(): Promise<void> {
     const notebook = this.host.notebook();
     const account = this.account.account;
-    if (!notebook || !account || notebook.kind !== "open") return;
+    if (!notebook || !account || !kept(notebook.kind)) return;
     const where = await this.whereOptions();
+    const sealed = notebook.kind === "encrypted";
     await showDialog({
       title: "Keep this notebook on the server",
-      body: [
-        `A copy of “${notebook.title}” is kept, so that you can open it from another device. It is sent each time you stop typing, and fetched when the copy is newer.`,
-        "The copy is stored as it is, not encrypted: anyone who runs the server, or who has access to the service you choose, can read it. (Notebooks that you encrypt can't be kept like this.)",
-      ],
+      body: sealed
+        ? [
+            `A sealed copy of “${notebook.title}” is kept, so that you can open it from another device. Its pages are encrypted here, before they are sent, with a key that only your passphrase opens: whoever keeps the copy (the server, or the service you choose) holds objects that it cannot read, and sees only that they exist, how big they are and when they change. It is sent each time you stop typing, and fetched when the copy is newer.`,
+            "To open it on another device you need this account and the passphrase of your encrypted notebooks. Nobody can recover that passphrase for you.",
+          ]
+        : [
+            `A copy of “${notebook.title}” is kept, so that you can open it from another device. It is sent each time you stop typing, and fetched when the copy is newer.`,
+            "The copy is stored as it is, not encrypted: anyone who runs the server, or who has access to the service you choose, can read it. (A notebook that you encrypt is kept sealed instead.)",
+          ],
       choices: [{ name: "where", label: "Where", value: ACCOUNT, options: where.map((w) => ({ ...w, label: w.label.replace(/^On the server: /, "").replace(/^On /, "") })) }],
       confirm: "Keep it there",
       working: "Sending…",
@@ -241,29 +324,37 @@ export class SyncUi {
 
   /**
    * Send the open notebook for the first time, to the account's space (`ACCOUNT`) or to a connected service (its id): from then on it is kept in step. Gives the message to show if it
-   * can't be done. (While it is sent the notebook is both here and there: that is the one moment a notebook is in two places, and it ends with the first send.)
+   * can't be done. (While it is sent the notebook is both here and there: that is the one moment a notebook is in two places, and it ends with the first send.) An encrypted notebook is
+   * sent sealed, which needs the key for sealed copies: the account's, wrapped by the passphrase (asked for once, here).
    */
   async keepIn(where: string): Promise<string | void> {
     const notebook = this.host.notebook();
     const account = this.account.account;
-    if (!notebook || !account || notebook.kind !== "open") return "Only a notebook that is not encrypted can be kept on a server.";
+    if (!notebook || !account || !kept(notebook.kind)) return "This notebook can't be kept on a server.";
+    const sealed = notebook.kind === "encrypted";
     try {
+      if (sealed) {
+        const problem = await this.ensureSealKey();
+        if (problem) return problem;
+      }
       await this.host.flush();
       const files = await this.host.files();
       const digest = await digestOf(files);
+      // (a sealed notebook is called by an id that says it is one and nothing else, also as the folder of a service: its name is in the sealed index only)
+      const remoteId = sealed ? `${SEALED_PREFIX}${newRemoteId()}` : where === ACCOUNT ? newRemoteId() : folderNameFor(notebook.title);
       const first: Link = where === ACCOUNT
-        ? { remoteId: newRemoteId(), revision: 0, digest, account: account.email }
-        : { remoteId: folderNameFor(notebook.title), target: { kind: "connector", connectorId: Number(where), dir: "" }, revision: "", digest, account: account.email };
-      if (first.target) first.target.dir = first.remoteId;
+        ? { remoteId, revision: 0, digest, account: account.email }
+        : { remoteId, target: { kind: "connector", connectorId: Number(where), dir: remoteId }, revision: "", digest, account: account.email };
+      if (sealed) first.sealed = true;
       const remote = this.remoteFor(first);
       await remote.write(notebook.title, files, [], first.revision);
       const made = await remote.manifest();
-      this.saveLink(notebook.id, { ...first, revision: made?.version ?? first.revision, files: await fileDigests(files), marks: made?.marks ?? {} });
+      this.saveLink(notebook.id, { ...first, revision: made?.version ?? first.revision, files: await fileDigests(files), marks: made?.marks ?? {}, ...(remote.counter !== undefined ? { counter: remote.counter } : {}) });
       this.setState(notebook.id, "ok");
     } catch (error) {
       return this.explain(error);
     }
-    this.host.say(`“${notebook.title}” is kept ${where === ACCOUNT ? "on the server" : `on ${this.connections.find((c) => String(c.id) === where)?.label ?? "the service"}`}.`);
+    this.tell(notebook.id, `“${notebook.title}” is kept ${where === ACCOUNT ? "on the server" : `on ${this.connections.find((c) => String(c.id) === where)?.label ?? "the service"}`}${sealed ? ", sealed" : ""}.`);
   }
 
   private async stopDialog(): Promise<void> {
@@ -272,11 +363,17 @@ export class SyncUi {
     const link = this.linkOf(notebook.id);
     if (!link) return;
     await this.loadConnections();
-    const remote = this.remoteFor(link);
+    let remote: Remote;
+    try {
+      remote = this.remoteFor(link);
+    } catch (error) {
+      this.host.say(this.explain(error));
+      return;
+    }
     await showDialog({
       title: "Stop keeping this notebook on the server",
       body: [`The notebook stays on this device as it is. It is no longer sent to ${remote.place}.`],
-      checks: [{ name: "delete", label: link.target ? "Also delete its files on the service" : "Also delete the copy on the server", checked: true }],
+      checks: [{ name: "delete", label: link.sealed ? (link.target ? "Also delete its sealed copy on the service" : "Also delete its sealed copy on the server") : link.target ? "Also delete its files on the service" : "Also delete the copy on the server", checked: true }],
       confirm: "Stop",
       working: "Working…",
       submit: async (values) => {
@@ -287,7 +384,7 @@ export class SyncUi {
             if (!(error instanceof ApiError && error.status === 404)) return this.explain(error);
           }
         }
-        this.links.remove(notebook.id);
+        this.dropLink(notebook.id);
         this.held.delete(notebook.id);
         this.setState(notebook.id, null);
         this.host.say(values.delete ? "The copy was deleted." : `This notebook is no longer sent to ${remote.place}.`);
@@ -321,11 +418,18 @@ export class SyncUi {
   private async sync(auto: boolean): Promise<void> {
     const notebook = this.host.notebook();
     const account = this.account.account;
-    if (!notebook || !account || notebook.kind !== "open") return;
+    if (!notebook || !account || !kept(notebook.kind)) return;
+    // (an encrypted notebook is synced only while the vault is open: sealing needs its keys)
+    if (isEncryptedId(notebook.id) && !this.host.seal()) return;
     const link = this.linkOf(notebook.id);
     if (!link) return;
     if (auto && this.held.has(notebook.id)) return;
-    const remote = this.remoteFor(link);
+    let remote: Remote;
+    try {
+      remote = this.remoteFor(link);
+    } catch {
+      return;
+    }
     const id = notebook.id;
     this.setState(id, "sending");
     try {
@@ -335,16 +439,16 @@ export class SyncUi {
       const whole = await digestOf(start);
       const now = await remote.manifest();
       if (!now) {
-        this.links.remove(notebook.id);
+        this.dropLink(notebook.id);
         this.setState(id, null);
-        this.host.say(auto ? `“${notebook.title}” is no longer on ${remote.place}.` : `“${notebook.title}” is no longer on ${remote.place}, so it is no longer kept there. “Keep this notebook on the server…” sends it again.`);
+        this.tell(id, auto ? `“${notebook.title}” is no longer on ${remote.place}.` : `“${notebook.title}” is no longer on ${remote.place}, so it is no longer kept there. “Keep this notebook on the server…” sends it again.`);
         return;
       }
       const base = baseOf(link, local, whole, now.version, now.marks);
       let plan = planMerge(base, local, now.marks);
       const upgraded = link.files === undefined || link.marks === undefined;
       if (plan.length === 0) {
-        if (upgraded) this.saveLink(notebook.id, { ...link, revision: now.version, digest: whole, files: local, marks: now.marks });
+        if (upgraded || (remote.counter !== undefined && remote.counter !== link.counter)) this.saveLink(notebook.id, { ...link, revision: now.version, digest: whole, files: local, marks: now.marks, ...(remote.counter !== undefined ? { counter: remote.counter } : {}) });
         this.setState(id, "ok");
         if (!auto) this.host.say(`This notebook is up to date on ${remote.place}.`);
         return;
@@ -358,10 +462,12 @@ export class SyncUi {
       plan = plan.map((p) => (p.path === "notebook.zim" && p.action === "conflict" ? { path: p.path, action: local[p.path] === undefined ? ("pull" as const) : ("push" as const) } : p));
 
       // a page changed on both sides may have been changed the same way: only what really differs is asked about
-      const maybe = plan.filter((p) => p.action === "conflict" && now.marks[p.path] !== undefined).map((p) => p.path);
+      const identical = new Set<string>();
+      // (a mark that is this side's own digest says so at once: that is how the account's space and a sealed copy mark their files)
+      for (const p of plan) if (p.action === "conflict" && local[p.path] !== undefined && now.marks[p.path] === local[p.path]) identical.add(p.path);
+      const maybe = plan.filter((p) => p.action === "conflict" && !identical.has(p.path) && now.marks[p.path] !== undefined).map((p) => p.path);
       const theirs = new Map<string, Uint8Array>();
       if (maybe.length) for (const f of fromWire((await remote.read(maybe)).files)) theirs.set(f.path, f.bytes as Uint8Array);
-      const identical = new Set<string>();
       for (const path of maybe) {
         const bytes = theirs.get(path);
         if (bytes && local[path] !== undefined && (await fileDigests([{ path, bytes }]))[path] === local[path]) identical.add(path);
@@ -439,18 +545,23 @@ export class SyncUi {
       for (const path of pullDelete) delete known[path];
       for (const { path, action } of plan) if (action === "settled") delete known[path];
       for (const path of identical) known[path] = local[path]!;
-      this.saveLink(notebook.id, { ...link, revision: after.version, digest: await digestOf(await this.host.files()), files: known, marks: after.marks });
+      this.saveLink(notebook.id, { ...link, revision: after.version, digest: await digestOf(await this.host.files()), files: known, marks: after.marks, ...(remote.counter !== undefined ? { counter: remote.counter } : {}) });
       this.held.delete(notebook.id);
       this.setState(id, "ok");
 
       const sentCount = push.size + pushDelete.size + copyPaths.size;
       const broughtCount = pull.size + pullDelete.size + copies.size;
       const title = (this.host.notebook() ?? notebook).title;
-      if (sentCount && broughtCount) this.host.say(`“${title}” was merged with ${remote.place} (${sentCount} sent, ${broughtCount} brought here${copies.size ? `; ${copies.size} other ${copies.size === 1 ? "copy was" : "copies were"} kept beside the page` : ""}).`);
-      else if (sentCount) this.host.say(`“${title}” was sent to ${remote.place}.`);
-      else if (broughtCount) this.host.say(`“${title}” was brought up to date from ${remote.place}.`);
-      else if (!auto) this.host.say(`This notebook is up to date on ${remote.place}.`);
+      if (sentCount && broughtCount) this.tell(id, `“${title}” was merged with ${remote.place} (${sentCount} sent, ${broughtCount} brought here${copies.size ? `; ${copies.size} other ${copies.size === 1 ? "copy was" : "copies were"} kept beside the page` : ""}).`);
+      else if (sentCount) this.tell(id, `“${title}” was sent to ${remote.place}.`);
+      else if (broughtCount) this.tell(id, `“${title}” was brought up to date from ${remote.place}.`);
+      else if (!auto) this.tell(id, `This notebook is up to date on ${remote.place}.`);
     } catch (error) {
+      // the vault was locked while this was under way: nothing of the notebook is said or kept any more (what is on the screen after a lock names nothing)
+      if (isEncryptedId(id) && !this.host.seal()) {
+        this.states.delete(id);
+        return;
+      }
       if (error instanceof ApiError && error.status === 409) {
         this.host.say(`The copy on ${remote.place} changed while this was being sent. It will be looked at again.`);
         this.setState(id, "pending");
@@ -461,7 +572,10 @@ export class SyncUi {
         this.setState(id, "offline");
         if (auto) return;
       } else this.setState(id, "error");
-      this.host.say(`Couldn't sync “${notebook.title}”: ${error instanceof Error ? error.message : String(error)}`);
+      this.tell(id, `Couldn't sync “${notebook.title}”: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      // (what was learnt of an encrypted notebook's link is in the vault before this is over)
+      await this.persisting;
     }
   }
 
@@ -529,11 +643,12 @@ export class SyncUi {
     try {
       for (const n of (await client.listNotebooks()).notebooks) {
         // (the sealed copy of the encrypted notebooks is not a notebook that can be opened: it is restored by its own line of the menu)
-        if (n.id !== SEALED_ID && !known.has(`a:${n.id}`)) options.push({ value: `a:${n.id}`, label: `${n.title} (the server, ${Math.max(1, Math.round((n.bytes ?? 0) / 1024))} KB)` });
+        const size = `${Math.max(1, Math.round((n.bytes ?? 0) / 1024))} KB`;
+        if (n.id !== SEALED_ID && !known.has(`a:${n.id}`)) options.push({ value: `a:${n.id}`, label: n.id.startsWith(SEALED_PREFIX) ? `Encrypted notebook, sealed (the server, ${size})` : `${n.title} (the server, ${size})` });
       }
       for (const c of this.connections) {
         try {
-          for (const dir of (await client.connectorFolders(c.id)).folders) if (!known.has(`c:${c.id}:${dir}`)) options.push({ value: `c:${c.id}:${dir}`, label: `${dir} (${c.label})` });
+          for (const dir of (await client.connectorFolders(c.id)).folders) if (!known.has(`c:${c.id}:${dir}`)) options.push({ value: `c:${c.id}:${dir}`, label: dir.startsWith(SEALED_PREFIX) ? `Encrypted notebook, sealed (${c.label})` : `${dir} (${c.label})` });
         } catch {
           // (a service that can't be reached is left out; the others are still offered)
         }
@@ -558,6 +673,8 @@ export class SyncUi {
         const [kind, first, ...rest] = String(values.which).split(":");
         try {
           const link: Link = kind === "a" ? { remoteId: String(first), revision: 0, digest: "", account: account.email } : { remoteId: rest.join(":"), target: { kind: "connector", connectorId: Number(first), dir: rest.join(":") }, revision: "", digest: "", account: account.email };
+          // (what is sealed is opened with the vault's keys: the vault first, then the key, then the pages)
+          if (link.remoteId.startsWith(SEALED_PREFIX)) return await this.openSealed({ ...link, sealed: true });
           const remote = this.remoteFor(link);
           const listed = await remote.manifest();
           if (!listed) return "That notebook is not there any more.";
@@ -571,11 +688,186 @@ export class SyncUi {
           await this.host.open(info.id);
           const local = await this.host.files();
           this.saveLink(info.id, { ...link, revision: listed.version, digest: await digestOf(local), files: await fileDigests(local), marks: listed.marks });
+          this.setState(info.id, "ok");
           this.host.say(`“${title}” was copied from ${remote.place}.`);
         } catch (error) {
           return this.explain(error);
         }
       },
+    });
+  }
+
+  /**
+   * Copy a sealed notebook to this device, as an encrypted notebook of its vault: the vault is unlocked (or made) first, then the account's key is taken from the account with the passphrase
+   * that sealed it (asked for once, here), and then the pages are opened and put in the vault. Gives the message to show if it can't be done.
+   */
+  private async openSealed(first: Link): Promise<string | void> {
+    const account = this.account.account;
+    if (!account) return "You are signed out.";
+    const locked = await this.host.prepareVault();
+    if (locked) return locked;
+    await this.loadVaultLinks();
+    // (a sealed notebook that is on this device already is not copied a second time: the list could not say so while the vault was locked)
+    for (const [id, text] of this.vaultLinks) {
+      try {
+        const there = JSON.parse(text) as Link;
+        if (there.remoteId === first.remoteId && !!there.target === !!first.target && there.target?.connectorId === first.target?.connectorId) return "That notebook is on this device already: open it from the list of notebooks.";
+      } catch {
+        // (a link that can't be read is no link)
+      }
+      void id;
+    }
+    const problem = await this.ensureSealKey({ create: false });
+    if (problem) return problem;
+    const link: Link = { ...first, sealed: true };
+    const remote = this.remoteFor(link);
+    const listed = await remote.manifest();
+    if (!listed) return "That notebook is not there any more.";
+    const copy = await remote.read();
+    const imported = pagesFromFiles(fromWire(copy.files));
+    if (imported.pages.length === 0) return "That copy has no pages.";
+    const names = new Set(imported.pages.map((p) => p.name.toLowerCase()));
+    const home = imported.config.home && names.has(imported.config.home.toLowerCase()) ? imported.config.home : names.has("home") ? "Home" : (imported.pages[0] as { name: string }).name;
+    const title = copy.title || imported.config.name || "Encrypted notebook";
+    const info = await this.host.store.createNotebook({ title, home, kind: "encrypted" }, imported.pages, imported.files);
+    await this.host.open(info.id);
+    const local = await this.host.files();
+    this.saveLink(info.id, { ...link, revision: listed.version, digest: await digestOf(local), files: await fileDigests(local), marks: listed.marks, ...(remote.counter !== undefined ? { counter: remote.counter } : {}) });
+    this.setState(info.id, "ok");
+    this.tell(info.id, `“${title}” was copied from ${remote.place}, sealed.`);
+  }
+
+  // ---------------------------------------------------------------------------------------------- the key for sealed copies
+
+  /** What a refused passphrase says, whichever way the engine says it. */
+  private passphraseProblem(error: unknown, sealing: boolean): string {
+    if (error instanceof CoreError && error.subtype === "Unauthorized") return "That is not the passphrase of the encrypted notebooks.";
+    if (error instanceof CoreError && /authentication|wrong passphrase|wrapped key/i.test(error.message)) return sealing ? "That passphrase does not open the key: it is not the one that sealed it." : "That is not the passphrase of the encrypted notebooks.";
+    return this.explain(error);
+  }
+
+  /**
+   * Make sure that this vault and this account have the same key for sealed copies, so that what is sealed here can be opened elsewhere. Where there is none, one is made and kept (wrapped by the
+   * vault's passphrase, which is asked for once, here, and checked); where the account has one and this vault has not, it is taken with the passphrase that wrapped it. Gives the message
+   * to show if it can't be done.
+   */
+  private async ensureSealKey(options: { create?: boolean } = {}): Promise<string | void> {
+    const seal = this.host.seal();
+    if (!seal) return "The encrypted notebooks are locked.";
+    const client = this.account.client;
+    let local: KeyStatus;
+    let server: { wrapped: string | null; check?: string };
+    try {
+      local = await seal.status();
+      server = await client.getKeychain();
+    } catch (error) {
+      return this.explain(error);
+    }
+    if (local.has && server.wrapped) {
+      this.keyStatus = local;
+      if (server.check === local.check) return;
+      return "The key for sealed copies that this browser has is not the one of this account (another account made it). Sealed copies of this account can't be opened with it.";
+    }
+    if (!server.wrapped && options.create === false) return "This account has no key for sealed copies, so no sealed notebook of it can be opened.";
+    const taking = !local.has && !!server.wrapped;
+    let finished = false;
+    const done = await showDialog({
+      title: taking ? "Open the key for sealed copies" : "Seal your encrypted notebooks for the server",
+      body: taking
+        ? [
+            "This account keeps sealed copies of encrypted notebooks. To open them here, this browser needs the key that seals them: type the passphrase that they were sealed with, which is the passphrase of the encrypted notebooks of the device that sent them.",
+            "It is asked for once: the key is then kept in this browser's encrypted notebooks.",
+          ]
+        : [
+            "A sealed copy is encrypted here, before it is sent: the server keeps pages that it cannot read. For that, your encrypted notebooks get a key for sealed copies, kept with them and, wrapped by your passphrase, in your account, so that your other devices can open the copies.",
+            "Type the passphrase of your encrypted notebooks. It is the same one: there is not a second one to remember.",
+            h("p", {}, h("strong", { text: "Nobody can recover it for you. " }), "If you forget it, the sealed copies are lost for good, as the encrypted notebooks are: not even the server can open them."),
+          ],
+      fields: [{ name: "passphrase", label: "Passphrase of the encrypted notebooks", type: "password", autocomplete: "current-password", validate: (v) => (v ? null : "Type the passphrase.") }],
+      confirm: taking ? "Open the key" : "Seal and continue",
+      working: taking ? "Opening…" : "Sealing…",
+      submit: async (values) => {
+        const passphrase = String(values.passphrase);
+        try {
+          if (taking) {
+            await seal.takeKey(base64ToBytes(server.wrapped as string), passphrase);
+          } else if (!local.has) {
+            const made = await seal.makeKey(passphrase);
+            try {
+              await client.putKeychain({ wrapped: bytesToBase64(made.wrapped), check: made.check, expect: "none" });
+            } catch (error) {
+              // another device made the account's key at the same moment: that one is the key, and this vault takes it
+              const theirs = error instanceof ApiError && error.status === 409 ? (error.data as { wrapped?: string }).wrapped : undefined;
+              if (!theirs) throw error;
+              await seal.takeKey(base64ToBytes(theirs), passphrase);
+              this.keyStatus = await seal.status();
+              finished = true;
+              return;
+            }
+            await seal.takeKey(made.wrapped, passphrase);
+          } else {
+            // (this vault has a key and the account has none: the vault's key is what the account keeps, wrapped)
+            const wrapped = await seal.wrapKey(passphrase);
+            try {
+              await client.putKeychain({ wrapped: bytesToBase64(wrapped.wrapped), check: wrapped.check, expect: "none" });
+            } catch (error) {
+              const theirs = error instanceof ApiError && error.status === 409 ? (error.data as { check?: string }).check : undefined;
+              if (theirs === undefined) throw error;
+              if (theirs !== wrapped.check) return "This account got a different key for sealed copies at the same moment.";
+            }
+          }
+          this.keyStatus = await seal.status();
+          finished = true;
+        } catch (error) {
+          return this.passphraseProblem(error, taking);
+        }
+      },
+    });
+    return done && finished ? undefined : "The passphrase was not given, so nothing was sent.";
+  }
+
+  /** The vault's passphrase was changed: the key that the account keeps is wrapped again by the new one (what it is wrapped by is the vault's passphrase, so a new device takes it with that). */
+  async rewrap(passphrase: string, explainNothing = false): Promise<string | void> {
+    const seal = this.host.seal();
+    if (!seal) return "The encrypted notebooks are locked.";
+    if (!this.account.account) return "You are not signed in, so the key that your account keeps was not changed.";
+    const client = this.account.client;
+    try {
+      const local = await seal.status();
+      if (!local.has) return explainNothing ? "This browser has no key for sealed copies, so there is nothing to update." : undefined;
+      const server = await client.getKeychain();
+      if (!server.wrapped) return explainNothing ? "Your account keeps no key for sealed copies yet, so there is nothing to update." : undefined;
+      if (server.check !== local.check) return "The key that this account keeps is not this browser's, so it was not changed.";
+      const wrapped = await seal.wrapKey(passphrase);
+      const sum = new Uint8Array(await crypto.subtle.digest("SHA-256", base64ToBytes(server.wrapped) as BufferSource));
+      await client.putKeychain({ wrapped: bytesToBase64(wrapped.wrapped), check: wrapped.check, expect: [...sum].map((b) => b.toString(16).padStart(2, "0")).join("") });
+      this.host.say("The key that the account keeps for sealed copies is wrapped by the new passphrase now.");
+    } catch (error) {
+      return this.passphraseProblem(error, false);
+    }
+  }
+
+  /** Whether some encrypted notebook is kept elsewhere (read from the vault when it was unlocked). */
+  hasVaultLinks(): boolean {
+    return this.vaultLinks.size > 0;
+  }
+
+  /** Whether this browser has a key for sealed copies that the account may keep wrapped (the menu offers to wrap it again only then). */
+  hasKeptKey(): boolean {
+    return !!this.keyStatus?.has;
+  }
+
+  private async rewrapDialog(): Promise<void> {
+    await showDialog({
+      title: "Update the passphrase of the sealed copies",
+      body: [
+        "Your account keeps the key for sealed copies wrapped by the passphrase of your encrypted notebooks, so that a new device can take it. If you changed that passphrase while you were not signed in, or without network, the account's copy is still wrapped by the old one.",
+        "Type the passphrase that the encrypted notebooks have now, to wrap the key again.",
+      ],
+      fields: [{ name: "passphrase", label: "Passphrase of the encrypted notebooks", type: "password", autocomplete: "current-password", validate: (v) => (v ? null : "Type the passphrase.") }],
+      confirm: "Wrap the key again",
+      working: "Wrapping…",
+      submit: async (values) => this.rewrap(String(values.passphrase), true),
     });
   }
 

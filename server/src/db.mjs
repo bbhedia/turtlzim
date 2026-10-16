@@ -84,6 +84,14 @@ const STEPS = [
   `
   alter table oauth_states add column user_id integer;
   `,
+  `
+  create table cloud_keys (
+    user_id integer primary key references users(id) on delete cascade,
+    wrapped blob not null,
+    check_value text not null,
+    updated_at integer not null
+  );
+  `,
 ];
 
 /** Open (and make or bring up to date) the database at `path` (`:memory:` for a test). */

@@ -67,10 +67,17 @@ const textBytes = (text: string) => new TextEncoder().encode(text);
 
 const lab = {
   /** Sealed copies (src/vault/seal.ts): what a page hands a test is base64. */
-  sealStatus: () => attempt(() => sealer.hasKey()),
-  sealCreate: (passphrase: string) => attempt(async () => bytesToBase64(await sealer.createKey(passphrase))),
-  sealWrap: (passphrase: string) => attempt(async () => bytesToBase64(await sealer.wrapKey(passphrase))),
-  sealTake: (wrapped: string, passphrase: string) => attempt(() => sealer.takeKey(base64ToBytes(wrapped), passphrase)),
+  sealStatus: () => attempt(() => sealer.status()),
+  /** Make a key, and take it into the vault (what the app does once the account has kept the wrapped one): the wrapped key as base64. */
+  sealCreate: (passphrase: string) =>
+    attempt(async () => {
+      const made = await sealer.makeKey(passphrase);
+      await sealer.takeKey(made.wrapped, passphrase);
+      return bytesToBase64(made.wrapped);
+    }),
+  sealMake: (passphrase: string) => attempt(async () => ({ ...(await sealer.makeKey(passphrase)), wrapped: "" })),
+  sealWrap: (passphrase: string) => attempt(async () => bytesToBase64((await sealer.wrapKey(passphrase)).wrapped)),
+  sealTake: (wrapped: string, passphrase: string) => attempt(async () => (await sealer.takeKey(base64ToBytes(wrapped), passphrase)).kept),
   sealFiles: (notebook: string, files: Array<{ path: string; text: string }>) =>
     attempt(async () => (await sealer.seal(notebook, files.map((f) => ({ path: f.path, bytes: textBytes(f.text) })))).map((o) => ({ ...o, sealed: bytesToBase64(o.sealed) }))),
   openObjects: (notebook: string, objects: Array<{ name: string; sealed: string }>) =>

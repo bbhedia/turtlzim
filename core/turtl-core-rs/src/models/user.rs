@@ -192,6 +192,27 @@ fn random_local_user_id() -> TResult<String> {
     }
 }
 
+/// Whether `passphrase` is the one that unlocked the vault that is open: for what is only to be done by whoever knows it, not just by whoever is at an unlocked vault (the same check as
+/// a change of passphrase makes of the current one). A wrong one is the answer a wrong login gets.
+pub(crate) fn verify_local_passphrase(turtl: &Turtl, passphrase: &str) -> TResult<()> {
+    if !turtl.local_only {
+        return TErr!(TError::PermissionDenied(String::from("only a core without a server has a passphrase of its own")));
+    }
+    let (username, auth) = {
+        let user_guard = lockr!(turtl.user);
+        (user_guard.username.clone(), user_guard.auth.clone())
+    };
+    let record = match read_local_account(turtl, &username)? {
+        Some(record) => record,
+        None => return TErr!(TError::NotFound(String::from("the account of this vault is not on this device"))),
+    };
+    let (_, derived) = generate_auth_with(&username, &String::from(passphrase), CURRENT_AUTH_VERSION, &record.kdf)?;
+    if auth.as_ref() != Some(&derived) {
+        return TErr!(TError::Api(StatusCode::UNAUTHORIZED, json!({"error": "bad login"})));
+    }
+    Ok(())
+}
+
 /// The record of the account `username` of a core without a server, if there is one.
 fn read_local_account(turtl: &Turtl, username: &str) -> TResult<Option<LocalAccount>> {
     let kv_guard = lockr!(turtl.kv);

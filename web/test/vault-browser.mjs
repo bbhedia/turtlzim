@@ -378,12 +378,12 @@ try {
     try {
       const page = await openLab(first);
       await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
-      assertEqual(await mustWork(await lab(page, "sealStatus"), "asking"), false, "a new vault has no key for sealed copies");
+      assertEqual((await mustWork(await lab(page, "sealStatus"), "asking")).has, false, "a new vault has no key for sealed copies");
       assert(!(await lab(page, "sealFiles", NB, [{ path: "Home.txt", text: "x" }])).ok, "and cannot seal before it has one");
       const wrapped = await mustWork(await lab(page, "sealCreate", PASSPHRASE), "making the key");
       assertEqual(Buffer.from(wrapped, "base64").length, 104, "the wrapped key is 104 bytes");
       assert(!(await lab(page, "sealCreate", PASSPHRASE)).ok, "the key is made once");
-      assertEqual(await mustWork(await lab(page, "sealStatus"), "asking"), true, "now it has one");
+      assertEqual((await mustWork(await lab(page, "sealStatus"), "asking")).has, true, "now it has one");
 
       const files = [{ path: "Home.txt", text: SECRET }, { path: "Sub/Page two.txt", text: "the second page, with some words" }];
       const sealed = await mustWork(await lab(page, "sealFiles", NB, files), "sealing");
@@ -406,7 +406,7 @@ try {
       await page.reload();
       await page.waitForFunction(() => window.lab !== undefined);
       await mustWork(await lab(page, "unlock", PASSPHRASE), "unlocking after a reload");
-      assertEqual(await mustWork(await lab(page, "sealStatus"), "asking after the reload"), true, "the key is still there");
+      assertEqual((await mustWork(await lab(page, "sealStatus"), "asking after the reload")).has, true, "the key is still there");
       assertEqual((await mustWork(await lab(page, "openObjects", NB, [{ name: sealed[0].name, sealed: sealed[0].sealed }]), "opening after the reload"))[0].text, SECRET, "and opens what was sealed");
 
       // what another implementation, given only the passphrase and the wrapped key, makes of it: the same names, and the same pages
@@ -428,19 +428,31 @@ try {
       // another browser: its own vault and passphrase; it has no key; the wrapped key with the passphrase that wrapped it gives it the key, and then it opens what the first sealed
       const page2 = await openLab(other);
       await mustWork(await lab(page2, "create", NEXT), "making the second vault");
-      assertEqual(await mustWork(await lab(page2, "sealStatus"), "asking"), false, "the second vault has no key");
+      assertEqual((await mustWork(await lab(page2, "sealStatus"), "asking")).has, false, "the second vault has no key");
       assert(!(await lab(page2, "openObjects", NB, [{ name: sealed[0].name, sealed: sealed[0].sealed }])).ok, "and opens nothing");
       assert(!(await lab(page2, "sealTake", wrapped, NEXT)).ok, "its own passphrase is not the one that wrapped the key");
-      assertEqual(await mustWork(await lab(page2, "sealStatus"), "asking"), false, "a refusal keeps nothing");
+      assertEqual((await mustWork(await lab(page2, "sealStatus"), "asking")).has, false, "a refusal keeps nothing");
       assertEqual(await mustWork(await lab(page2, "sealTake", wrapped, PASSPHRASE), "taking the key"), true, "the passphrase that wrapped it gives the key");
       assertEqual((await mustWork(await lab(page2, "openObjects", NB, sealed.map((o) => ({ name: o.name, sealed: o.sealed }))), "opening in the second vault")).map((o) => o.text), files.map((f) => f.text), "the second vault opens what the first sealed");
       assertEqual(await mustWork(await lab(page2, "sealTake", wrapped, PASSPHRASE), "taking it again"), false, "taking it again changes nothing");
       // (and what this vault seals, the first opens: one key, two vaults)
       const back = await mustWork(await lab(page2, "sealFiles", NB, [{ path: "From second.txt", text: "written in the second browser" }]), "sealing in the second vault");
       assertEqual((await mustWork(await lab(page, "openObjects", NB, [{ name: back[0].name, sealed: back[0].sealed }]), "opening in the first"))[0].text, "written in the second browser", "the first vault opens what the second sealed");
+      // wrapping hands the key out, so it takes the vault's own passphrase: another one is refused, and so is the old one once the vault's is changed
+      assert(!(await lab(page, "sealWrap", NEXT)).ok, "a passphrase that is not the vault's does not wrap the key");
+      assert(!(await lab(page, "sealMake", NEXT)).ok, "nor does it make one");
+      await mustWork(await lab(page, "changePassphrase", PASSPHRASE, NEXT), "changing the vault's passphrase");
+      assert(!(await lab(page, "sealWrap", PASSPHRASE)).ok, "the old passphrase no longer wraps it");
       // a changed passphrase wraps the key again: the new wrapping opens with the new passphrase and not the old
       const rewrapped = await mustWork(await lab(page, "sealWrap", NEXT), "wrapping again");
       assertEqual(nodeUnwrap(rewrapped, NEXT).equals(master), true, "the same key, under the new passphrase");
+      let oldFails = false;
+      try {
+        nodeUnwrap(rewrapped, PASSPHRASE);
+      } catch {
+        oldFails = true;
+      }
+      assert(oldFails, "and the old passphrase does not open the new wrapping");
     } finally {
       await first.close();
       await other.close();

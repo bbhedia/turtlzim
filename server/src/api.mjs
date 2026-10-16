@@ -132,6 +132,14 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
         if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
         return void send(res, 200, accounts.exportData(found.user.id), { "content-disposition": 'attachment; filename="zim-notebook-account.json"' });
       }
+      if (route === "/api/sync/keychain" && (get || method === "PUT")) {
+        const found = sessionOf(req);
+        if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
+        accounts.limit(`keychain:${found.user.id}`, 60, 600);
+        if (get) return void send(res, 200, sync.keychain(found.user.id));
+        checkSameSite(req);
+        return void send(res, 200, sync.putKeychain(found.user.id, await readJson(req)));
+      }
       const notebookRoute = /^\/api\/sync\/notebooks(?:\/([^/]+)(?:\/(manifest|read))?)?$/.exec(route);
       if (notebookRoute) {
         const found = sessionOf(req);
@@ -280,7 +288,7 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
       }
     } catch (error) {
       if (error instanceof AccountError) {
-        return void send(res, error.status, { error: error.message, ...(error.extra.code ? { code: error.extra.code } : {}), ...(error.extra.retryAfter ? { retryAfter: error.extra.retryAfter } : {}), ...(error.extra.revision !== undefined ? { revision: error.extra.revision } : {}), ...(error.extra.version !== undefined ? { version: error.extra.version } : {}), ...(error.extra.quotaBytes ? { usedBytes: error.extra.usedBytes, quotaBytes: error.extra.quotaBytes } : {}) }, error.extra.retryAfter ? { "retry-after": String(error.extra.retryAfter) } : {});
+        return void send(res, error.status, { error: error.message, ...(error.extra.code ? { code: error.extra.code } : {}), ...(error.extra.retryAfter ? { retryAfter: error.extra.retryAfter } : {}), ...(error.extra.revision !== undefined ? { revision: error.extra.revision } : {}), ...(error.extra.version !== undefined ? { version: error.extra.version } : {}), ...(error.extra.wrapped !== undefined ? { wrapped: error.extra.wrapped, check: error.extra.check, updatedAt: error.extra.updatedAt } : {}), ...(error.extra.quotaBytes ? { usedBytes: error.extra.usedBytes, quotaBytes: error.extra.quotaBytes } : {}) }, error.extra.retryAfter ? { "retry-after": String(error.extra.retryAfter) } : {});
       }
       log(`error: ${error instanceof Error ? error.stack : String(error)}`);
       return void send(res, 500, { error: "Something went wrong on the server." });

@@ -41,6 +41,22 @@ describe("the account client", () => {
     expect(reads[0]!.init?.body).toBeUndefined();
   });
 
+  it("reads the account's key for sealed copies, and keeps one with the key it replaces: a refusal carries the key that is there", async () => {
+    const { api, seen } = client((_path, init) => (init?.method === "PUT" ? json(409, { error: "Not the key that was seen.", code: "conflict", wrapped: "QUJD", check: "ab", updatedAt: 5 }) : json(200, { wrapped: "QUJD", check: "ab", updatedAt: 5 })));
+    expect(await api.getKeychain()).toEqual({ wrapped: "QUJD", check: "ab", updatedAt: 5 });
+    expect(seen[0]!.path).toBe("/api/sync/keychain");
+    expect(seen[0]!.init?.method).toBe("GET");
+    const error = await api.putKeychain({ wrapped: "x", check: "c", expect: "none" }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(409);
+    expect((error as ApiError).data).toMatchObject({ wrapped: "QUJD", check: "ab" });
+    const put = seen[1]!;
+    expect(put.path).toBe("/api/sync/keychain");
+    expect(put.init?.method).toBe("PUT");
+    expect(put.init?.headers).toEqual({ "content-type": "application/json", "x-requested-with": "zim" });
+    expect(JSON.parse(String(put.init?.body))).toEqual({ wrapped: "x", check: "c", expect: "none" });
+  });
+
   it("knows who is signed in, and that nobody is", async () => {
     expect(await client(() => json(200, { user: null, signIns: [] })).api.me()).toBeNull();
     const me = await client(() => json(200, { user: { email: "a@b.org", quotaBytes: 1048576, hasPassword: false }, signIns: ["github", 5] })).api.me();

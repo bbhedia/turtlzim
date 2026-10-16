@@ -39,6 +39,66 @@ class FolderStub extends MemoryStore {
   }
 }
 
+/** The encrypted side with somewhere to keep the link of each notebook, as the vault's store does. */
+class LinkingStub extends SealedStub {
+  links = new Map<string, string>();
+  async readLink(id: string): Promise<string | null> {
+    return this.links.get(id) ?? null;
+  }
+  async writeLink(id: string, text: string | null): Promise<void> {
+    if (text === null) this.links.delete(id);
+    else this.links.set(id, text);
+  }
+}
+
+describe("where an encrypted notebook is kept (its link) is in the vault, and only there", () => {
+  const withLinks = (vaultOpen = { value: true }) => {
+    const open = new MemoryStore(pageKey);
+    const sealed = new LinkingStub(pageKey);
+    return { open, sealed, vaultOpen, store: new RoutedStore(open, sealed, () => vaultOpen.value) };
+  };
+
+  it("keeps the link of an encrypted notebook on the encrypted side, under the id the vault knows it by, and gives it back", async () => {
+    const { store, sealed } = withLinks();
+    const secret = await store.createNotebook({ title: "Secret", home: "Home", kind: "encrypted" }, [page("Home")]);
+    expect(isEncryptedId(secret.id)).toBe(true);
+    expect(await store.readLink?.(secret.id)).toBeNull();
+    await store.writeLink?.(secret.id, '{"remoteId":"zsl-1"}');
+    expect(await store.readLink?.(secret.id)).toBe('{"remoteId":"zsl-1"}');
+    expect([...sealed.links.keys()]).toEqual([secret.id.slice(ENCRYPTED_PREFIX.length)]);
+    await store.writeLink?.(secret.id, null);
+    expect(await store.readLink?.(secret.id)).toBeNull();
+    expect(sealed.links.size).toBe(0);
+  });
+
+  it("has no link for an open notebook, and refuses to keep one in the vault for it", async () => {
+    const { store, sealed } = withLinks();
+    const plain = await store.createNotebook({ title: "Plain", home: "Home", kind: "open" }, [page("Home")]);
+    expect(await store.readLink?.(plain.id)).toBeNull();
+    await expect(store.writeLink?.(plain.id, "x")).rejects.toThrow(/Only an encrypted notebook/);
+    expect(sealed.links.size).toBe(0);
+  });
+
+  it("answers for an open notebook while the vault is locked (it has no link to ask the vault for)", async () => {
+    const vaultOpen = { value: false };
+    const { store } = withLinks(vaultOpen);
+    const plain = await store.createNotebook({ title: "Plain", home: "Home", kind: "open" }, [page("Home")]);
+    expect(await store.readLink?.(plain.id)).toBeNull();
+  });
+
+  it("neither reads nor writes a link while the vault is locked, and the link is there again once it is open", async () => {
+    const vaultOpen = { value: true };
+    const { store } = withLinks(vaultOpen);
+    const secret = await store.createNotebook({ title: "Secret", home: "Home", kind: "encrypted" }, [page("Home")]);
+    await store.writeLink?.(secret.id, "kept");
+    vaultOpen.value = false;
+    await expect(store.readLink?.(secret.id)).rejects.toThrow(/locked/);
+    await expect(store.writeLink?.(secret.id, "changed")).rejects.toThrow(/locked/);
+    vaultOpen.value = true;
+    expect(await store.readLink?.(secret.id)).toBe("kept");
+  });
+});
+
 describe("the store of notebooks in folders, beside the open and the encrypted ones", () => {
   const withFolders = () => {
     const open = new MemoryStore(pageKey);

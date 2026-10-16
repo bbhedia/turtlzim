@@ -139,6 +139,10 @@ button.secondary { background: transparent; }
   border: 1px solid var(--zim-border);
   border-radius: 8px;
   box-shadow: var(--shadow);
+  /* (a long menu scrolls inside: app.ts sets how tall it may be, from where it opens) */
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .menu[hidden] { display: none; }
 .menu hr { border: 0; border-top: 1px solid var(--zim-border); margin: 0.3rem 0; }

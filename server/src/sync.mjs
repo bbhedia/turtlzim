@@ -7,6 +7,8 @@ import { AccountError } from "./accounts.mjs";
 const ID = /^[A-Za-z0-9_-]{8,64}$/;
 const MAX_FILES = 2000;
 const MAX_PATH = 240;
+/** A wrapped key is what the core makes: 4 (magic) + 4 + 4 (cost) + 32 (salt) + 12 (nonce) + 32 (key) + 16 (tag). */
+const WRAPPED_KEY_BYTES = 104;
 
 /** A path inside a notebook: relative, no `..`, no hidden part, no control characters. */
 export function validPath(path) {
@@ -129,6 +131,32 @@ export class Sync {
         insert.run(userId, id, file.path, file.bytes);
       }
       return { revision: next, usedBytes: others + notebookNow };
+    });
+  }
+
+  /**
+   * The account's key for sealed copies, **wrapped by a passphrase** that the server does not have (see core/turtl-core-rs/src/seal.rs): one opaque 104-byte value, and a check value that says
+   * which key it is. The server can't open it; it keeps it so that a new device of the account can take the key with the passphrase, and compares what it is told so that a key
+   * is replaced only by a device that saw the one it replaces.
+   */
+  keychain(userId) {
+    const row = this.db.prepare("select wrapped, check_value as checkValue, updated_at as updatedAt from cloud_keys where user_id = ?").get(userId);
+    return row ? { wrapped: Buffer.from(row.wrapped).toString("base64"), check: row.checkValue, updatedAt: row.updatedAt } : { wrapped: null };
+  }
+
+  /** Keep the wrapped key: as the first (`expect: "none"`), or in place of the one whose SHA-256 is `expect`. Refused (409, with what is there) if it is not what the sender thought. */
+  putKeychain(userId, { wrapped, check, expect }) {
+    if (typeof wrapped !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(wrapped)) throw new AccountError("That is not a wrapped key.", 400, { code: "bad-key" });
+    const bytes = Buffer.from(wrapped, "base64");
+    if (bytes.length !== WRAPPED_KEY_BYTES || bytes.subarray(0, 4).toString("latin1") !== "ZSW1") throw new AccountError("That is not a wrapped key.", 400, { code: "bad-key" });
+    if (typeof check !== "string" || !/^[0-9a-f]{32}$/.test(check)) throw new AccountError("That key has no check value.", 400, { code: "bad-key" });
+    if (expect !== "none" && !(typeof expect === "string" && /^[0-9a-f]{64}$/.test(expect))) throw new AccountError("Say which key this replaces.", 400, { code: "bad-expect" });
+    return transaction(this.db, () => {
+      const current = this.db.prepare("select wrapped from cloud_keys where user_id = ?").get(userId);
+      const there = current ? createHash("sha256").update(current.wrapped).digest("hex") : "none";
+      if (there !== expect) throw new AccountError("This account's key for sealed copies is not the one that was seen.", 409, { code: "conflict", ...this.keychain(userId) });
+      this.db.prepare("insert into cloud_keys (user_id, wrapped, check_value, updated_at) values (?, ?, ?, ?) on conflict (user_id) do update set wrapped = excluded.wrapped, check_value = excluded.check_value, updated_at = excluded.updated_at").run(userId, bytes, check, this.now());
+      return { ok: true, updatedAt: this.now() };
     });
   }
 

@@ -2464,7 +2464,7 @@ async fn sealed_copies() {
 
     // a core with a server has no vault, and none of this is for it; a vault that is locked has no key
     let with_a_server = test_turtl(&server);
-    for (i, command) in ["seal:master:status", "seal:master:create", "seal:objects:seal", "seal:index:open"].iter().enumerate() {
+    for (i, command) in ["seal:master:status", "seal:master:make", "seal:objects:seal", "seal:index:open"].iter().enumerate() {
         let refused = ask(&with_a_server, json!([format!("s{}", i), command])).await;
         assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("permission_denied")), "{}: {}", command, refused);
     }
@@ -2477,14 +2477,29 @@ async fn sealed_copies() {
     assert_eq!(ask(&turtl, status("s1")).await["d"], json!({"has": false}));
     let before_a_key = ask(&turtl, json!(["s2", "seal:objects:seal", nb, [{"path": "Home.txt", "data": b64(b"x")}]])).await;
     assert_eq!((&before_a_key["e"], &before_a_key["d"]["type"]), (&json!(1), &json!("not_found")), "{}", before_a_key);
-    let created = ask(&turtl, json!(["s3", "seal:master:create", "a passphrase to keep"])).await;
+    // a key is made for the passphrase that opens the vault and no other (wrapping hands the key out, so whoever asks has to know it), and nothing is kept until it is taken
+    let made_wrong = ask(&turtl, json!(["s3a", "seal:master:make", "not the passphrase of the vault"])).await;
+    assert_eq!((&made_wrong["e"], &made_wrong["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "{}", made_wrong);
+    let created = ask(&turtl, json!(["s3", "seal:master:make", "a passphrase to keep"])).await;
     assert_eq!(created["e"], json!(0), "{}", created);
     let wrapped = String::from(created["d"]["wrapped"].as_str().unwrap());
+    let check = created["d"]["check"].as_str().unwrap().to_string();
     assert_eq!(crypto::from_base64(&wrapped).unwrap().len(), 104);
-    assert!(created["d"].as_object().unwrap().len() == 1, "nothing but the wrapped key is given: {}", created);
-    assert_eq!(ask(&turtl, status("s4")).await["d"], json!({"has": true}));
-    let again = ask(&turtl, json!(["s5", "seal:master:create", "a passphrase to keep"])).await;
-    assert_eq!((&again["e"], &again["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", again);
+    assert_eq!(check.len(), 32);
+    assert!(created["d"].as_object().unwrap().len() == 2, "nothing but the wrapped key and its check value is given: {}", created);
+    assert_eq!(ask(&turtl, status("s4")).await["d"], json!({"has": false}), "making a key keeps nothing");
+    let kept = ask(&turtl, json!(["s4a", "seal:master:unwrap", wrapped, "a passphrase to keep"])).await;
+    assert_eq!(kept["d"], json!({"kept": true, "check": check}), "{}", kept);
+    assert_eq!(ask(&turtl, status("s4b")).await["d"], json!({"has": true, "check": check}));
+    let again = ask(&turtl, json!(["s5", "seal:master:unwrap", wrapped, "a passphrase to keep"])).await;
+    assert_eq!(again["d"], json!({"kept": false, "check": check}), "{}", again);
+    // (another key is not taken over it)
+    let other = ask(&turtl, json!(["s5a", "seal:master:make", "a passphrase to keep"])).await;
+    let other_wrapped = String::from(other["d"]["wrapped"].as_str().unwrap());
+    assert_ne!(other["d"]["check"], json!(check));
+    let refused = ask(&turtl, json!(["s5b", "seal:master:unwrap", other_wrapped, "a passphrase to keep"])).await;
+    assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", refused);
+    assert_eq!(ask(&turtl, status("s5c")).await["d"], json!({"has": true, "check": check}), "and the key that is there is still there");
 
     // pages and a picture are sealed: under names that say nothing, and open again
     let page = "====== Home ======\nThe vault door code is 7391.\n";
@@ -2554,6 +2569,7 @@ async fn sealed_copies() {
     let second = ask(&turtl, json!(["s27", "user:join", "second-device", "another passphrase entirely"])).await;
     assert_eq!(second["e"], json!(0), "{}", second);
     assert_eq!(ask(&turtl, status("s28")).await["d"], json!({"has": false}));
+    assert_eq!(ask(&turtl, json!(["s28b", "seal:master:wrap", "another passphrase entirely"])).await["e"], json!(1), "there is no key to wrap");
     assert_eq!(ask(&turtl, open_args("s29", objects.iter().map(|o| item(o)).collect())).await["e"], json!(1), "without the key, nothing opens");
     let wrong = ask(&turtl, json!(["s30", "seal:master:unwrap", wrapped, "another passphrase entirely"])).await;
     assert_eq!(wrong["e"], json!(1), "the vault's own passphrase is not the one that wrapped it: {}", wrong);
@@ -2561,30 +2577,40 @@ async fn sealed_copies() {
     let junk = ask(&turtl, json!(["s32", "seal:master:unwrap", b64(&[1u8; 104]), "a passphrase to keep"])).await;
     assert_eq!(junk["e"], json!(1), "{}", junk);
     let taken = ask(&turtl, json!(["s33", "seal:master:unwrap", wrapped, "a passphrase to keep"])).await;
-    assert_eq!((&taken["e"], &taken["d"]), (&json!(0), &json!({"kept": true})), "{}", taken);
+    assert_eq!((&taken["e"], &taken["d"]), (&json!(0), &json!({"kept": true, "check": check})), "{}", taken);
     let now_opens = ask(&turtl, open_args("s34", objects.iter().map(|o| item(o)).collect())).await;
     assert_eq!(now_opens["e"], json!(0), "{}", now_opens);
     assert_eq!(crypto::from_base64(&String::from(now_opens["d"][0]["data"].as_str().unwrap())).unwrap(), page.as_bytes(), "the second vault opens what the first sealed");
     let twice = ask(&turtl, json!(["s35", "seal:master:unwrap", wrapped, "a passphrase to keep"])).await;
-    assert_eq!(twice["d"], json!({"kept": false}), "{}", twice);
+    assert_eq!(twice["d"], json!({"kept": false, "check": check}), "{}", twice);
 
-    // after the vault's passphrase changes, the key is wrapped again by the new one: a third vault takes it with the new passphrase and not the old
+    // after the vault's passphrase changes, the key is wrapped again by the new one: a third vault takes it with the new passphrase and not the old. (Only the vault's passphrase
+    // wraps it: not the one it had before the change, and not one that is not the vault's.)
+    let changed = ask(&turtl, json!(["s36a", "user:change-passphrase", "another passphrase entirely", "a newer passphrase for it"])).await;
+    assert_eq!(changed["e"], json!(0), "{}", changed);
+    for (i, passphrase) in ["another passphrase entirely", "something else altogether"].iter().enumerate() {
+        let refused = ask(&turtl, json!([format!("s36b{}", i), "seal:master:wrap", passphrase])).await;
+        assert_eq!((&refused["e"], &refused["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "{}: {}", passphrase, refused);
+    }
     let rewrapped = ask(&turtl, json!(["s36", "seal:master:wrap", "a newer passphrase for it"])).await;
     assert_eq!(rewrapped["e"], json!(0), "{}", rewrapped);
+    assert_eq!(rewrapped["d"]["check"], json!(check), "the same key");
     let newer = String::from(rewrapped["d"]["wrapped"].as_str().unwrap());
     assert_ne!(newer, wrapped);
     turtl.logout().unwrap();
     let third = ask(&turtl, json!(["s37", "user:join", "third-device", "a third passphrase altogether"])).await;
     assert_eq!(third["e"], json!(0), "{}", third);
     assert_eq!(ask(&turtl, json!(["s38", "seal:master:unwrap", newer, "a passphrase to keep"])).await["e"], json!(1), "the old passphrase no longer opens the new wrapping");
-    assert_eq!(ask(&turtl, json!(["s39", "seal:master:unwrap", newer, "a newer passphrase for it"])).await["d"], json!({"kept": true}));
+    assert_eq!(ask(&turtl, json!(["s39", "seal:master:unwrap", newer, "a newer passphrase for it"])).await["d"]["kept"], json!(true));
     assert_eq!(ask(&turtl, open_args("s40", objects.iter().map(|o| item(o)).collect())).await["e"], json!(0));
 
     // a vault that has a key of its own is not given another
     turtl.logout().unwrap();
     let fourth = ask(&turtl, json!(["s41", "user:join", "fourth-device", "a fourth passphrase altogether"])).await;
     assert_eq!(fourth["e"], json!(0), "{}", fourth);
-    assert_eq!(ask(&turtl, json!(["s42", "seal:master:create", "a fourth passphrase altogether"])).await["e"], json!(0));
+    let own = ask(&turtl, json!(["s42", "seal:master:make", "a fourth passphrase altogether"])).await;
+    assert_eq!(own["e"], json!(0), "{}", own);
+    assert_eq!(ask(&turtl, json!(["s42b", "seal:master:unwrap", own["d"]["wrapped"], "a fourth passphrase altogether"])).await["d"]["kept"], json!(true));
     let different = ask(&turtl, json!(["s43", "seal:master:unwrap", wrapped, "a passphrase to keep"])).await;
     assert_eq!((&different["e"], &different["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", different);
 
@@ -2609,7 +2635,9 @@ async fn sealed_key_is_kept_in_the_vault() {
         let a = started();
         let joined = ask(&a, json!(["k1", "user:join", name, passphrase])).await;
         assert_eq!(joined["e"], json!(0), "{}", joined);
-        assert_eq!(ask(&a, json!(["k2", "seal:master:create", passphrase])).await["e"], json!(0));
+        let made = ask(&a, json!(["k2", "seal:master:make", passphrase])).await;
+        assert_eq!(made["e"], json!(0), "{}", made);
+        assert_eq!(ask(&a, json!(["k2b", "seal:master:unwrap", made["d"]["wrapped"], passphrase])).await["d"]["kept"], json!(true));
         let sealed = ask(&a, json!(["k3", "seal:objects:seal", nb, [{"path": "Home.txt", "data": b64(b"The vault door code is 7391.")}]])).await;
         assert_eq!(sealed["e"], json!(0), "{}", sealed);
         let objects = sealed["d"].as_array().unwrap().clone();
@@ -2618,7 +2646,7 @@ async fn sealed_key_is_kept_in_the_vault() {
         assert_eq!(ask(&a, json!(["k4", "seal:master:status"])).await["e"], json!(1), "locked, there is no key to use");
         let back = ask(&a, json!(["k5", "user:login", name, passphrase])).await;
         assert_eq!(back["e"], json!(0), "{}", back);
-        assert_eq!(ask(&a, json!(["k6", "seal:master:status"])).await["d"], json!({"has": true}));
+        assert_eq!(ask(&a, json!(["k6", "seal:master:status"])).await["d"]["has"], json!(true));
         let opened = ask(&a, open_args("k7", &objects)).await;
         assert_eq!(opened["e"], json!(0), "{}", opened);
         assert_eq!(crypto::from_base64(&String::from(opened["d"][0]["data"].as_str().unwrap())).unwrap(), b"The vault door code is 7391.");
@@ -2635,7 +2663,7 @@ async fn sealed_key_is_kept_in_the_vault() {
     assert_eq!(restored["e"], json!(0), "{}", restored);
     let logged = ask(&b, json!(["k8", "user:login", name, passphrase])).await;
     assert_eq!(logged["e"], json!(0), "{}", logged);
-    assert_eq!(ask(&b, json!(["k9", "seal:master:status"])).await["d"], json!({"has": true}), "the key came with the backup");
+    assert_eq!(ask(&b, json!(["k9", "seal:master:status"])).await["d"]["has"], json!(true), "the key came with the backup");
     assert_eq!(ask(&b, open_args("k10", &objects)).await["e"], json!(0), "and what was sealed opens");
     // (the backup, like the files, holds nothing that can be read: the key is sealed in it by the vault's key)
     assert!(!bytes.windows(7).any(|w| w == b"7391.\"\n" || w == b"door co"));

@@ -3009,6 +3009,7 @@ try {
   // Encrypted notebooks, through the interface
   // ==========================================================================================
   const PASSPHRASE = "pale river stone lantern";
+  const NEXT_PASSPHRASE = "a quite different passphrase, long";
   const topDialog = (page) => page.locator("dialog.dialog").last();
   const noDialogs = (page) => page.waitForFunction(() => document.querySelectorAll("dialog.dialog").length === 0);
   const vaultDialog = (page, title) => page.locator("dialog.dialog", { has: page.getByRole("heading", { name: title, exact: true }) });
@@ -3069,6 +3070,30 @@ try {
     await noDialogs(page);
     await isEncryptedOpen(page);
   }
+
+  await app("on a phone the notebook menu does not run off the screen: it is moved in from the right edge, and scrolls when it is taller than what is left", { ...phone, viewport: { width: 390, height: 520 } }, async (ui) => {
+    const { page } = ui;
+    // (the Lock button is there once there is a vault, which puts the notebook's button away from the left edge; a long name makes the menu as wide as it may be)
+    await newEncryptedNotebook(ui, "A notebook with a name long enough to make the menu as wide as it may be");
+    await ui.openMenu();
+    const box = await page.evaluate(() => {
+      const menu = document.querySelector(".notebook-menu .menu");
+      const r = menu.getBoundingClientRect();
+      return { left: Math.round(r.left), right: Math.round(r.right), top: Math.round(r.top), bottom: Math.round(r.bottom), width: document.documentElement.clientWidth, height: window.innerHeight, scrolls: menu.scrollHeight > menu.clientHeight };
+    });
+    assert(box.left >= 0 && box.right <= box.width, `the menu is inside the width of the screen (${JSON.stringify(box)})`);
+    assert(box.bottom <= box.height, `and inside its height (${JSON.stringify(box)})`);
+    assert(box.scrolls, `and, being taller than what is left of the screen, it scrolls (${JSON.stringify(box)})`);
+    const last = await page.evaluate(() => {
+      const menu = document.querySelector(".notebook-menu .menu");
+      menu.scrollTop = menu.scrollHeight;
+      const items = [...menu.querySelectorAll("button")];
+      const r = items[items.length - 1].getBoundingClientRect();
+      return { bottom: Math.round(r.bottom), height: window.innerHeight, text: items[items.length - 1].textContent };
+    });
+    assert(last.bottom <= last.height, `the last line (${last.text}) can be reached: it is on the screen once the menu is scrolled (${JSON.stringify(last)})`);
+    if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, "menu-on-a-phone.png") });
+  });
 
   await app("an encrypted notebook is made with a passphrase, written in, locked, and unlocked again after a reload", {}, async (ui) => {
     const { page } = ui;
@@ -5202,14 +5227,15 @@ try {
       await B.says("was brought up to date from the server");
       assert((await B.ui.text()).includes("sent by itself"), "B has what A's pause sent");
 
-      // an encrypted notebook is never offered to the server
+      // an encrypted notebook can be kept on the server too (sealed: its own scenarios, further down), but is not synced until the person chooses, and making one sends nothing
       await newEncryptedNotebook(A.ui, "Private");
       await A.ui.openMenu();
       const lines = await A.ui.menu().getByRole("menuitem").allInnerTexts();
-      assert(!lines.some((l) => /Keep this notebook|Sync this notebook/.test(l)), `an encrypted notebook has no line about the server (${lines.join(" | ")})`);
-      assert(lines.includes("Open a notebook from the server…"), "but the server's notebooks can still be opened");
+      assert(lines.includes("Keep this notebook on the server…"), `an encrypted notebook can be kept on the server (${lines.join(" | ")})`);
+      assert(!lines.some((l) => /Sync this notebook now|Stop keeping/.test(l)), "but it is not synced before it is kept");
+      assert(lines.includes("Open a notebook from the server…"), "and the server's notebooks can still be opened");
       await A.page.keyboard.press("Escape");
-      assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 1, "and the server has no other notebook");
+      assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 1, "and nothing of it was sent: the server has no other notebook");
 
       // stop keeping it
       await B.choose("Stop keeping this notebook on the server…");
@@ -5942,7 +5968,7 @@ try {
   });
 
   // --- E16c: every notebook says whether it is encrypted and where it is kept, and a new one is made with both choices ---
-  await scenario("with an account server every notebook says whether it is encrypted and where it is kept, with its state; a new notebook is made with both choices, and an encrypted one is not offered to a server", async () => {
+  await scenario("with an account server every notebook says whether it is encrypted and where it is kept, with its state; a new notebook is made with both choices", async () => {
     const { Accounts } = await import("../../server/src/accounts.mjs");
     const { createApi } = await import("../../server/src/api.mjs");
     const { openDatabase } = await import("../../server/src/db.mjs");
@@ -6004,14 +6030,8 @@ try {
       assertEqual(places.length, 2, `this device and the server (${places.join(" | ")})`);
       assert(places[1].startsWith("On the server"), "the second place is the server");
       if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, "new-notebook-two-choices.png") });
-      // an encrypted notebook can't be sent: refused with the reason, and nothing is made
-      await ui.dialog().locator("#field-title").fill("Secret");
-      await ui.dialog().locator("#choice-kind").selectOption("encrypted");
-      await ui.dialog().locator("#choice-where").selectOption({ index: 1 });
-      await ui.dialog().getByRole("button", { name: "Create", exact: true }).click();
-      await ui.dialog().locator(".dialog-error").filter({ hasText: "An encrypted notebook can only be kept on this device for now" }).waitFor();
-      // (the same dialog, with the choice put right: not encrypted, on the server)
-      await ui.dialog().locator("#choice-kind").selectOption("open");
+      // (an encrypted notebook can be made on the server too, sealed: the scenarios of sealed copies below make one; a folder of Zim files can't be encrypted, and that is asked in the desktop program's)
+      assertEqual(await ui.dialog().locator("#choice-kind").inputValue(), "open", "the choice starts at not encrypted");
       await ui.dialog().locator("#field-title").fill("Shared one");
       await ui.dialog().locator("#choice-where").selectOption({ index: 1 });
       await ui.dialog().getByRole("button", { name: "Create", exact: true }).click();
@@ -6077,6 +6097,880 @@ try {
       withAccounts.closeAllConnections?.();
       withAccounts.close();
       db.close();
+    }
+  });
+
+  // --- E16d: an encrypted notebook kept on the server (or a connected service), sealed page by page ---
+
+  /** A real account server that serves the app, a second device for the same account when asked for, and what is needed to look at what the server holds. */
+  async function sealedRig({ webdav = false } = {}) {
+    const { Accounts } = await import("../../server/src/accounts.mjs");
+    const { createApi } = await import("../../server/src/api.mjs");
+    const { openDatabase } = await import("../../server/src/db.mjs");
+    const { OutboxMailer } = await import("../../server/src/mail.mjs");
+    const { OAuth } = await import("../../server/src/oauth.mjs");
+    const { randomBytes } = await import("node:crypto");
+    const dav = webdav ? (await import("../../server/test/fake-webdav.mjs")).fakeWebdav() : null;
+    const davUrl = dav ? await dav.start() : null;
+    const config = { baseUrl: "http://127.0.0.1", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: {}, ...(dav ? { connectorOptions: { allowInsecure: true, allowPrivate: true } } : {}) };
+    const db = openDatabase(":memory:");
+    const mailer = new OutboxMailer();
+    const accounts = new Accounts({ db, mailer, config });
+    const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+    const server = createStaticServer({ dir: dist, api });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const at = `http://127.0.0.1:${server.address().port}`;
+    config.baseUrl = at;
+    await accounts.register("ada@example.org", "correct horse battery");
+    accounts.verify("ada@example.org", /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1]);
+    const devices = [];
+    const rig = {
+      at,
+      db,
+      dav,
+      davUrl,
+      /** Another person's account (the password is the same as everybody's here). */
+      async addAccount(email) {
+        await accounts.register(email, "correct horse battery");
+        accounts.verify(email, /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1]);
+      },
+      /** A browser of its own, signed in to the account, with what it sends to the server collected. */
+      async device() {
+        const made = await openApp({ at });
+        made.context.setDefaultTimeout(60_000);
+        devices.push(made);
+        const { page } = made.ui;
+        const sent = [];
+        page.on("request", (request) => sent.push({ url: request.url(), method: request.method(), body: request.postData() ?? "" }));
+        const says = (text, timeout = 60_000) =>
+          page.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout }).catch(async () => {
+            throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await page.locator("#status").innerText())}`);
+          });
+        const choose = async (name) => {
+          await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+          await made.ui.openMenu();
+          await made.ui.menu().getByRole("menuitem", { name }).click();
+        };
+        const d = { ...made, page, sent, says, choose, dialog: () => topDialog(page) };
+        d.signIn = async (email = "ada@example.org") => {
+          await d.choose("Sign in or create an account…");
+          await d.dialog().getByLabel("E-mail address", { exact: true }).fill(email);
+          await d.dialog().getByLabel("Password", { exact: true }).fill("correct horse battery");
+          await d.dialog().getByRole("button", { name: "Sign in" }).click();
+          await d.says(`Signed in as ${email}`);
+        };
+        d.signOut = async (email = "ada@example.org") => {
+          await d.choose(`Account (${email})…`);
+          await d.dialog().getByRole("button", { name: "Sign out" }).click();
+          await d.says("Signed out");
+        };
+        d.rows = async () => {
+          await made.ui.openMenu();
+          const found = await made.ui.menu().getByRole("menuitemradio").evaluateAll((items) => items.map((i) => ({ title: i.querySelector("span").textContent, badges: [...i.querySelectorAll(".badge")].map((b) => b.textContent) })));
+          await page.keyboard.press("Escape");
+          return found;
+        };
+        d.shot = async (name) => {
+          if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, `${name}.png`) });
+        };
+        d.hasPage = (name) => page.evaluate((n) => window.__zim.app.session.has(n), name);
+        d.pageText = (name) => page.evaluate((n) => window.__zim.app.session.text(n), name);
+        d.makePage = (name, body) => page.evaluate(([n, b]) => window.__zim.app.session.save(n, `Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== ${n} ======\n${b}\n`), [name, body]);
+        return d;
+      },
+      /** Everything the server holds that a notebook's pages could be in: the objects, the names, the titles, the wrapped key. */
+      held() {
+        const files = db.prepare("select path, bytes from notebook_files").all().map((f) => ({ path: f.path, bytes: Buffer.from(f.bytes) }));
+        const books = db.prepare("select id, title from notebooks").all();
+        const keys = db.prepare("select wrapped, check_value as c from cloud_keys").all().map((k) => ({ wrapped: Buffer.from(k.wrapped), check: k.c }));
+        return { files, books, keys };
+      },
+      async close() {
+        for (const d of devices) await d.context.close();
+        server.closeAllConnections?.();
+        server.close();
+        dav?.stop();
+        db.close();
+      },
+    };
+    return rig;
+  }
+
+  /** Whether any of `needles` is in what the server holds (the objects, their names, the titles, the wrapped key) or in what a browser sent it. */
+  function leaks(rig, devices, needles) {
+    const found = [];
+    const { files, books, keys } = rig.held();
+    for (const needle of needles) {
+      const raw = Buffer.from(needle);
+      for (const f of files) if (f.bytes.includes(raw) || f.path.includes(needle)) found.push(`server object ${f.path}: ${needle}`);
+      for (const b of books) if (b.title.includes(needle) || b.id.includes(needle)) found.push(`server notebook ${b.id}: ${needle}`);
+      for (const k of keys) if (k.wrapped.includes(raw)) found.push(`server key: ${needle}`);
+      if (rig.dav) {
+        for (const [path, file] of rig.dav.files) if (file.bytes.includes(raw) || path.includes(needle)) found.push(`service file ${path}: ${needle}`);
+        for (const folder of rig.dav.folders) if (folder.includes(needle)) found.push(`service folder ${folder}: ${needle}`);
+      }
+      for (const d of devices) {
+        for (const request of d.sent) {
+          if (request.url.includes(needle) || request.body.includes(needle)) found.push(`request ${request.method} ${request.url}: ${needle}`);
+          // (what a request carries as base64: the bytes of the pages, in the form that goes out)
+          try {
+            const strings = [];
+            const collect = (value) => (typeof value === "string" ? strings.push(value) : Array.isArray(value) ? value.forEach(collect) : value && typeof value === "object" ? Object.values(value).forEach(collect) : undefined);
+            collect(JSON.parse(request.body));
+            for (const text of strings) if (/^[A-Za-z0-9+/]{8,}={0,2}$/.test(text) && Buffer.from(text, "base64").includes(raw)) found.push(`request ${request.method} ${request.url} (base64): ${needle}`);
+          } catch {
+            // (not JSON: the raw check above is all there is)
+          }
+        }
+      }
+    }
+    return found;
+  }
+
+  const SEALED_SECRETS = { text: "SEAL-MARKER-7731 the vault door code", notebook: "Zebra Journal", page: "Hidden Sub Page Name", section: "Hidden", second: "Quagga Plans", more: "wrote this on B", fromA: "a line from A" };
+  const SEALED_NEEDLES = ["SEAL-MARKER-7731", "vault door code", "Zebra", "Hidden Sub Page", "Quagga", "wrote this on B", "a line from A"];
+
+  await scenario("with an account server an encrypted notebook is kept sealed on the server: nothing readable leaves a browser or reaches the server, a second browser opens it with the passphrase that sealed it, pages merge both ways, and a page changed on both sides is asked about", async () => {
+    const rig = await sealedRig();
+    try {
+      const A = await rig.device();
+      await A.signIn();
+      await newEncryptedNotebook(A.ui, SEALED_SECRETS.notebook);
+      await A.ui.goto(`${SEALED_SECRETS.section}:${SEALED_SECRETS.page}`);
+      await A.ui.typeAtEnd(`${SEALED_SECRETS.text}\n`);
+      await A.ui.flush();
+      assertDeepEqual((await A.rows()).find((r) => r.title === SEALED_SECRETS.notebook).badges, ["Encrypted", "This device only"], "an encrypted notebook that is only here says so");
+
+      // keeping it on the server asks for the passphrase once, for the key that seals; a wrong one is refused in the dialog
+      await A.choose("Keep this notebook on the server…");
+      assert((await A.dialog().innerText()).includes("A sealed copy of"), "the dialog says that the copy is sealed");
+      await A.shot("sealed-keep-dialog");
+      if (process.env.SCREENSHOTS) {
+        // (pictures to look at, not checks: the long dialog on a phone, in the light and in the dark)
+        await A.page.setViewportSize({ width: 390, height: 760 });
+        await A.shot("sealed-keep-dialog-phone");
+        await A.page.emulateMedia({ colorScheme: "dark" });
+        await A.shot("sealed-keep-dialog-phone-dark");
+        await A.page.emulateMedia({ colorScheme: "light" });
+        await A.page.setViewportSize({ width: 1100, height: 900 });
+      }
+      await A.dialog().getByRole("button", { name: "Keep it there" }).click();
+      const key = A.dialog().filter({ has: A.page.getByRole("heading", { name: "Seal your encrypted notebooks for the server" }) });
+      await key.waitFor();
+      if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, "sealed-key-dialog.png") });
+      await key.getByLabel("Passphrase of the encrypted notebooks").fill("not the passphrase at all");
+      await key.getByRole("button", { name: "Seal and continue" }).click();
+      await key.locator(".dialog-error").filter({ hasText: "not the passphrase of the encrypted notebooks" }).waitFor();
+      assertEqual(rig.db.prepare("select count(*) as n from cloud_keys").get().n, 0, "a wrong passphrase makes no key");
+      await key.getByLabel("Passphrase of the encrypted notebooks").fill(PASSPHRASE);
+      await key.getByRole("button", { name: "Seal and continue" }).click();
+      await A.says(", sealed");
+      assertEqual(rig.db.prepare("select count(*) as n from cloud_keys").get().n, 1, "the account keeps the key, wrapped");
+      const books = rig.db.prepare("select id, title from notebooks").all();
+      assertEqual(books.length, 1, "one notebook on the server");
+      assertEqual(books[0].title, "Encrypted notebook", "which the server knows by a name that says nothing");
+      assert(books[0].id.startsWith("zsl-"), `and an id that says that it is sealed (${books[0].id})`);
+      for (const f of rig.held().files) assert(/^([0-9a-f]{32}|index)\.zseal$/.test(f.path), `every object is named by a hash: ${f.path}`);
+      assertDeepEqual(leaks(rig, [A], SEALED_NEEDLES), [], "nothing readable is on the server or in what the browser sent it");
+      assertDeepEqual((await A.rows()).find((r) => r.title === SEALED_SECRETS.notebook).badges, ["Encrypted", "Synced · server · up to date"], "the list says that it is encrypted and kept on the server");
+      const linkOnDisk = await A.page.evaluate(() => JSON.stringify({ ...localStorage }));
+      assert(!linkOnDisk.includes("sync:vault:") && !linkOnDisk.includes("zsl-"), `the link of an encrypted notebook is not in the browser's own storage (${linkOnDisk.slice(0, 200)})`);
+
+      // a second browser, with no vault: opening it makes the vault (a passphrase of its own), then asks for the passphrase that sealed the copy
+      const B = await rig.device();
+      await B.signIn();
+      await B.choose("Open a notebook from the server…");
+      await B.dialog().waitFor();
+      const options = await B.dialog().locator("option").allTextContents();
+      assertDeepEqual(options, ["Encrypted notebook, sealed (the server, " + options[0].match(/\d+ KB/)[0] + ")"], "the server's notebook is offered, and says only that it is sealed");
+      await B.shot("sealed-fetch-dialog");
+      await B.dialog().getByRole("button", { name: "Open" }).click();
+      const making = vaultDialog(B.page, "Encrypted notebooks");
+      await making.waitFor();
+      await making.getByLabel("Passphrase", { exact: true }).fill(NEXT_PASSPHRASE);
+      await making.getByLabel("Passphrase again").fill(NEXT_PASSPHRASE);
+      await making.getByLabel("I understand").check();
+      await making.getByRole("button", { name: "Create encrypted notebooks" }).click();
+      const taking = B.dialog().filter({ has: B.page.getByRole("heading", { name: "Open the key for sealed copies" }) });
+      await taking.waitFor();
+      await taking.getByLabel("Passphrase of the encrypted notebooks").fill(NEXT_PASSPHRASE);
+      await taking.getByRole("button", { name: "Open the key" }).click();
+      await taking.locator(".dialog-error").waitFor();
+      await B.shot("sealed-take-key-dialog");
+      if (process.env.SCREENSHOTS) {
+        await B.page.setViewportSize({ width: 390, height: 760 });
+        await B.shot("sealed-take-key-dialog-phone");
+        await B.page.emulateMedia({ colorScheme: "dark" });
+        await B.shot("sealed-take-key-dialog-phone-dark");
+        await B.page.emulateMedia({ colorScheme: "light" });
+        await B.page.setViewportSize({ width: 1100, height: 900 });
+      }
+      assert((await taking.locator(".dialog-error").innerText()).includes("does not open the key"), "this vault's own passphrase is not the one that sealed the copy: said so");
+      await taking.getByLabel("Passphrase of the encrypted notebooks").fill(PASSPHRASE);
+      await taking.getByRole("button", { name: "Open the key" }).click();
+      await B.says("was copied from the server, sealed");
+      await isEncryptedOpen(B.page);
+      assertEqual(await B.ui.notebookTitle(), SEALED_SECRETS.notebook, "the notebook is back under its name");
+      assert((await B.pageText(`${SEALED_SECRETS.section}:${SEALED_SECRETS.page}`)).includes(SEALED_SECRETS.text), "with its page");
+      assertDeepEqual((await B.rows()).find((r) => r.title === SEALED_SECRETS.notebook).badges, ["Encrypted", "Synced · server · up to date"], "and it says where it is kept");
+      await B.ui.openMenu();
+      await B.shot("sealed-notebook-list");
+      await B.page.keyboard.press("Escape");
+      if (process.env.SCREENSHOTS) {
+        await B.page.setViewportSize({ width: 390, height: 760 });
+        await B.ui.openMenu();
+        await B.shot("sealed-notebook-list-phone");
+        await B.page.emulateMedia({ colorScheme: "dark" });
+        await B.shot("sealed-notebook-list-phone-dark");
+        await B.page.emulateMedia({ colorScheme: "light" });
+        await B.page.keyboard.press("Escape");
+        await B.page.setViewportSize({ width: 1100, height: 900 });
+      }
+
+      // each writes, and the other brings it in (sealed on the way)
+      await B.ui.goto(`${SEALED_SECRETS.section}:${SEALED_SECRETS.page}`);
+      await B.ui.typeAtEnd(`${SEALED_SECRETS.more}\n`);
+      await B.ui.flush();
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to the server");
+      await A.choose("Sync this notebook now");
+      await A.says("was brought up to date from the server");
+      assert((await A.pageText(`${SEALED_SECRETS.section}:${SEALED_SECRETS.page}`)).includes(SEALED_SECRETS.more), "A has what B wrote");
+      // different pages merge by themselves
+      await A.makePage(SEALED_SECRETS.second, SEALED_SECRETS.fromA);
+      await B.makePage("Only on B Okapi", "b");
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to the server");
+      await A.choose("Sync this notebook now");
+      await A.says("was merged with the server (1 sent, 1 brought here)");
+      assert((await A.hasPage("Only on B Okapi")) && (await A.hasPage(SEALED_SECRETS.second)), "A has both pages");
+      await B.choose("Sync this notebook now");
+      await B.says("was brought up to date from the server");
+      assert(await B.hasPage(SEALED_SECRETS.second), "and B has A's");
+      // the same page changed on both sides: asked, and keeping both keeps both
+      await A.makePage("Shared Quokka", "A's version");
+      await B.makePage("Shared Quokka", "B's version");
+      await A.choose("Sync this notebook now");
+      await A.says("was sent to the server");
+      await B.choose("Sync this notebook now");
+      await B.page.getByRole("heading", { name: "Some pages changed in two places" }).waitFor();
+      await B.dialog().getByRole("button", { name: "Keep both" }).click();
+      await B.says("was merged with the server");
+      assert((await B.pageText("Shared Quokka")).includes("B's version") && (await B.pageText("Shared Quokka (conflict copy)")).includes("A's version"), "B keeps its page and the other beside it");
+      await A.choose("Sync this notebook now");
+      await A.says("was brought up to date from the server");
+      assert(await A.hasPage("Shared Quokka (conflict copy)"), "and A has both too");
+
+      // all along: nothing readable on the server, in what the two browsers sent, or in what they keep
+      assertDeepEqual(leaks(rig, [A, B], SEALED_NEEDLES), [], "nothing readable is on the server or in what the browsers sent it, after all that");
+      for (const d of [A, B]) {
+        const places = await keptByTheBrowser(d.page);
+        const forms = (needle) => [needle, Buffer.from(needle, "utf8").toString("latin1"), Buffer.from(needle, "utf16le").toString("latin1")];
+        for (const needle of [...SEALED_NEEDLES, "Shared Quokka", "Only on B Okapi", "conflict copy"]) {
+          const where = Object.entries(places).filter(([, value]) => forms(needle).some((form) => value.includes(form))).map(([place]) => place);
+          assertDeepEqual(where, [], `${JSON.stringify(needle)} is nowhere this browser keeps things (the vault holds it sealed)`);
+        }
+      }
+    } finally {
+      await rig.close();
+    }
+  });
+
+  /** Make an encrypted notebook on `device` and keep it sealed on the server, or in the connected service (its place in the list of places, 1 being the first service). Tells whether the passphrase was asked for. */
+  async function keepSealed(device, title, { where = 0, secret = null, first = true, passphrase = PASSPHRASE } = {}) {
+    await newEncryptedNotebook(device.ui, title, { first, passphrase });
+    if (secret) {
+      await device.ui.typeAtEnd(`${secret}\n`);
+      await device.ui.flush();
+    }
+    await device.choose("Keep this notebook on the server…");
+    const dialog = device.dialog();
+    if (where) await dialog.getByLabel("Where").selectOption({ index: where });
+    await dialog.getByRole("button", { name: "Keep it there" }).click();
+    // (the key's passphrase is asked for the first time only: either the question comes, or the notebook is kept at once)
+    const outcome = await device.page.waitForFunction(
+      () => {
+        if (document.querySelector("#status")?.textContent?.includes(", sealed")) return "done";
+        for (const h of document.querySelectorAll("dialog.dialog h1, dialog.dialog h2, dialog.dialog h3")) if (h.textContent === "Seal your encrypted notebooks for the server") return "asked";
+        return null;
+      },
+      null,
+      { timeout: 60_000 },
+    );
+    const asked = (await outcome.jsonValue()) === "asked";
+    if (asked) {
+      const key = device.dialog().filter({ has: device.page.getByRole("heading", { name: "Seal your encrypted notebooks for the server" }) });
+      await key.getByLabel("Passphrase of the encrypted notebooks").fill(passphrase);
+      await key.getByRole("button", { name: "Seal and continue" }).click();
+      await device.says(", sealed");
+    }
+    return asked;
+  }
+
+  /** What a second browser does to take a sealed notebook: its own vault, then the key from the account, with `passphrase`. Gives the dialog's error if there is one. */
+  async function takeSealed(device, { vaultPassphrase, passphrase, label = null, wrong = null }) {
+    await device.choose("Open a notebook from the server…");
+    await device.dialog().waitFor();
+    if (label) await device.dialog().locator("select").selectOption({ label });
+    await device.dialog().getByRole("button", { name: "Open" }).click();
+    const making = vaultDialog(device.page, "Encrypted notebooks");
+    await making.waitFor();
+    await making.getByLabel("Passphrase", { exact: true }).fill(vaultPassphrase);
+    await making.getByLabel("Passphrase again").fill(vaultPassphrase);
+    await making.getByLabel("I understand").check();
+    await making.getByRole("button", { name: "Create encrypted notebooks" }).click();
+    const taking = device.dialog().filter({ has: device.page.getByRole("heading", { name: "Open the key for sealed copies" }) });
+    await taking.waitFor();
+    let said = null;
+    if (wrong !== null) {
+      await taking.getByLabel("Passphrase of the encrypted notebooks").fill(wrong);
+      await taking.getByRole("button", { name: "Open the key" }).click();
+      await taking.locator(".dialog-error").waitFor();
+      said = await taking.locator(".dialog-error").innerText();
+    }
+    await taking.getByLabel("Passphrase of the encrypted notebooks").fill(passphrase);
+    await taking.getByRole("button", { name: "Open the key" }).click();
+    await device.says("was copied from");
+    return said;
+  }
+
+  await scenario("a sealed notebook survives a lock and a change of passphrase (the account's key is wrapped again: a new browser needs the new passphrase), refuses a copy that was put back, changed or mixed up, and stopping deletes the sealed copy", async () => {
+    const rig = await sealedRig();
+    try {
+      const A = await rig.device();
+      await A.signIn();
+      await keepSealed(A, SEALED_SECRETS.notebook, { secret: SEALED_SECRETS.text });
+      const keyRow = () => rig.db.prepare("select wrapped, check_value as c from cloud_keys").get();
+      const first = { wrapped: Buffer.from(keyRow().wrapped).toString("hex"), check: keyRow().c };
+      const badgesOf = async (d) => (await d.rows()).find((r) => r.title === SEALED_SECRETS.notebook).badges;
+      const stateOf = (d) => d.page.evaluate(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") ?? null);
+
+      // a lock hides the notebook, its link and its state, says nothing of it, and sends nothing; unlocking brings the link back from the vault
+      const before = A.sent.length;
+      await A.ui.openMenu();
+      await A.ui.menu().getByRole("menuitem", { name: "Lock encrypted notebooks" }).click();
+      await lockButtonHidden(A.page);
+      const status = await A.page.locator("#status").innerText();
+      for (const secret of [SEALED_SECRETS.notebook, "Zebra", "SEAL", "zsl-"]) assert(!status.includes(secret), `what the screen says after a lock names nothing: ${status}`);
+      const shown = await A.page.evaluate(() => document.body.innerText);
+      for (const secret of [SEALED_SECRETS.notebook, "Zebra", SEALED_SECRETS.page, "SEAL-MARKER", "zsl-"]) assert(!shown.includes(secret), `and neither does the page (${secret})`);
+      await A.page.waitForTimeout(1500);
+      assertEqual(A.sent.slice(before).filter((r) => r.url.includes("/api/sync/")).length, 0, "nothing is asked of the server while the vault is locked");
+      assertEqual(await A.page.evaluate(() => window.__zim.app.sync.hasVaultLinks()), false, "and the program does not hold where the encrypted notebooks are kept while the vault is locked");
+      await unlockFromMenu(A.ui, PASSPHRASE);
+      assertEqual(await A.page.evaluate(() => window.__zim.app.sync.hasVaultLinks()), true, "(it reads it from the vault again once it is unlocked)");
+      const afterUnlock = await badgesOf(A);
+      assert(afterUnlock[0] === "Encrypted" && afterUnlock[1].startsWith("Synced · server"), `after the unlock the notebook is still kept on the server (its link was in the vault): ${afterUnlock}`);
+
+      // a lock that comes while a send is under way: nothing is said of the notebook afterwards, and the link is not held again
+      await A.makePage("Late page", "typed just before the lock");
+      let release;
+      const gate = new Promise((resolve) => (release = resolve));
+      await A.page.route("**/api/sync/notebooks/**", async (route) => {
+        if (route.request().method() === "GET") return route.continue();
+        await gate;
+        return route.continue();
+      });
+      await A.choose("Sync this notebook now");
+      await A.page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "sending");
+      await A.ui.openMenu();
+      await A.ui.menu().getByRole("menuitem", { name: "Lock encrypted notebooks" }).click();
+      await lockButtonHidden(A.page);
+      release();
+      await A.page.waitForTimeout(2500);
+      const quiet = await A.page.locator("#status").innerText();
+      for (const secret of [SEALED_SECRETS.notebook, "Zebra", "Late", "sent to the server", "Couldn't sync"]) assert(!quiet.includes(secret), `a send that was under way when the vault was locked says nothing afterwards (${secret}): ${quiet}`);
+      assertEqual(await A.page.evaluate(() => window.__zim.app.sync.hasVaultLinks()), false, "and the link is not held again");
+      await A.page.unroute("**/api/sync/notebooks/**");
+      await unlockFromMenu(A.ui, PASSPHRASE);
+      await A.page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "ok", null, { timeout: 45_000 });
+      assert(await A.hasPage("Late page"), "the page typed before the lock is still there");
+
+      // a change of passphrase wraps the account's key again (the same key: its check value is the same)
+      await A.ui.openMenu();
+      await A.ui.menu().getByRole("menuitem", { name: "Change the passphrase…" }).click();
+      const change = vaultDialog(A.page, "Change the passphrase");
+      await change.getByLabel("Current passphrase").fill(PASSPHRASE);
+      await change.getByLabel("New passphrase", { exact: true }).fill(NEXT_PASSPHRASE);
+      await change.getByLabel("New passphrase again").fill(NEXT_PASSPHRASE);
+      await change.getByLabel("I understand").check();
+      await change.getByRole("button", { name: "Change the passphrase" }).click();
+      await noDialogs(A.page);
+      const second = { wrapped: Buffer.from(keyRow().wrapped).toString("hex"), check: keyRow().c };
+      assert(second.wrapped !== first.wrapped, "the account's wrapped key is another one now");
+      assertEqual(second.check, first.check, "and it wraps the same key");
+
+      // a third browser: the old passphrase no longer opens the key, the new one does
+      const C = await rig.device();
+      await C.signIn();
+      const said = await takeSealed(C, { vaultPassphrase: "yet another long passphrase here", passphrase: NEXT_PASSPHRASE, wrong: PASSPHRASE });
+      assert(said && said.includes("does not open the key"), `the old passphrase is refused for the new wrapping: ${said}`);
+      await isEncryptedOpen(C.page);
+      assert((await C.pageText("Home")).includes(SEALED_SECRETS.text), "the new one opens it, with its page");
+
+      // the server's rows, as they are at a moment (what a restore of an old backup of the server would put back)
+      const snapshot = () => ({
+        book: rig.db.prepare("select * from notebooks").all().map((r) => ({ ...r })),
+        files: rig.db.prepare("select * from notebook_files").all().map((r) => ({ ...r, bytes: Buffer.from(r.bytes) })),
+      });
+      const restore = (state) => {
+        rig.db.exec("delete from notebook_files; delete from notebooks");
+        for (const r of state.book) rig.db.prepare("insert into notebooks (user_id, id, title, revision, updated_at) values (?, ?, ?, ?, ?)").run(r.user_id, r.id, r.title, r.revision, r.updated_at);
+        for (const r of state.files) rig.db.prepare("insert into notebook_files (user_id, notebook_id, path, bytes) values (?, ?, ?, ?)").run(r.user_id, r.notebook_id, r.path, r.bytes);
+      };
+      const setBytes = (row, bytes) => rig.db.prepare("update notebook_files set bytes = ? where user_id = ? and notebook_id = ? and path = ?").run(bytes, row.user_id, row.notebook_id, row.path);
+      const syncAndSay = async (d, pattern) => {
+        await d.choose("Sync this notebook now");
+        await d.page.waitForFunction((source) => new RegExp(source).test(document.querySelector("#status")?.textContent ?? ""), pattern, { timeout: 30_000 }).catch(async () => {
+          throw new Error(`the status line never matched /${pattern}/: it says ${JSON.stringify(await d.page.locator("#status").innerText())}`);
+        });
+      };
+
+      await A.makePage("Quokka notes", "version one");
+      await syncAndSay(A, "was sent to the server");
+      const one = snapshot();
+      await A.makePage("Quokka notes", "version two");
+      await syncAndSay(A, "was sent to the server");
+      const two = snapshot();
+      const changedObjects = two.files.filter((f) => f.path !== "index.zseal" && one.files.some((g) => g.path === f.path && !g.bytes.equals(f.bytes)));
+      assertEqual(changedObjects.length, 1, "the page that changed is one object, under the same name");
+
+      // a whole old copy put back (the index's counter is older than the one this device has seen)
+      restore(one);
+      await syncAndSay(A, "older than one this device has seen");
+      assertEqual(await stateOf(A), "error", "the notebook's state is a problem");
+      restore(two);
+      await syncAndSay(A, "up to date on the server");
+
+      // an index that was changed by one bit
+      const index = rig.db.prepare("select user_id, notebook_id, path, bytes from notebook_files where path = 'index.zseal'").get();
+      const flipped = Buffer.from(index.bytes);
+      flipped[flipped.length - 3] ^= 0x01;
+      setBytes(index, flipped);
+      await syncAndSay(A, "can't be opened: it was sealed with another key, or it was changed");
+      setBytes(index, Buffer.from(index.bytes));
+
+      // a page's object that is not there, though the index lists it (a copy that is being written, or that was damaged)
+      const missing = two.files.find((f) => f.path !== "index.zseal" && f.path !== changedObjects[0].path);
+      rig.db.prepare("delete from notebook_files where user_id = ? and notebook_id = ? and path = ?").run(missing.user_id, missing.notebook_id, missing.path);
+      await syncAndSay(A, "is missing a page");
+      rig.db.prepare("insert into notebook_files (user_id, notebook_id, path, bytes) values (?, ?, ?, ?)").run(missing.user_id, missing.notebook_id, missing.path, missing.bytes);
+
+      // a page's object replaced by an older one of the same page (it opens, it is the page's own, but it is not the one the index lists)
+      const object = changedObjects[0];
+      const olderBytes = one.files.find((f) => f.path === object.path).bytes;
+      setBytes({ user_id: object.user_id, notebook_id: object.notebook_id, path: object.path }, olderBytes);
+      await syncAndSay(C, "is not the one its index lists");
+      // a page's object damaged
+      const damaged = Buffer.from(object.bytes);
+      damaged[damaged.length - 3] ^= 0x01;
+      setBytes({ user_id: object.user_id, notebook_id: object.notebook_id, path: object.path }, damaged);
+      await syncAndSay(C, "can't be opened: the copy was changed");
+      assert(!(await C.hasPage("Quokka notes")), "and nothing of the page reached the notebook");
+      // an object under another's name (every name is part of what an object is sealed with)
+      const other = two.files.find((f) => f.path !== "index.zseal" && f.path !== object.path);
+      setBytes({ user_id: object.user_id, notebook_id: object.notebook_id, path: object.path }, other.bytes);
+      await syncAndSay(C, "can't be opened: the copy was changed");
+      // the copy as it was: it is brought in
+      setBytes({ user_id: object.user_id, notebook_id: object.notebook_id, path: object.path }, object.bytes);
+      await syncAndSay(C, "was brought up to date from the server");
+      assert((await C.pageText("Quokka notes")).includes("version two"), "once the copy is as it was, C has the page, in its second version");
+
+      assertDeepEqual(leaks(rig, [A, C], [...SEALED_NEEDLES, "Quokka", "version one", "version two", "Late page", "typed just before"]), [], "nothing readable is on the server or went to it, after all that");
+
+      // stopping deletes the sealed copy
+      await A.choose("Stop keeping this notebook on the server…");
+      assert((await A.dialog().innerText()).includes("Also delete its sealed copy on the server"), "the dialog speaks of the sealed copy");
+      await A.dialog().getByRole("button", { name: "Stop" }).click();
+      await A.says("The copy was deleted.");
+      assertEqual(rig.db.prepare("select count(*) as n from notebooks").get().n + rig.db.prepare("select count(*) as n from notebook_files").get().n, 0, "nothing of the notebook is left on the server");
+      assertEqual(rig.db.prepare("select count(*) as n from cloud_keys").get().n, 1, "(the account's key stays: it belongs to the vault, not to a notebook)");
+      assertDeepEqual(await badgesOf(A), ["Encrypted", "This device only"], "and the notebook is only here again");
+      assertDeepEqual(leaks(rig, [A, C], [...SEALED_NEEDLES, "Quokka", "version one", "version two", "Late page", "typed just before"]), [], "nor in anything that was sent while stopping");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  await scenario("an encrypted notebook is kept sealed in a folder of a connected WebDAV service: only hashed objects are there, the index is written last, a second browser opens it, and stopping deletes the sealed objects", async () => {
+    const rig = await sealedRig({ webdav: true });
+    try {
+      const { dav } = rig;
+      const A = await rig.device();
+      await A.signIn();
+      await A.choose("Connected services…");
+      await A.dialog().getByRole("button", { name: "Connect Nextcloud / ownCloud / WebDAV…" }).click();
+      const connect = A.dialog();
+      await connect.getByLabel("Name", { exact: true }).fill("My Nextcloud");
+      await connect.getByLabel("Folder address", { exact: true }).fill(rig.davUrl);
+      await connect.getByLabel("User name", { exact: true }).fill("ada");
+      await connect.getByLabel("App password", { exact: true }).fill("app-password");
+      await connect.getByRole("button", { name: "Test and connect" }).click();
+      await A.says("Connected: My Nextcloud");
+
+      await newEncryptedNotebook(A.ui, SEALED_SECRETS.notebook);
+      await A.ui.goto(`${SEALED_SECRETS.section}:${SEALED_SECRETS.page}`);
+      await A.ui.typeAtEnd(`${SEALED_SECRETS.text}\n`);
+      await A.ui.flush();
+      await A.choose("Keep this notebook on the server…");
+      await A.dialog().getByLabel("Where").selectOption({ index: 1 });
+      await A.dialog().getByRole("button", { name: "Keep it there" }).click();
+      const key = A.dialog().filter({ has: A.page.getByRole("heading", { name: "Seal your encrypted notebooks for the server" }) });
+      await key.waitFor();
+      await key.getByLabel("Passphrase of the encrypted notebooks").fill(PASSPHRASE);
+      await key.getByRole("button", { name: "Seal and continue" }).click();
+      await A.says("is kept on My Nextcloud, sealed");
+
+      const folders = [...dav.folders].filter((f) => f && !f.includes("/"));
+      assertEqual(folders.length, 1, "one folder was made on the service");
+      assert(folders[0].startsWith("zsl-"), `named so that it says it is sealed, and nothing else (${folders[0]})`);
+      const objects = [...dav.files.keys()].filter((f) => f.startsWith(`${folders[0]}/`)).map((f) => f.slice(folders[0].length + 1));
+      assert(objects.length >= 3 && objects.every((f) => /^([0-9a-f]{32}|index)\.zseal$/.test(f)), `the service holds hashed objects and an index, nothing with a page's name: ${objects}`);
+      assertEqual(rig.db.prepare("select count(*) as n from notebooks").get().n, 0, "the account's own space holds nothing of it");
+      assertEqual(rig.db.prepare("select count(*) as n from cloud_keys").get().n, 1, "(the account keeps the wrapped key, so that another device can open the copy)");
+      assertDeepEqual(leaks(rig, [A], SEALED_NEEDLES), [], "nothing readable is on the service, in the server's database or in what the browser sent");
+      const rowOf = async (d) => (await d.rows()).find((r) => r.title === SEALED_SECRETS.notebook);
+      assertDeepEqual((await rowOf(A)).badges, ["Encrypted", "Synced · My Nextcloud · up to date"], "the list says where it is kept");
+
+      // a second browser opens it from the service's listing (and takes the key from the account)
+      const B = await rig.device();
+      await B.signIn();
+      await B.choose("Open a notebook from the server…");
+      await B.dialog().waitFor();
+      assertDeepEqual(await B.dialog().locator("option").allTextContents(), ["Encrypted notebook, sealed (My Nextcloud)"], "the service's folder is offered by what it is, not by what it holds");
+      await B.dialog().getByRole("button", { name: "Open" }).click();
+      const making = vaultDialog(B.page, "Encrypted notebooks");
+      await making.waitFor();
+      await making.getByLabel("Passphrase", { exact: true }).fill(NEXT_PASSPHRASE);
+      await making.getByLabel("Passphrase again").fill(NEXT_PASSPHRASE);
+      await making.getByLabel("I understand").check();
+      await making.getByRole("button", { name: "Create encrypted notebooks" }).click();
+      const taking = B.dialog().filter({ has: B.page.getByRole("heading", { name: "Open the key for sealed copies" }) });
+      await taking.waitFor();
+      await taking.getByLabel("Passphrase of the encrypted notebooks").fill(PASSPHRASE);
+      await taking.getByRole("button", { name: "Open the key" }).click();
+      await B.says("was copied from My Nextcloud, sealed");
+      await isEncryptedOpen(B.page);
+      assertEqual(await B.ui.notebookTitle(), SEALED_SECRETS.notebook, "it comes back under its name");
+      assert((await B.pageText(`${SEALED_SECRETS.section}:${SEALED_SECRETS.page}`)).includes(SEALED_SECRETS.text), "with its page");
+
+      // one page changes: one object and the index go, the index last
+      await B.ui.goto(`${SEALED_SECRETS.section}:${SEALED_SECRETS.page}`);
+      await B.ui.typeAtEnd(`${SEALED_SECRETS.more}\n`);
+      await B.ui.flush();
+      const before = dav.log.length;
+      await B.choose("Sync this notebook now");
+      await B.says("was sent to My Nextcloud");
+      const wrote = dav.log.slice(before).filter((l) => l.startsWith("PUT ")).map((l) => decodeURIComponent(l.split(" ")[1].split("/").slice(-1)[0]));
+      assertEqual(wrote.length, 2, `two files were written (${wrote})`);
+      assertEqual(wrote[1], "index.zseal", "the index last, so that no reader finds an index that lists what is not there yet");
+      await A.choose("Sync this notebook now");
+      await A.says("was brought up to date from My Nextcloud");
+      assert((await A.pageText(`${SEALED_SECRETS.section}:${SEALED_SECRETS.page}`)).includes(SEALED_SECRETS.more), "A has what B wrote");
+      assertDeepEqual(leaks(rig, [A, B], SEALED_NEEDLES), [], "nothing readable anywhere, after that");
+
+      // stopping deletes the sealed folder on the service
+      await A.choose("Stop keeping this notebook on the server…");
+      assert((await A.dialog().innerText()).includes("Also delete its sealed copy on the service"), "the dialog speaks of the sealed copy on the service");
+      await A.dialog().getByRole("button", { name: "Stop" }).click();
+      await A.says("The copy was deleted.");
+      assertEqual([...dav.files.keys()].filter((k) => k.startsWith(`${folders[0]}/`)).length, 0, "the sealed objects are gone from the service (the empty folder is left, as for any notebook: a folder is the person's)");
+      assertDeepEqual((await rowOf(A)).badges, ["Encrypted", "This device only"], "and the notebook is only here again");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  await scenario("a sealed notebook is kept in step by itself (typing is sent sealed; a lock and an unlock bring the other device's changes); a second notebook asks no passphrase; one that is on the device is not copied twice", async () => {
+    const rig = await sealedRig();
+    try {
+      const A = await rig.device();
+      await A.signIn();
+      assertEqual(await keepSealed(A, SEALED_SECRETS.notebook, { secret: SEALED_SECRETS.text }), true, "the first notebook asks for the passphrase");
+      const B = await rig.device();
+      await B.signIn();
+      await takeSealed(B, { vaultPassphrase: NEXT_PASSPHRASE, passphrase: PASSPHRASE });
+      const stateOf = (d) => d.page.evaluate(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") ?? null);
+      const index = () => Buffer.from(rig.db.prepare("select bytes from notebook_files where path = 'index.zseal'").get().bytes).toString("hex");
+
+      // typing is sent by itself, sealed
+      const before = index();
+      await A.ui.typeAtEnd(`${SEALED_SECRETS.fromA}\n`);
+      await A.page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "pending");
+      await A.page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "ok", null, { timeout: 45_000 });
+      assert(index() !== before, "the sealed index on the server changed by itself");
+      assertDeepEqual(leaks(rig, [A, B], SEALED_NEEDLES), [], "and nothing readable went with it");
+
+      // a page deleted here is deleted there, its object with it
+      const objects = () => rig.db.prepare("select count(*) as n from notebook_files").get().n;
+      await A.makePage("Doomed page", "to be deleted");
+      await A.choose("Sync this notebook now");
+      await A.says("was sent to the server");
+      const withIt = objects();
+      await A.page.evaluate(() => window.__zim.app.session.delete("Doomed page"));
+      await A.choose("Sync this notebook now");
+      await A.says("was sent to the server");
+      assertEqual(objects(), withIt - 1, "the object of the page that was deleted is deleted on the server");
+
+      // the other device, locked and unlocked, brings it in by itself (the link is read from the vault, then the copy is compared)
+      await B.ui.openMenu();
+      await B.ui.menu().getByRole("menuitem", { name: "Lock encrypted notebooks" }).click();
+      await lockButtonHidden(B.page);
+      await unlockFromMenu(B.ui, NEXT_PASSPHRASE);
+      await B.page.waitForFunction((t) => window.__zim.app.session.text("Home").includes(t), SEALED_SECRETS.fromA, { timeout: 45_000 });
+      // (the page is shown before the sync is over: it still has to write down where it got to)
+      await B.page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "ok", null, { timeout: 45_000 });
+      assertEqual(await stateOf(B), "ok", "and says that it is up to date");
+
+      // the morning after: the page is loaded again (nothing is known of the account yet, and the vault is locked), unlocked, and the newest change is there without anybody asking
+      await A.ui.typeAtEnd(`${SEALED_SECRETS.more}\n`);
+      await A.page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "pending");
+      await A.page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "ok", null, { timeout: 45_000 });
+      // (the server is slow to say who is signed in: the menu does not wait for it, and the unlock is over before it answers; the notebook is brought up to date when it does)
+      await B.page.route("**/api/me", async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 6000));
+        await route.continue();
+      });
+      await B.ui.reload();
+      await unlockFromMenu(B.ui, NEXT_PASSPHRASE);
+      await B.page.waitForFunction((t) => window.__zim.app.session.text("Home").includes(t), SEALED_SECRETS.more, { timeout: 45_000 });
+      await B.page.unroute("**/api/me");
+
+      // a notebook that is on the device is offered, while the vault is locked (nothing can say that it is here), and is not copied a second time
+      await A.ui.openMenu();
+      await A.ui.menu().getByRole("menuitem", { name: "Lock encrypted notebooks" }).click();
+      await lockButtonHidden(A.page);
+      await A.choose("Open a notebook from the server…");
+      await A.dialog().waitFor();
+      assertEqual((await A.dialog().locator("option").allTextContents()).length, 1, "the sealed notebook is offered, as nothing says that it is here while the vault is locked");
+      await A.dialog().getByRole("button", { name: "Open" }).click();
+      const unlocking = vaultDialog(A.page, "Unlock encrypted notebooks");
+      await unlocking.getByLabel("Passphrase").fill(PASSPHRASE);
+      await unlocking.getByRole("button", { name: "Unlock", exact: true }).click();
+      const again = A.dialog().filter({ has: A.page.getByRole("heading", { name: "Open a notebook from the server" }) });
+      await again.locator(".dialog-error").filter({ hasText: "That notebook is on this device already" }).waitFor();
+      await again.getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(A.page);
+      const titles = (await A.rows()).map((r) => r.title).filter((t) => t === SEALED_SECRETS.notebook);
+      assertEqual(titles.length, 1, "there is still one copy of it on the device");
+      await A.choose("Open a notebook from the server…");
+      assert((await A.dialog().innerText()).includes("There is nothing to open"), "and once the vault is unlocked the list says that nothing is left to open");
+      await A.dialog().getByRole("button", { name: "Close" }).click();
+
+      // a second encrypted notebook, made from the New notebook dialog with both choices (encrypted, on the server): the key is there, nothing is asked
+      await A.ui.openMenu();
+      await A.ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+      const creating = A.dialog();
+      await creating.getByLabel("Name").fill(SEALED_SECRETS.second);
+      await creating.getByLabel("Encryption").selectOption("encrypted");
+      await creating.getByLabel("Where").selectOption("account");
+      await creating.getByLabel("Start with").selectOption("empty");
+      await A.page.evaluate(() => (document.querySelector("#status").textContent = ""));
+      await creating.getByRole("button", { name: "Create", exact: true }).click();
+      await A.says(", sealed");
+      await noDialogs(A.page);
+      assertEqual(rig.db.prepare("select count(*) as n from notebooks").get().n, 2, "two sealed notebooks on the server");
+      assertEqual(rig.db.prepare("select count(*) as n from cloud_keys").get().n, 1, "and one key");
+      // the other device finds only the one it has not got, and opens it with no question either
+      await B.choose("Open a notebook from the server…");
+      await B.dialog().waitFor();
+      assertEqual((await B.dialog().locator("option").allTextContents()).length, 1, "B is offered the one it has not got");
+      await B.dialog().getByRole("button", { name: "Open" }).click();
+      await B.says("was copied from the server, sealed");
+      assertEqual(await B.ui.notebookTitle(), SEALED_SECRETS.second, "which comes back under its name");
+      assertDeepEqual(leaks(rig, [A, B], SEALED_NEEDLES), [], "nothing readable anywhere");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  await scenario("a passphrase changed while signed out leaves the account's key wrapped by the old one: the menu line wraps it again (the old passphrase is refused), and a new browser then needs the new one", async () => {
+    const rig = await sealedRig();
+    try {
+      const A = await rig.device();
+      await A.signIn();
+      await keepSealed(A, SEALED_SECRETS.notebook, { secret: SEALED_SECRETS.text });
+      const wrapped = () => Buffer.from(rig.db.prepare("select wrapped from cloud_keys").get().wrapped).toString("hex");
+      const original = wrapped();
+      await A.signOut();
+      assertEqual(await A.page.locator(".notebook-button .badge.sync").count(), 0, "signed out, the title does not go on saying that the notebook is synced");
+      await A.ui.openMenu();
+      await A.ui.menu().getByRole("menuitem", { name: "Change the passphrase…" }).click();
+      const change = vaultDialog(A.page, "Change the passphrase");
+      await change.getByLabel("Current passphrase").fill(PASSPHRASE);
+      await change.getByLabel("New passphrase", { exact: true }).fill(NEXT_PASSPHRASE);
+      await change.getByLabel("New passphrase again").fill(NEXT_PASSPHRASE);
+      await change.getByLabel("I understand").check();
+      await change.getByRole("button", { name: "Change the passphrase" }).click();
+      const told = vaultDialog(A.page, "The key for sealed copies is still wrapped by the old passphrase");
+      await told.waitFor();
+      assert((await told.innerText()).includes("not signed in"), "it says why: the account could not be reached");
+      await A.shot("sealed-stale-wrap-message");
+      await told.getByRole("button", { name: "OK" }).click();
+      await noDialogs(A.page);
+      assertEqual(wrapped(), original, "the account's copy of the key is still the old one");
+
+      await A.signIn();
+      await A.page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "ok", null, { timeout: 45_000 });
+      await A.choose("Update the passphrase of the sealed copies…");
+      const update = A.dialog();
+      await A.shot("sealed-update-dialog");
+      await update.getByLabel("Passphrase of the encrypted notebooks").fill(PASSPHRASE);
+      await update.getByRole("button", { name: "Wrap the key again" }).click();
+      await update.locator(".dialog-error").filter({ hasText: "not the passphrase of the encrypted notebooks" }).waitFor();
+      assertEqual(wrapped(), original, "the old passphrase wraps nothing: the vault says no");
+      await update.getByLabel("Passphrase of the encrypted notebooks").fill(NEXT_PASSPHRASE);
+      await update.getByRole("button", { name: "Wrap the key again" }).click();
+      await noDialogs(A.page);
+      assert(wrapped() !== original, "the new passphrase wraps it: the account's copy changed");
+      await A.page.waitForFunction(() => document.querySelector("#status")?.textContent?.includes("wrapped by the new passphrase"));
+
+      const C = await rig.device();
+      await C.signIn();
+      const said = await takeSealed(C, { vaultPassphrase: "yet another long passphrase here", passphrase: NEXT_PASSPHRASE, wrong: PASSPHRASE });
+      assert(said && said.includes("does not open the key"), `a new browser is refused the old passphrase: ${said}`);
+      assert((await C.pageText("Home")).includes(SEALED_SECRETS.text), "and opens the notebook with the new one");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  await scenario("the key for sealed copies belongs to one account: a vault with another account's key is told so (and opens nothing of it); a vault with a key gives it to a new account, wrapped", async () => {
+    const rig = await sealedRig();
+    try {
+      await rig.addAccount("grace@example.org");
+      await rig.addAccount("heidi@example.org");
+      const A = await rig.device();
+      await A.signIn();
+      await keepSealed(A, SEALED_SECRETS.notebook, { secret: SEALED_SECRETS.text });
+      const checks = () => rig.db.prepare("select u.email as email, k.check_value as c from cloud_keys k join users u on u.id = k.user_id order by u.email").all().map((r) => `${r.email}:${r.c}`);
+      assertEqual(checks().length, 1, "one account has a key");
+
+      // another person's vault, with its own key for its own account
+      const D = await rig.device();
+      await D.signIn("grace@example.org");
+      await keepSealed(D, SEALED_SECRETS.second, { secret: "grace's text" });
+      assertEqual(checks().length, 2, "a second key, for the second account");
+      const graces = checks().find((c) => c.startsWith("grace@example.org:"));
+      assert(graces !== checks().find((c) => c.startsWith("ada@example.org:")), "which is another key");
+
+      // that vault, signed in to the first account: its key is not that account's key
+      await D.signOut("grace@example.org");
+      await D.signIn("ada@example.org");
+      await newEncryptedNotebook(D.ui, "Okapi", { first: false });
+      await D.choose("Keep this notebook on the server…");
+      await D.dialog().getByRole("button", { name: "Keep it there" }).click();
+      const refused = D.dialog().filter({ has: D.page.getByRole("heading", { name: "Keep this notebook on the server" }) });
+      await refused.locator(".dialog-error").filter({ hasText: "is not the one of this account" }).waitFor();
+      await refused.getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(D.page);
+      assertEqual(rig.db.prepare("select count(*) as n from notebooks").get().n, 2, "nothing of the notebook was sent (the two that are there are the two that were kept)");
+      await D.choose("Open a notebook from the server…");
+      await D.dialog().waitFor();
+      await D.dialog().getByRole("button", { name: "Open" }).click();
+      await D.dialog().locator(".dialog-error").filter({ hasText: "is not the one of this account" }).waitFor();
+      await D.dialog().getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(D.page);
+
+      // a third account has no key: the vault's own is wrapped by the passphrase and kept there, so that it is the same key everywhere
+      await D.signOut("ada@example.org");
+      await D.signIn("heidi@example.org");
+      assertEqual(await keepSealed(D, "Okapi too", { first: false }), true, "the passphrase is asked for, to wrap the key that the vault has");
+      const all = checks();
+      assertEqual(all.length, 3, "the third account has a key now");
+      assertEqual(all.find((c) => c.startsWith("heidi@example.org:")).split(":")[1], graces.split(":")[1], "which is the vault's own key (the same check value), wrapped for that account");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  await scenario("two browsers that make the account's first key at the same moment end with one key: the later one takes the earlier one's, and what it seals afterwards opens on the first", async () => {
+    const rig = await sealedRig();
+    try {
+      const A = await rig.device();
+      await A.signIn();
+      const B = await rig.device();
+      await B.signIn();
+      // each has a vault (the same passphrase) and a notebook, and both open the question before either answers
+      await newEncryptedNotebook(A.ui, SEALED_SECRETS.notebook);
+      await A.ui.typeAtEnd(`${SEALED_SECRETS.fromA}\n`);
+      await A.ui.flush();
+      await newEncryptedNotebook(B.ui, SEALED_SECRETS.second);
+      await B.ui.typeAtEnd(`${SEALED_SECRETS.more}\n`);
+      await B.ui.flush();
+      const ask = async (d) => {
+        await d.choose("Keep this notebook on the server…");
+        await d.dialog().getByRole("button", { name: "Keep it there" }).click();
+        const key = d.dialog().filter({ has: d.page.getByRole("heading", { name: "Seal your encrypted notebooks for the server" }) });
+        await key.waitFor();
+        await key.getByLabel("Passphrase of the encrypted notebooks").fill(PASSPHRASE);
+        return key;
+      };
+      const keyA = await ask(A);
+      const keyB = await ask(B);
+      await keyA.getByRole("button", { name: "Seal and continue" }).click();
+      await A.says("is kept on the server, sealed");
+      assertEqual(rig.db.prepare("select count(*) as n from cloud_keys").get().n, 1, "the first to answer made the key");
+      const theirs = Buffer.from(rig.db.prepare("select wrapped from cloud_keys").get().wrapped).toString("hex");
+      await keyB.getByRole("button", { name: "Seal and continue" }).click();
+      await B.says("is kept on the server, sealed");
+      assertEqual(Buffer.from(rig.db.prepare("select wrapped from cloud_keys").get().wrapped).toString("hex"), theirs, "the second did not replace it");
+      // (the server's refusal of the second key is what the browser logs as an error: one, and only that)
+      const refusals = problems.filter((p) => /Failed to load resource: the server responded with a status of 409/.test(p));
+      assertEqual(refusals.length, 1, "the server refused the second key once");
+      problems = problems.filter((p) => !refusals.includes(p));
+      assertEqual(rig.db.prepare("select count(*) as n from notebooks").get().n, 2, "both notebooks are on the server");
+      // what B sealed (with the key it took) opens on A
+      await A.choose("Open a notebook from the server…");
+      await A.dialog().waitFor();
+      await A.dialog().getByRole("button", { name: "Open" }).click();
+      await A.says("was copied from the server, sealed");
+      assertEqual(await A.ui.notebookTitle(), SEALED_SECRETS.second, "A opens what B kept");
+      assert((await A.ui.text()).includes(SEALED_SECRETS.more), "with its text");
+      assertDeepEqual(leaks(rig, [A, B], SEALED_NEEDLES), [], "nothing readable anywhere");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  await scenario("a lock that comes in the middle of a change of passphrase leaves the account's key wrapped by the old one, and says so without naming anything; the menu line then wraps it again", async () => {
+    const rig = await sealedRig();
+    try {
+      const A = await rig.device();
+      await A.signIn();
+      await keepSealed(A, SEALED_SECRETS.notebook, { secret: SEALED_SECRETS.text });
+      const wrapped = () => Buffer.from(rig.db.prepare("select wrapped from cloud_keys").get().wrapped).toString("hex");
+      const original = wrapped();
+      await A.ui.openMenu();
+      await A.ui.menu().getByRole("menuitem", { name: "Change the passphrase…" }).click();
+      const change = vaultDialog(A.page, "Change the passphrase");
+      await change.getByLabel("Current passphrase").fill(PASSPHRASE);
+      await change.getByLabel("New passphrase", { exact: true }).fill(NEXT_PASSPHRASE);
+      await change.getByLabel("New passphrase again").fill(NEXT_PASSPHRASE);
+      await change.getByLabel("I understand").check();
+      await change.getByRole("button", { name: "Change the passphrase" }).click();
+      // (the engine is busy making keys for a second or so: the lock is asked for in the middle of it, as the idle timer would)
+      await A.page.evaluate(() => void window.__zim.app.lockVault("away"));
+      const told = vaultDialog(A.page, "The passphrase was changed");
+      await told.waitFor({ timeout: 30_000 });
+      const text = await told.innerText();
+      assert(text.includes("Update the passphrase of the sealed copies"), `it says that the account's key still has to be wrapped again: ${text}`);
+      for (const secret of [SEALED_SECRETS.notebook, "Zebra", SEALED_SECRETS.text, "SEAL-MARKER", "zsl-"]) assert(!text.includes(secret), `and it names nothing of the notebooks (${secret})`);
+      await told.getByRole("button", { name: "OK" }).click();
+      await noDialogs(A.page);
+      assertEqual(wrapped(), original, "the account's copy of the key is the old one, as the message says");
+      await unlockFromMenu(A.ui, NEXT_PASSPHRASE);
+      await A.choose("Update the passphrase of the sealed copies…");
+      await A.dialog().getByLabel("Passphrase of the encrypted notebooks").fill(NEXT_PASSPHRASE);
+      await A.dialog().getByRole("button", { name: "Wrap the key again" }).click();
+      await noDialogs(A.page);
+      assert(wrapped() !== original, "and the menu line wraps it again");
+      const C = await rig.device();
+      await C.signIn();
+      await takeSealed(C, { vaultPassphrase: "yet another long passphrase here", passphrase: NEXT_PASSPHRASE });
+      assert((await C.pageText("Home")).includes(SEALED_SECRETS.text), "a new browser opens the notebook with the new passphrase");
+    } finally {
+      await rig.close();
     }
   });
 

@@ -185,6 +185,14 @@ export class AccountClient {
   connectorWrite(id: number, dir: string, body: { baseVersion: string; put: WireFile[]; remove: string[] }): Promise<{ version: string }> {
     return this.call(`/api/connectors/${id}/write`, { dir, ...body });
   }
+  /** The account's key for sealed copies, wrapped by a passphrase that the server does not have (null if there is none yet). */
+  getKeychain(): Promise<{ wrapped: string | null; check?: string; updatedAt?: number }> {
+    return this.call("/api/sync/keychain");
+  }
+  /** Keep the wrapped key: as the first (`expect: "none"`), or in place of the one whose SHA-256 is `expect`. A 409 says (in its data) which key is there. */
+  putKeychain(body: { wrapped: string; check: string; expect: string }): Promise<{ ok: boolean }> {
+    return this.call("/api/sync/keychain", body, "PUT");
+  }
   /** Everything the server keeps about the person, as the text of a JSON file. */
   async exportData(): Promise<string> {
     return JSON.stringify(await this.call("/api/account/export"), null, 2);

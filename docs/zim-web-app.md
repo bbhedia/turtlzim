@@ -4,14 +4,18 @@ The browser app that puts the pieces together: the Zim editor (`web/src/editor`,
 `zim-editor-plan.md`), the notebook rules (`core/zim-notebook` through wasm, see `zim-notebook.md`)
 and a place to keep pages. A notebook is either **open** (Zim text kept in the browser's IndexedDB:
 this document) or **encrypted** (kept as ciphertext by the Turtl core, unlocked with a passphrase:
-`zim-encrypted-notebooks.md`); a notebook's `kind` field says which. There is no sync and no account
-yet (CLAUDE.md, Open issues #5).
+`zim-encrypted-notebooks.md`); a notebook's `kind` field says which. An account is optional: with one, a notebook can be
+kept in step between the person's own devices on the account server or a connected service, an encrypted one sealed page by
+page (`zim-server.md`); without one nothing leaves the browser.
 
 ## What it does
 
 * **Notebooks.** Several, in one browser profile. The first start makes a sample notebook; the
   notebook menu makes an empty one, renames, deletes (the last one deleted is replaced by an empty
-  one, so there is always somewhere to write), imports a folder or a zip, and exports a zip.
+  one, so there is always somewhere to write), imports a folder or a zip, and exports a zip. The menu is long (more with an
+  account, and with encrypted notebooks): it opens under its button, is moved in from the right edge of a narrow screen, and is
+  no taller than what is left of the screen, scrolling inside (`App.fitMenu`; a phone-sized browser test checks that the menu is
+  inside the screen and that its last line can be reached; found on a phone picture in E16d: the lower lines were out of reach).
 * **Pages.** A tree of sections and pages (folding, arrow-key navigation, a breadcrumb, Back and
   Forward, an address per page: `#/Projects%3AGarden`), new page and new sub-page, rename (with
   "update the links"), delete, download one page as its `.txt`. Writing is saved by itself 700 ms
@@ -312,6 +316,6 @@ typing can reproduce (found as a rare flake, bisected, and the stress loop went 
   journals of weeks and months (only days), a calendar in a language but English (the titles of days and the
   names of months), tags that are pages or nest, pictures in the cells of a table, and the other lists
   of Zim's side pane (the index of tagged pages is the search).
-* **Synced or shared notebooks** (and lazy indexing, replacing the notebooks' keys when the passphrase
-  changes, and the other limits of the encrypted kind: `zim-encrypted-notebooks.md`): the sync server comes next (CLAUDE.md, Open issues
-  #3, #5, #6).
+* **Notebooks shared with other people** (and lazy indexing, replacing the notebooks' keys when the passphrase
+  changes, and the other limits of the encrypted kind: `zim-encrypted-notebooks.md`). Keeping a person's own notebooks in step
+  between their devices is done: `zim-server.md`.

@@ -21,6 +21,8 @@ import type { LineEnding } from "../zim";
 const PAGE = "zim-page";
 const FILE = "zim-file";
 const META = "zim-notebook";
+/** A notebook's link to where it is kept elsewhere: one note that is not a page, so that no part of the app sees it as one. */
+const LINK = "zim-link";
 const NOTEBOOK_COLOR = "#408080";
 
 /** The most one attachment may be in an encrypted notebook: a file goes through the engine whole, as text. */
@@ -197,6 +199,27 @@ export class TurtlStore implements NotebookStore {
         await this.save(core, "delete", "space", { id });
       });
       this.indexes.delete(id);
+    });
+  }
+
+  // ---- where the notebook is kept elsewhere
+
+  readLink(id: string): Promise<string | null> {
+    return this.run(async (core) => {
+      const note = (await this.find(core, id, LINK))[0];
+      return typeof note?.text === "string" && note.text !== "" ? note.text : null;
+    });
+  }
+
+  writeLink(id: string, text: string | null): Promise<void> {
+    return this.run(async (core) => {
+      const existing = (await this.find(core, id, LINK))[0];
+      await this.batch(core, async () => {
+        if (text === null) {
+          if (existing) await this.save(core, "delete", "note", { id: existing.id });
+        } else if (existing) await this.save(core, "edit", "note", { id: existing.id, space_id: id, user_id: "0", type: LINK, title: "link", text });
+        else await this.save(core, "add", "note", { space_id: id, user_id: "0", type: LINK, title: "link", text });
+      });
     });
   }
 
