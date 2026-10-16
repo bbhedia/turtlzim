@@ -5708,6 +5708,158 @@ try {
     }
   });
 
+  // --- Dropbox and Google Drive: allowed in the service's own window (stand-ins here), the server keeps only a sealed refresh token ---
+  const oauthServiceScenario = (spec) =>
+    scenario(`with an account server a notebook is kept on ${spec.name}: allowed in its own window and back, sent, opened on a second device, updated by a change made elsewhere, stop deletes its files, disconnect tells the service`, async () => {
+      const { Accounts } = await import("../../server/src/accounts.mjs");
+      const { createApi } = await import("../../server/src/api.mjs");
+      const { openDatabase } = await import("../../server/src/db.mjs");
+      const { OutboxMailer } = await import("../../server/src/mail.mjs");
+      const { OAuth } = await import("../../server/src/oauth.mjs");
+      const { randomBytes } = await import("node:crypto");
+      const fake = await spec.fake();
+      const url = await fake.start();
+      const config = { baseUrl: "http://127.0.0.1", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: {}, ...spec.config(url) };
+      const db = openDatabase(":memory:");
+      const mailer = new OutboxMailer();
+      const accounts = new Accounts({ db, mailer, config });
+      const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+      const withAccounts = createStaticServer({ dir: dist, api });
+      await new Promise((resolve) => withAccounts.listen(0, "127.0.0.1", resolve));
+      const at = `http://127.0.0.1:${withAccounts.address().port}`;
+      config.baseUrl = at;
+      await accounts.register("ada@example.org", "correct horse battery");
+      accounts.verify("ada@example.org", /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1]);
+      const devices = [];
+      try {
+        const device = async () => {
+          const made = await openApp({ at });
+          devices.push(made);
+          const { page } = made.ui;
+          const says = (text) =>
+            page.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout: 25_000 }).catch(async () => {
+              throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await page.locator("#status").innerText())}`);
+            });
+          const choose = async (name) => {
+            await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+            await made.ui.openMenu();
+            await made.ui.menu().getByRole("menuitem", { name }).click();
+          };
+          return { ...made, page, says, choose, dialog: () => topDialog(page) };
+        };
+        const signIn = async (d) => {
+          await d.choose("Sign in or create an account…");
+          await d.dialog().getByLabel("E-mail address", { exact: true }).fill("ada@example.org");
+          await d.dialog().getByLabel("Password", { exact: true }).fill("correct horse battery");
+          await d.dialog().getByRole("button", { name: "Sign in" }).click();
+          await d.says("Signed in as ada@example.org");
+        };
+        const write = async (d, text) => {
+          await d.ui.typeAtEnd(text);
+          await d.ui.flush();
+        };
+        const A = await device();
+        await signIn(A);
+        await write(A, "written on A\n");
+
+        // the service is offered; a form for it is not; its window is: out, allow, back on the app with a message
+        await A.choose("Connected services…");
+        await A.dialog().waitFor();
+        assert((await A.dialog().getByRole("button", { name: `Connect ${spec.label}…` }).count()) === 1, `the button for the service is there (${(await A.dialog().getByRole("button").allInnerTexts()).join(" / ")})`);
+        assertEqual(await A.dialog().getByRole("button", { name: `Connect ${spec.absent}…` }).count(), 0, `${spec.absent} has no app on this server, so it is not offered`);
+        if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, `connect-${spec.kind}.png`) });
+        await Promise.all([A.page.waitForURL((u) => u.pathname === "/" && u.searchParams.get("connected") === "1", { timeout: 20_000 }).catch(() => {}), A.dialog().getByRole("button", { name: `Connect ${spec.label}…` }).click()]);
+        await ready(A.page);
+        await A.says("The service is connected");
+        assert(!A.page.url().includes("connected="), `the address was cleaned (${A.page.url()})`);
+        assertEqual(db.prepare("select count(*) as n from connectors").get().n, 1, "the server kept one connection");
+        assert(!Buffer.from(db.prepare("select config from connectors").get().config).includes([...fake.refresh][0]), "the refresh token is sealed in the server's database");
+        // a failed return says so in fixed words and echoes nothing of the address
+        await A.page.goto(`${at}/?connect_error=${encodeURIComponent("<b>cancelled</b>")}`);
+        await ready(A.page);
+        await A.says("The connection did not work");
+        assert(!(await A.ui.status()).includes("<b>"), "nothing of the address is echoed");
+        await A.page.goto(`${at}/?connect_error=cancelled`);
+        await ready(A.page);
+        await A.says("was not allowed access");
+
+        await A.choose("Keep this notebook on the server…");
+        await A.dialog().getByLabel("Where").selectOption({ index: 1 });
+        await A.dialog().getByRole("button", { name: "Keep it there" }).click();
+        await A.says(`is kept on ${spec.label}`);
+        assert(spec.paths(fake).some((p) => p.endsWith("/home.txt")) && spec.paths(fake).some((p) => p.endsWith("/notebook.zim")), `the notebook is there as Zim files (${spec.paths(fake).slice(0, 4).join(", ")})`);
+        const folder = spec.folder(fake);
+
+        const B = await device();
+        await signIn(B);
+        await B.choose("Open a notebook from the server…");
+        await B.dialog().waitFor();
+        assert((await B.dialog().locator("option").allTextContents()).some((o) => o.includes(spec.label)), "B is offered the notebook of the service");
+        await B.dialog().getByRole("button", { name: "Open" }).click();
+        await B.says(`was copied from ${spec.label}`);
+        assert((await B.ui.text()).includes("written on A"), "B has what A wrote");
+
+        await write(B, "written on B\n");
+        const before = spec.writes(fake);
+        await B.choose("Sync this notebook now");
+        await B.says(`was sent to ${spec.label}`);
+        assertEqual(spec.writes(fake) - before, 1, "one file was written for one changed page");
+        await A.choose("Sync this notebook now");
+        await A.says(`was brought up to date from ${spec.label}`);
+        assert((await A.ui.text()).includes("written on B"), "A has what B wrote");
+
+        // the page is edited on the service itself (the person's own Dropbox or Drive): the next sync brings it in
+        spec.edit(fake, folder, "edited on the service\n");
+        await B.choose("Sync this notebook now");
+        await B.says(`was brought up to date from ${spec.label}`);
+        assert((await B.ui.text()).includes("edited on the service"), "B has the change made on the service");
+
+        await A.choose("Stop keeping this notebook on the server…");
+        await A.dialog().getByRole("button", { name: "Stop" }).click();
+        await A.says("The copy was deleted");
+        assertEqual(spec.paths(fake).filter((p) => p.includes(folder.toLowerCase())).length, 0, "the notebook's files are gone from the service");
+        const revoked = spec.revoked(fake);
+        await B.choose("Connected services…");
+        await B.dialog().getByRole("button", { name: "Disconnect" }).click();
+        await B.says("Disconnected");
+        assertEqual(db.prepare("select count(*) as n from connectors").get().n, 0, "the server forgot the connection");
+        assertEqual(spec.revoked(fake), revoked + 1, "and told the service that the access is over");
+      } finally {
+        for (const d of devices) await d.context.close();
+        withAccounts.closeAllConnections?.();
+        withAccounts.close();
+        fake.stop();
+        db.close();
+      }
+    });
+
+  await oauthServiceScenario({
+    name: "Dropbox",
+    absent: "Google Drive",
+    kind: "dropbox",
+    label: "Dropbox",
+    fake: async () => (await import("../../server/test/fake-dropbox.mjs")).fakeDropbox(),
+    config: (url) => ({ connectorApps: { dropbox: { clientId: "dbx-id", clientSecret: "dbx-secret" } }, connectorOptions: { allowInsecure: true, allowPrivate: true, dropboxApi: url, dropboxContent: url, endpoints: { dropbox: { authorize: `${url}/oauth2/authorize`, token: `${url}/oauth2/token` } } } }),
+    paths: (fake) => [...fake.files.keys()],
+    folder: (fake) => [...fake.files.values()][0].display.split("/")[1],
+    writes: (fake) => fake.state.uploads,
+    edit: (fake, folder, text) => fake.put(`/${folder}/Home.txt`, [...fake.files.values()].find((f) => f.display.endsWith("/Home.txt")).bytes.toString() + text),
+    revoked: (fake) => fake.state.revoked.length,
+  });
+  await oauthServiceScenario({
+    name: "Google Drive",
+    absent: "Dropbox",
+    kind: "gdrive",
+    label: "Google Drive",
+    fake: async () => (await import("../../server/test/fake-drive.mjs")).fakeDrive(),
+    config: (url) => ({ connectorApps: { gdrive: { clientId: "drv-id", clientSecret: "drv-secret" } }, connectorOptions: { allowInsecure: true, allowPrivate: true, driveApi: url, endpoints: { gdrive: { authorize: `${url}/authorize`, token: `${url}/token`, revoke: `${url}/revoke` } } } }),
+    paths: (fake) => Object.keys(fake.files()).map((p) => p.toLowerCase()),
+    folder: (fake) => [...fake.items.values()].find((it) => it.mimeType === "application/vnd.google-apps.folder" && it.name !== "Zim Notebooks").name,
+    writes: (fake) => fake.requests.filter((r) => r.startsWith("POST /upload/") || r.startsWith("PATCH /upload/")).length,
+    edit: (fake, folder, text) => fake.put(`Zim Notebooks/${folder}/Home.txt`, fake.files()[`Zim Notebooks/${folder}/Home.txt`].toString() + text),
+    revoked: (fake) => fake.state.revoked.length,
+  });
+
   for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"} ${r.name}${r.ok ? ` (${r.ms} ms)` : `\n    ${r.error}`}`);
   const failed = results.length === 0 || results.some((r) => !r.ok);
   console.log(`\n${results.filter((r) => r.ok).length} of ${results.length} scenarios passed`);

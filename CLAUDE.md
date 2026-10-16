@@ -158,6 +158,9 @@ npx cap open android                # / ios
 cd server && npm install && npm test   # accounts, OAuth against stand-ins, the HTTP layer
 ZIM_BASE_URL=https://localhost:8443 scripts/run.sh start --host :: --port 8443 --tls --name ADDRESS   # serves web/dist and /api/; scripts/run.sh stop|status|log
 
+# The follow-up document (docs/suivi/: what is done, in progress, waiting, postponed, dropped, and what remains for each point), in French; tectonic installed without root (see the script's header)
+scripts/suivi.sh                    # recompile docs/suivi/suivi.pdf from suivi.tex (updates the commit and date in its header)
+
 # Sync server
 docker compose up                   # Postgres + server (define compose file)
 ```
@@ -212,8 +215,10 @@ docker compose up                   # Postgres + server (define compose file)
   `window.__zimShell.folders`; the page names a folder only by the id the program gave it, and `desktop/src-tauri/src/folders.rs` (no Tauri in it, `cargo test` in
   `desktop/src-tauri`) is all the program knows of one: paths are checked there, links are not followed, and a change is made entirely or not at all, with a journal. A
   folder is the person's: only what is listed and read as a page or an attachment is written, and removing a notebook only unlists it.
+- **The follow-up document** (`docs/suivi/suivi.tex` and its PDF): at the end of **every milestone**, in the same commit, change the state and the "reste à faire" of the points it touches, add a line to the journal with the commit ids, update the test counts in
+  `docs/suivi/releves.tex`, run `scripts/suivi.sh` and commit the source and the PDF together. A point is *fait* only when tests ran it; what was never tried against the real thing says so in its "reste à faire". Written in French, for the user.
 - **Accounts** (`server/`, `docs/zim-server.md`; decided 2026-10-15: Google + GitHub first, a mailed code only at sign-up, on this server): optional;
-  a notebook goes to the server, or to a service the person connected (`server/src/connectors/`: the server calls it for them, with settings sealed at rest and `safe-fetch.mjs` refusing private addresses: any new connector goes through it, never a bare `fetch`), only if the person chose *Keep this notebook on the server* (open notebooks only, in clear, never an encrypted one: `SyncUi` checks `kind === "open"`, and the browser scenario checks the menu); both-changed is asked about, never overwritten. The web app talks to `/api/` on its own address only (`web/src/account/`), shows account items only when
+  a notebook goes to the server, or to a service the person connected (`server/src/connectors/`: WebDAV/Nextcloud, GitHub, GitLab, Dropbox and Google Drive; the server calls it for them, with settings sealed at rest and `safe-fetch.mjs` refusing private addresses: any new connector goes through it, never a bare `fetch`), only if the person chose *Keep this notebook on the server* (open notebooks only, in clear, never an encrypted one: `SyncUi` checks `kind === "open"`, and the browser scenario checks the menu); both-changed is asked about, never overwritten. The web app talks to `/api/` on its own address only (`web/src/account/`), shows account items only when
   `/api/providers` answers, and a native shell shows none. Passwords are scrypt, sessions are `HttpOnly` cookies with only a hash stored, every change needs the `X-Requested-With: zim`
   header and a same-site origin: do not weaken any of it, and a new endpoint gets the same tests. Secrets (OAuth, SMTP) live in `~/.local/state/zim-server`, never in the repo.
 - **The desktop program** (`desktop/`) is the same web build in Tauri, not a second UI or branch: `web/dist` goes in as it is, the version is `web/package.json`'s, and what a

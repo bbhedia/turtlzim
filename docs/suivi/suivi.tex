@@ -1,0 +1,193 @@
+% Suivi d'avancement de Turtlzim : ce qui est fait, en cours, en attente, reporté, écarté, et ce qui reste à faire pour chaque point.
+% Tenu à la main à chaque étape (voir la section « Comment ce document est tenu ») ; compilé par scripts/suivi.sh (tectonic, sans root).
+\documentclass[10pt,a4paper]{article}
+\usepackage[a4paper,margin=1.7cm,top=2.1cm,bottom=1.9cm]{geometry}
+\usepackage{fontspec}
+\usepackage[french]{babel}
+\usepackage[table]{xcolor}
+\usepackage{longtable,booktabs,array,enumitem,fancyhdr,hyperref}
+\input{version.tex}
+\input{releves.tex}
+
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black,pdftitle={Turtlzim — suivi d'avancement},pdfauthor={Turtlzim}}
+\setlist{itemsep=1pt,topsep=3pt,leftmargin=1.3em}
+\setlength{\parindent}{0pt}\setlength{\parskip}{4pt}
+\pagestyle{fancy}\fancyhf{}
+\fancyhead[L]{\small Turtlzim — suivi d'avancement}
+\fancyhead[R]{\small état au \versiondate\ (\texttt{\versionhash})}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+% --- les cinq états -----------------------------------------------------------------------------------------------------------------
+\definecolor{cfait}{HTML}{2E7D32}
+\definecolor{cencours}{HTML}{1565C0}
+\definecolor{cattente}{HTML}{E65100}
+\definecolor{creporte}{HTML}{616161}
+\definecolor{cecarte}{HTML}{B71C1C}
+\newcommand{\lblfait}{FAIT}\newcommand{\lblencours}{EN COURS}\newcommand{\lblattente}{EN ATTENTE}\newcommand{\lblreporte}{REPORTÉ}\newcommand{\lblecarte}{ÉCARTÉ}
+\newcommand{\etat}[1]{\colorbox{c#1}{\textcolor{white}{\scriptsize\textbf{\csname lbl#1\endcsname}}}}
+\newcounter{nfait}\newcounter{nencours}\newcounter{nattente}\newcounter{nreporte}\newcounter{necarte}
+\makeatletter
+% les totaux sont écrits dans le .aux à la fin, et relus au passage suivant : le tableau de synthèse est toujours celui des lignes du document
+\AtEndDocument{%
+  \immediate\write\@auxout{\string\gdef\string\totfait{\thenfait}\string\gdef\string\totencours{\thenencours}\string\gdef\string\totattente{\thenattente}\string\gdef\string\totreporte{\thenreporte}\string\gdef\string\totecarte{\thenecarte}}}
+\makeatother
+\providecommand{\totfait}{0}\providecommand{\totencours}{0}\providecommand{\totattente}{0}\providecommand{\totreporte}{0}\providecommand{\totecarte}{0}
+
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\domaine}[1]{\multicolumn{5}{@{}l}{\cellcolor{black!10}\rule{0pt}{2.1ex}\textbf{#1}}\\\midrule}
+% \point{numéro}{point}{état}{où on en est}{ce qui reste à faire}
+\newcommand{\point}[5]{\stepcounter{n#3}#1 & \textbf{#2} & \etat{#3} & #4 & #5 \\ \midrule}
+\newcommand{\jour}[2]{\textbf{#1}\nopagebreak\par\vspace{-2pt}#2\par\vspace{2pt}}
+
+\begin{document}
+\begin{center}
+{\LARGE\bfseries Turtlzim}\\[2pt]
+{\large Suivi d'avancement du projet}\\[2pt]
+{\small état au \versiondate\ — dernier commit \texttt{\versionhash}}
+\end{center}
+
+\section*{À quoi sert ce document}
+Turtlzim est une application de notes dont les notes sont au format wiki de Zim, avec chiffrement par carnet, en trois versions (web, bureau, mobile) qui partagent un seul code. Ce document garde la trace de
+\textbf{ce qui a été fait, ce qui est en cours, en attente, reporté ou écarté, et ce qui reste à faire pour chaque point}. Il est repris et recompilé à chaque étape, pour qu'on puisse relire d'un coup d'œil où l'on en est.
+Les chiffres de tests et les mots « vérifié » ou « non vérifié » ne disent que ce qui a réellement été exécuté ; ce qui n'a jamais été essayé est dit comme tel (section \ref{sec:nonverifie}).
+
+\subsection*{Légende}
+\begin{tabular}{@{}l p{14cm}@{}}
+\etat{fait} & Fait et vérifié par des tests (le « reste à faire » dit ce qui manque encore autour).\\[2pt]
+\etat{encours} & Commencé, pas terminé.\\[2pt]
+\etat{attente} & Prévu, pas commencé : il manque du temps, un outil, une réponse de votre part ou une autre étape.\\[2pt]
+\etat{reporte} & Laissé pour plus tard, volontairement : ça a du sens, mais pas maintenant.\\[2pt]
+\etat{ecarte} & Abandonné ou remplacé, avec la raison : on n'y reviendra pas sans nouvelle décision.\\
+\end{tabular}
+
+\subsection*{Synthèse}
+\begin{tabular}{@{}l r@{\hspace{2em}}l r@{\hspace{2em}}l r@{}}
+\etat{fait} & \totfait & \etat{encours} & \totencours & \etat{attente} & \totattente\\[2pt]
+\etat{reporte} & \totreporte & \etat{ecarte} & \totecarte & &\\
+\end{tabular}
+
+\medskip
+\textbf{Dernier relevé des tests} (au \versiondate) : \code{cargo test} du format, des règles du carnet et de leurs liaisons wasm : \relevecargo ; tests unitaires de l'application web : \releveunit ; tests du serveur de comptes : \releveserveur ;
+scénarios dans un vrai navigateur : \relevechromium (Chromium) et \relevewebkit (WebKit, le moteur d'un iPhone).
+
+\section{Où on en est, point par point}
+{\footnotesize
+\setlength{\tabcolsep}{4pt}\renewcommand{\arraystretch}{1.15}
+\begin{longtable}{@{}p{0.75cm} p{2.5cm} p{2.25cm} p{5.15cm} p{4.95cm}@{}}
+\toprule \textbf{N°} & \textbf{Point} & \textbf{État} & \textbf{Où on en est} & \textbf{Reste à faire}\\ \midrule\endfirsthead
+\toprule \textbf{N°} & \textbf{Point} & \textbf{État} & \textbf{Où on en est} & \textbf{Reste à faire}\\ \midrule\endhead
+
+\domaine{A — Fondations (format, cœur, port WebAssembly)}
+\point{A1}{Format Zim : lecture et écriture}{fait}{Un lecteur/écrivain du format Zim (\code{core/zim-format}), réécrit sans copier le code de Zim. Un fichier relu puis réécrit est identique octet pour octet : test d'aléa à chaque \code{cargo test}, et test sur de vrais carnets de Zim (\code{scripts/zim-golden.sh}). Deux défauts trouvés par ces tests ont été corrigés.}{Aucune relecture extérieure. Le corpus d'essai est celui que Zim fournit : d'autres carnets réels pourraient montrer des cas rares.}
+\point{A2}{Cœur Turtl en Rust remis en état}{fait}{Le cœur de Turtl (dormant, outils anciens) compile et se teste avec les outils actuels (édition 2018, async partout). Documenté dans \code{docs/core-rs-revival-notes.md}.}{Mettre à jour la libsodium d'origine du build natif (la 1.0.16 est notée dans \code{CLAUDE.md} ; à vérifier où elle sert encore).}
+\point{A3}{Port WebAssembly du cœur}{fait}{Chiffrement par la vraie libsodium (libsodium.js, mêmes octets que le natif, vérifié), SQLite réel compilé en wasm, réseau asynchrone, stockage persistant (OPFS), le tout dans un Worker.}{Rien de connu côté web. Le pendant natif pour les téléphones est le point D5.}
+\point{A4}{Règles du carnet}{fait}{Noms, liens, arbre, rétroliens, recherche, renommage qui garde les liens, étiquettes, journal, complétion des liens, tableaux : un seul endroit (\code{core/zim-notebook}, \code{zim-format}), appelé par l'application via wasm.}{Comparer plus largement avec le comportement de Zim sur des carnets réels (aujourd'hui : corpus de Zim seulement).}
+
+\domaine{B — Application web}
+\point{B1}{Éditeur (CodeMirror 6)}{fait}{Mise en forme vivante du texte Zim (le document \emph{est} le fichier, jamais un arbre réécrit), raccourcis, tableaux en grille, images, en-tête repliée.}{Fidélité complète à l'éditeur de Zim (risque 7 de \code{CLAUDE.md}) : syntaxes rares et réglages de Zim non reproduits.}
+\point{B2}{Carnet : pages, liens, recherche}{fait}{Arbre des pages, rétroliens, recherche, renommer/supprimer, import de dossier ou de zip, export en zip.}{—}
+\point{B3}{Pièces jointes et images}{fait}{Joindre, glisser-déposer, coller ; images dessinées dans la page ; une revue a trouvé et fait corriger un SVG qui s'exécutait.}{—}
+\point{B4}{Journal, étiquettes, sommaire, tableaux}{fait}{Calendrier du journal, panneau d'étiquettes, sommaire de la page, complétion de \code{[[liens]]}, tableaux.}{—}
+\point{B5}{Écriture sur téléphone}{fait}{Barre de mise en forme, appuis tactiles, mise en page qui suit le clavier ; testé avec des événements tactiles et un clavier simulé, en Chromium et en WebKit.}{\textbf{Jamais essayé sur un vrai téléphone} (seulement l'émulateur Android) : le comportement du clavier réel peut différer.}
+\point{B6}{Application installable, hors ligne, code épinglé}{fait}{Service worker qui liste chaque fichier avec son empreinte et ne lance que la version approuvée ; mises à jour qui attendent l'accord.}{Le worker lui-même vient de l'hébergeur : un hôte hostile n'est pas arrêté, seulement rendu vérifiable (risque 6). Le paquet de bureau est la garantie la plus forte.}
+
+\domaine{C — Chiffrement local}
+\point{C1}{Carnets chiffrés (coffre)}{fait}{Cœur Turtl en wasm dans un Worker, une phrase secrète (scrypt, 128 Mio), un compte local, un « espace » par carnet ; rien de lisible ailleurs que dans le coffre (un test scanne tout ce que garde le navigateur).}{Mesurer le déverrouillage sur de vrais téléphones (181 s sur l'émulateur Android à deux cœurs émulés).}
+\point{C2}{Changer la phrase, sauvegarder, restaurer}{fait}{Changement de phrase repris après un arrêt en cours de route ; sauvegarde du coffre en un seul fichier toujours chiffré ; restauration dans un autre navigateur ; coupures testées à plusieurs moments.}{Une sauvegarde ne suit pas un changement de phrase (documenté) ; clés des carnets non renouvelées par un changement de phrase.}
+\point{C3}{Un seul chemin de chiffrement}{ecarte}{Règle tenue partout : libsodium seule, jamais un second code de chiffrement par plateforme.}{Écarté : tout chiffrement refait à la main ou par plateforme.}
+
+\domaine{D — Applications (bureau, mobile)}
+\point{D1}{Bureau Windows et Linux (Tauri 2)}{fait}{La même application web dans Tauri ; paquets \code{.deb}, \code{.rpm}, \code{.AppImage}, NSIS et MSI construits par GitHub Actions à chaque changement.}{macOS non fait ; signature des installeurs ; mise à jour automatique ; \textbf{jamais lancé sur une vraie machine Windows} (la CI seulement).}
+\point{D2}{Carnets en vrais dossiers (bureau)}{fait}{Un carnet est un dossier Zim lu et écrit sur place, changement tout ou rien avec journal de reprise ; Zim peut ouvrir le même dossier.}{Modification simultanée avec Zim lui-même : non essayée.}
+\point{D3}{Android (Capacitor)}{fait}{APK de débogage, essayé dans une vraie WebView sur émulateur (douze vérifications automatiques) ; aucune permission réseau, pas de sauvegarde automatique.}{Signature de publication, boutique, \code{appId} provisoire, essai sur téléphone réel ; la permission \code{INTERNET} sera nécessaire pour les comptes (point E17).}
+\point{D4}{iPhone / iPad}{attente}{Rien de commencé : le même principe (Capacitor) s'applique, WebKit est déjà testé.}{Il faut un Mac avec Xcode (ou un macOS en CI), puis un essai sur appareil.}
+\point{D5}{Cœur natif relié par JNI / FFI}{reporte}{Les coques font tourner le cœur wasm dans leur WebView : ça marche et évite deux chemins de code.}{À reprendre si le coffre est trop lent sur téléphone (point C1) ; le dépôt de référence \code{turtl/mobile} montre la liaison Android.}
+\point{D6}{Application Flutter / Dart}{ecarte}{Question posée le 13 octobre : non, l'éditeur serait à réécrire (plusieurs semaines, deux éditeurs à garder identiques).}{Écarté. À rouvrir seulement si l'éditeur dans une WebView s'avérait inacceptable sur appareil réel.}
+\point{D7}{Interfaces natives GTK / Qt}{ecarte}{Décision du 5 octobre : une interface web partagée plutôt que trois interfaces.}{Écarté.}
+
+\domaine{E — Comptes, serveur et sauvegardes en ligne}
+\point{E1}{Étude de faisabilité}{fait}{Étude en français (\code{docs/zim-cloud-feasibility.md}) : hébergement, comptes, connecteurs, chiffrement, feuille de route en lots 0 à 8, 9 décisions ouvertes, risques.}{Les 9 décisions ouvertes (point E18).}
+\point{E2}{Hébergement mutualisé OVH}{ecarte}{Lot 0 de l'étude (essai d'hébergement) abandonné le 15 octobre : on continue sur ce serveur.}{Écarté pour l'instant ; un VPS sera acheté « si le projet aboutit » (point E3).}
+\point{E3}{Serveur de comptes sur cette machine}{fait}{\code{server/} : Node 24, SQLite intégré, sert l'application et \code{/api/}. Tourne sur le port 8443 (https avec certificat local).}{Mise en service pour d'autres personnes : VPS, nom de domaine, https de confiance, sauvegarde de la base, supervision, mises à jour. Rien de tout cela n'est fait.}
+\point{E4}{Serveur de synchro d'origine de Turtl}{ecarte}{Remplacé de fait par \code{server/} (Node 24 + SQLite, protocole à nous) ; l'ancien (Node 8 + Postgres) n'a pas été revu.}{Écarté ; \code{CLAUDE.md} le cite encore parmi les « décisions verrouillées » : à corriger avec votre accord.}
+\point{E5}{Comptes par e-mail, code à l'inscription}{fait}{Inscription (adresse + mot de passe + code à 6 chiffres envoyé une seule fois), connexion, mot de passe oublié, export des données, suppression ; mots de passe en scrypt, sessions en cookie \code{HttpOnly}, limites de tentatives, protections contre le vol de session et l'énumération.}{\textbf{Envoi réel d'e-mails jamais essayé} (sans serveur SMTP, les codes vont dans un fichier) ; SPF/DKIM ; changer le mot de passe depuis l'interface, « se déconnecter partout », vue d'administration.}
+\point{E6}{Code à chaque connexion}{ecarte}{Votre décision du 15 octobre : le code seulement à l'inscription.}{Écarté.}
+\point{E7}{Connexion Google et GitHub}{fait}{Flux OAuth complet côté serveur (secret jamais dans la page, PKCE, état à usage unique, liaison au navigateur, adresses confirmées par le service seulement).}{\textbf{Jamais essayé avec les vrais services} : à vous de créer les deux applications OAuth (étapes dans \code{docs/zim-server.md}), puis un essai réel.}
+\point{E8}{Facebook, LinkedIn, Microsoft, GitLab (connexion)}{reporte}{Décision du 15 octobre : après Google et GitHub.}{Un pilote par service, même schéma qu'aujourd'hui ; une application OAuth à créer chez chacun.}
+\point{E9}{Synchronisation en clair vers le compte (1~Mo)}{fait}{« Garder ce carnet sur le serveur » : envoi automatique, récupération, question quand les deux côtés ont changé (jamais d'écrasement), refus d'une écriture faite depuis une ancienne révision ; essai à deux navigateurs avec le vrai serveur.}{Fusion page par page (aujourd'hui une copie remplace l'autre) ; envoi du seul changement (le carnet entier part à chaque fois) ; quota par carnet ; les carnets de dossier du bureau et le téléphone ne se synchronisent pas encore.}
+\point{E10}{Copie scellée des carnets chiffrés}{fait}{La sauvegarde du coffre (déjà chiffrée) peut être envoyée au serveur : rien de lisible n'en sort (un test examine chaque requête et le fichier stocké) ; restauration sur un navigateur sans coffre.}{Manuelle et sans fusion. Synchronisation chiffrée fichier par fichier, avec hiérarchie de clés et clé de secours : demande de nouvelles commandes dans le cœur Rust (point E16).}
+\point{E11}{Connecteur Nextcloud / ownCloud / WebDAV}{fait}{Le serveur appelle le service pour vous (mot de passe d'application chiffré au repos, adresses privées refusées, aucune redirection suivie) ; seuls les fichiers changés sont écrits ; essayé contre un faux serveur WebDAV.}{\textbf{Jamais essayé avec un vrai Nextcloud}. Écriture non atomique sur WebDAV.}
+\point{E12}{Connecteur GitHub}{fait}{Un envoi = un commit (API Git Data), branche déplacée sans force : deux appareils ne s'écrasent pas ; essayé contre un faux GitHub.}{\textbf{Jamais essayé avec le vrai GitHub} (limites de débit, branches protégées, commits signés exigés).}
+\point{E13}{Connecteur GitLab}{fait}{Un envoi = un commit avec \code{last_commit_id}, listes paginées ; essayé contre un faux GitLab.}{\textbf{Jamais essayé avec un vrai GitLab} ; la détection d'un conflit repose sur les mots de GitLab.}
+\point{E14}{Connecteur Dropbox}{fait}{Autorisation dans la fenêtre de Dropbox (le serveur ne voit jamais le mot de passe), dossier d'application, jeton de rafraîchissement chiffré, révoqué quand on déconnecte ; envois par révision (un fichier modifié ailleurs n'est pas écrasé) ; essayé contre un faux Dropbox.}{À vous : créer l'application Dropbox (\code{docs/zim-server.md}) ; \textbf{jamais essayé avec le vrai Dropbox}. Pas de validation en une fois sur plusieurs fichiers (limite de Dropbox).}
+\point{E15}{Connecteur Google Drive}{fait}{Autorisation dans la fenêtre de Google, portée la plus étroite (\code{drive.file}), dossier « Zim Notebooks », vrais dossiers Drive ; essayé contre un faux Drive.}{À vous : créer l'application Google ; attention, en mode « Test » Google arrête le jeton après 7 jours (à vérifier chez Google pour la publication) ; \textbf{jamais essayé avec le vrai Drive}.}
+\point{E16}{Synchronisation chiffrée par fichier}{attente}{Conçue dans l'étude (clé maîtresse enveloppée par la phrase, XChaCha20-Poly1305, noms masqués, clé de secours), non commencée.}{Nouvelles commandes dans le cœur Rust, vecteurs de test communs natif/wasm, règle de fusion, interface ; permettrait aussi de mettre les carnets chiffrés sur les connecteurs.}
+\point{E17}{Connexion au compte depuis les applications natives}{attente}{Rien de commencé.}{Connexion par adresse locale avec PKCE (bureau), permission \code{INTERNET} (Android), changement de la politique de contenu des coques.}
+\point{E18}{Décisions ouvertes de l'étude (§10)}{attente}{Chiffrement proposé par défaut ou non ; une seule destination par carnet ; une ou deux variantes des applications natives ; éditeur légal ; sens du quota (1~Mo) ; gratuit ou payant.}{Vos réponses. Aucune n'a été donnée ; j'ai suivi les valeurs par défaut proposées (en clair d'abord, une destination par carnet).}
+\point{E19}{Cadre légal}{attente}{Rien : éditeur, conditions d'utilisation, politique de confidentialité, RGPD (les données sont déjà exportables et supprimables).}{Texte à rédiger et à faire relire avant toute ouverture au public.}
+\point{E20}{Durcissement avant ouverture au public}{attente}{Protections de base écrites et testées (limites, cookies, en-têtes, adresses privées refusées). Aucune revue de sécurité extérieure.}{Revue extérieure, journalisation et alertes, sauvegardes du serveur, essais de charge, procédure de mise à jour, plan en cas de fuite.}
+
+\domaine{F — Méthode et outils}
+\point{F1}{Intégration continue (bureau)}{fait}{GitHub Actions construit les paquets Linux et Windows à chaque changement ; nouvelles tentatives si un téléchargement échoue.}{—}
+\point{F2}{Ce document de suivi}{fait}{Source \code{docs/suivi/suivi.tex}, PDF compilé par \code{scripts/suivi.sh} (tectonic installé sans root).}{Le tenir à jour à chaque étape (section suivante).}
+\end{longtable}}
+
+\section{Décisions prises}
+{\footnotesize\setlength{\tabcolsep}{4pt}\renewcommand{\arraystretch}{1.15}
+\begin{longtable}{@{}p{2.0cm} p{7.0cm} p{7.0cm}@{}}
+\toprule \textbf{Date} & \textbf{Décision} & \textbf{Conséquence}\\ \midrule\endhead
+5 oct.\ 2026 & Une interface web partagée (CodeMirror 6) pour le web, le bureau et le mobile. & Pas d'interfaces natives par plateforme (point D7). \\ \midrule
+6 oct.\ 2026 & Carnets chiffrés par le cœur Turtl en wasm, dans un Worker, un compte local par phrase secrète. & Base de tout le chiffrement qui suit. \\ \midrule
+13 oct.\ 2026 & Pas de Flutter pour les applications natives ; coque Capacitor autour de l'application web. & Point D6 écarté. \\ \midrule
+14 oct.\ 2026 & Bureau : Tauri 2 ; le paquet contient le build web tel quel. & Une seule interface à maintenir (D1). \\ \midrule
+15 oct.\ 2026 & Commencer par Google et GitHub ; code envoyé seulement à l'inscription ; pas d'OVH, on reste sur ce serveur (un VPS plus tard) ; sans compte, les notes restent locales. & Points E2, E6 écartés ; E8 reporté. \\ \midrule
+15 oct.\ 2026 & Synchroniser d'abord en clair, une destination par carnet (valeurs proposées, non contredites). & Le chiffrement fichier par fichier reste à faire (E16). \\ \midrule
+16 oct.\ 2026 & Connecteurs dans l'ordre : Nextcloud/WebDAV, GitHub, GitLab, puis Dropbox et Google Drive (OAuth). & Tous faits ; reste à les essayer pour de vrai. \\
+\end{longtable}}
+
+\section{Ce qui dépend de vous}
+\begin{enumerate}
+\item \textbf{Créer les applications OAuth} (étapes dans \code{docs/zim-server.md}) : Google et GitHub pour la connexion ; Dropbox et Google Drive pour les connecteurs. Tant que ce n'est pas fait, aucun bouton correspondant n'apparaît.
+\item \textbf{Un service d'envoi d'e-mails} (SMTP) : sans lui, les codes d'inscription restent dans un fichier du serveur.
+\item \textbf{Essayer pour de vrai} un Nextcloud, un dépôt GitHub (jeton limité à un dépôt privé), un projet GitLab, puis me dire ce qui coince : tout a été essayé seulement contre des imitations.
+\item \textbf{Répondre aux décisions ouvertes} (point E18) et choisir l'éditeur légal (E19).
+\item \textbf{Essayer sur de vrais appareils} : un téléphone Android, un iPhone si possible, une machine Windows.
+\item À terme, \textbf{un VPS et un nom de domaine} pour ouvrir le service à d'autres (E3, E20). Aucune commande \code{sudo} n'est nécessaire pour l'instant.
+\end{enumerate}
+
+\section{Ce qui n'a jamais été vérifié}\label{sec:nonverifie}
+\begin{itemize}
+\item Aucune connexion réelle à Google, GitHub, Dropbox, Google Drive, GitLab ni à un Nextcloud : les tests utilisent des imitations écrites pour eux (qui parlent le protocole tel que je le connais ; un vrai service peut répondre autrement).
+\item Aucun envoi réel d'e-mail, aucune charge, aucun essai avec plusieurs processus serveur.
+\item Aucun vrai téléphone, aucune machine Windows réelle, aucun Mac.
+\item Aucune relecture de sécurité par quelqu'un d'autre ; les mutants de test (on casse une protection pour voir si un test le remarque) ne remplacent pas cela.
+\item L'écriture dans plusieurs fichiers n'est pas atomique sur WebDAV, Dropbox et Google Drive (elle l'est sur GitHub et GitLab).
+\end{itemize}
+
+\section{Journal de progression}
+\jour{28 septembre 2026}{Échafaudage du projet, spécification du format Zim, lecteur/écrivain \code{zim-format} avec essais d'aller-retour (\code{22f83cf}, \code{e32b662}). Cœur Turtl intégré et remis en état (\code{ba24934}, \code{45d410a}). Plan du port wasm ; chiffrement identique au natif prouvé par un pont libsodium.js (\code{b505976}, \code{0b0b74e}).}
+\jour{29 septembre}{Le cœur vérifie ses types pour wasm ; la vraie libsodium.js est branchée (\code{22f2301}, \code{750a02e}).}
+\jour{5 octobre}{Port wasm : SQLite réel, crypto complète, async partout, le cœur en service dans un hôte JavaScript, persistance OPFS, essais dans un vrai Worker (\code{9cd33d0}…\code{7a4ce6d}). Pièces jointes (\code{931bc76}). Essais sur de vrais carnets Zim et fuzzer (\code{4439d04}). Éditeur CodeMirror 6 et commandes (\code{b11bf0f}, \code{7b3d601}).}
+\jour{6 octobre}{Serveur statique sûr (\code{8a0aa09}). Règles du carnet et liaisons wasm (\code{4d1a1c9}, \code{b23f50a}). Application du carnet : arbre, liens, recherche, import/export (\code{8640a67}) et 31 scénarios navigateur (\code{00b22ec}). Pièces jointes et images (\code{4f5b823}…\code{55ca54e}). Comptes locaux, écritures atomiques, coffre chiffré dans l'application (\code{f997f29}…\code{6e5938a}).}
+\jour{7 octobre}{https avec certificat local (\code{f064f6d}) ; phrase secrète normalisée (\code{af74b76}) ; corrections de revue (\code{1f9264a}, \code{a3dbf62}) ; application installable avec code épinglé (\code{cf7d045}) ; certificat de confiance (\code{5c89aa1}).}
+\jour{9 octobre}{Changement de phrase, sauvegarde et restauration du coffre (\code{92a2ccf}, \code{d5985f9}, \code{3b3d897}). Étiquettes, journal, complétion de liens, tableaux, sommaire, calendrier (\code{fc66e61}, \code{baa6cb2}, \code{25522a4}).}
+\jour{12 et 13 octobre}{Écriture sur téléphone : barre de mise en forme, tactile, clavier ; scénarios aussi en WebKit ; menu des actions repliées ; corrections de ce que montrent les vrais navigateurs (\code{1da565f}…\code{2a5cd9d}).}
+\jour{14 octobre}{Coque Android (APK de débogage, essai dans une vraie WebView) (\code{908c50c}, \code{ecf48af}, \code{b9a7ed6}). Programme de bureau Tauri pour Windows et Linux, paquets construits en CI (\code{824bb06}, \code{afec2be}).}
+\jour{15 octobre}{Carnets en vrais dossiers sur le bureau (\code{17b0a53}) ; CI plus robuste (\code{25c3597}, \code{6c33865}). Étude de faisabilité des comptes et du SaaS (\code{b40bdcf}). Serveur de comptes, connexion Google/GitHub, interface des comptes (\code{b49afd9}, \code{f97d995}). Stockage des carnets par compte et synchronisation dans l'application (\code{9693953}, \code{2e278ec}). Copie scellée des carnets chiffrés (\code{49063d6}). Connecteurs Nextcloud/WebDAV, GitHub, GitLab (\code{f7710c6}, \code{3673cac}, \code{eb9883d}, \code{74db037}).}
+\jour{16 octobre}{Connecteurs Dropbox et Google Drive (autorisation dans la fenêtre du service, jetons chiffrés, révocation) avec leurs essais (\code{a0ab896} et le commit qui suit) ; boutons de dialogue qui restent visibles dans une fenêtre trop haute ; ce document de suivi.}
+
+\section{Risques ouverts}
+\begin{itemize}
+\item \textbf{Confiance dans le code servi par le web} (risque 6) : atténuée par le service worker, non résolue ; le paquet de bureau est la meilleure garantie.
+\item \textbf{Notes en clair sur le serveur} : tant que le chiffrement fichier par fichier (E16) n'existe pas, un carnet « gardé sur le serveur » ou sur un connecteur est lisible par l'exploitant du service ; les fenêtres le disent.
+\item \textbf{Phrase secrète oubliée} : aucune récupération possible (coffre et copie scellée) ; dit avant chaque activation.
+\item \textbf{Dépendance à de petites imitations pour tester les services} : un vrai service peut répondre autrement ; d'où la liste de ce qui reste à essayer.
+\item \textbf{Fidélité à Zim} (risque 7) : l'essentiel est couvert, pas tout.
+\end{itemize}
+
+\section{Comment ce document est tenu}
+À chaque étape terminée : (1) changer l'état et le « reste à faire » des points touchés dans \code{docs/suivi/suivi.tex}, ajouter les lignes nécessaires et une entrée au journal avec les identifiants de commit ; (2) mettre à jour les chiffres de tests ci-dessus
+(le fichier \code{docs/suivi/releves.tex}) ; (3) lancer \code{scripts/suivi.sh}, qui recompile le PDF (\code{docs/suivi/suivi.pdf}) ; (4) commiter le source et le PDF ensemble.
+Les totaux de la synthèse sont comptés automatiquement d'après les lignes du tableau.
+\end{document}

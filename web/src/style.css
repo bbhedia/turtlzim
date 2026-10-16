@@ -300,7 +300,7 @@ dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
 .check-row { display: flex; align-items: center; gap: 0.4rem; }
 /* a dialog taller than the window scrolls, and its buttons stay in sight at the bottom */
 .dialog { max-height: calc(100dvh - 2rem); overflow-y: auto; }
-.dialog-buttons { display: flex; justify-content: flex-end; gap: 0.5rem; position: sticky; bottom: 0; background: var(--zim-bg); padding: 0.5rem 0 0.1rem; margin-bottom: -0.1rem; }
+.dialog-buttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem; position: sticky; bottom: 0; background: var(--zim-bg); padding: 0.5rem 0 0.1rem; margin-bottom: -0.1rem; }
 /* a picture shown large */
 .dialog:has(.viewer) { width: min(60rem, 94vw); }
 .viewer { max-height: 70vh; overflow: auto; text-align: center; background: var(--zim-code-bg); border-radius: 8px; padding: 0.5rem; }

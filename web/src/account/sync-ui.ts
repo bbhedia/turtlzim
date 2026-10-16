@@ -51,6 +51,9 @@ interface Remote {
   remove(): Promise<void>;
 }
 
+/** A connection as the person is shown it: “Dropbox”, or “GitLab project: My notes”. */
+const nameOf = (c: Connection): string => (c.label === c.service ? c.service : `${c.service}: ${c.label}`);
+
 /** The notebook's slug for a service's folder is made in sync.ts; this is the choice a person is given. */
 const ACCOUNT = "account";
 
@@ -170,7 +173,7 @@ export class SyncUi {
     const account = this.account.account;
     if (!notebook || !account || notebook.kind !== "open") return;
     await this.loadConnections();
-    const where = [{ value: ACCOUNT, label: `The account's space on this server (${Math.floor(account.quotaBytes / 1024)} KB)` }, ...this.connections.map((c) => ({ value: String(c.id), label: `${c.service}: ${c.label}` }))];
+    const where = [{ value: ACCOUNT, label: `The account's space on this server (${Math.floor(account.quotaBytes / 1024)} KB)` }, ...this.connections.map((c) => ({ value: String(c.id), label: nameOf(c) }))];
     await showDialog({
       title: "Keep this notebook on the server",
       body: [
@@ -422,13 +425,15 @@ export class SyncUi {
       title: "Connected services",
       body: [
         has ? "Services that this account keeps notebooks on. The server holds the password you gave (sealed) so that it can reach the service for you." : "No service is connected. A notebook can be kept on this server, or on a service of yours: connect it here, then choose it in “Keep this notebook on the server…”.",
-        "Connecting a service lets this server read and write the folder you give it. Use an app password, not your main one, and a folder that holds only notebooks.",
+        "Connecting a service lets this server read and write the folder you give it. Use an app password, not your main one, and a folder that holds only notebooks. Dropbox and Google Drive are allowed in their own window (this server never sees your password), and see only a folder made for this app.",
+        ...(kinds.some((k) => k.oauth && !k.available) ? [`Not set up on this server yet: ${kinds.filter((k) => k.oauth && !k.available).map((k) => k.label).join(", ")} (the person who runs the server has to register an app for it: see its documentation).`] : []),
       ],
-      ...(has ? { choices: [{ name: "which", label: "Connection", value: String(services.connectors[0]!.id), options: services.connectors.map((c) => ({ value: String(c.id), label: `${c.service}: ${c.label}` })) }] } : {}),
+      ...(has ? { choices: [{ name: "which", label: "Connection", value: String(services.connectors[0]!.id), options: services.connectors.map((c) => ({ value: String(c.id), label: nameOf(c) })) }] } : {}),
       confirm: has ? "Disconnect" : "Close",
       noCancel: !has,
       danger: has,
-      actions: kinds.map((k) => ({ label: `Connect ${k.label}…`, run: (close: () => void) => ((next = k.kind), close()) })),
+      // (a service that is reached through its own window is offered only where the server has an app for it)
+      actions: kinds.filter((k) => !k.oauth || k.available).map((k) => ({ label: `Connect ${k.label}…`, run: (close: () => void) => ((next = k.kind), close()) })),
       working: "Disconnecting…",
       submit: async (values) => {
         if (!has) return;
@@ -443,9 +448,16 @@ export class SyncUi {
         this.host.say(used.length ? `Disconnected. ${used.length} notebook${used.length === 1 ? " is" : "s are"} no longer kept there (nothing was deleted on either side).` : "Disconnected.");
       },
     });
-    if (next === "webdav") await this.connectWebdavDialog();
+    if (next !== null && kinds.find((k) => k.kind === next)?.oauth) await this.allowThroughWindow(next);
+    else if (next === "webdav") await this.connectWebdavDialog();
     else if (next === "github") await this.connectGithubDialog();
     else if (next === "gitlab") await this.connectGitlabDialog();
+  }
+
+  /** Off to the service's own window to allow access; it sends the browser back here (the app starts again and says how it went). What is typed is saved first. */
+  private async allowThroughWindow(kind: string): Promise<void> {
+    await this.host.flush();
+    window.location.assign(`/api/connectors/oauth/${encodeURIComponent(kind)}/start`);
   }
 
   private async connectWebdavDialog(): Promise<void> {

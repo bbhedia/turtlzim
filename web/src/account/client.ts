@@ -46,6 +46,26 @@ export interface RemoteNotebook {
   bytes?: number;
 }
 
+/** A kind of service that can be connected: whether it is allowed through its own window (OAuth), and whether this server has what it needs to offer that. */
+export interface ServiceKind {
+  kind: string;
+  label: string;
+  oauth?: boolean;
+  available?: boolean;
+}
+
+/** The messages for what the return from a service's window can go wrong with: fixed text, never anything taken from the address. */
+export const CONNECT_PROBLEMS: Record<string, string> = {
+  expired: "The connection took too long, or was not begun in this browser. Try again.",
+  cancelled: "The service was not allowed access, so nothing was connected.",
+  failed: "The connection did not work. Try again in a moment.",
+  "no-refresh": "The service did not give a lasting access. Remove this app's access in the service's own settings, then connect again.",
+  "no-provider": "That service is not set up on this server.",
+  "signed-out": "You were signed out. Sign in, then connect the service again.",
+  "too-many": "Too many services are connected already. Disconnect one first.",
+  "bad-kind": "That kind of service can't be connected that way.",
+};
+
 /** A service that the person connected (never its settings: the server keeps those). */
 export interface Connection {
   id: number;
@@ -135,7 +155,7 @@ export class AccountClient {
   deleteNotebook(id: string): Promise<unknown> {
     return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}`, {}, "DELETE");
   }
-  listConnectors(): Promise<{ connectors: Connection[]; services: Array<{ kind: string; label: string }> }> {
+  listConnectors(): Promise<{ connectors: Connection[]; services: ServiceKind[] }> {
     return this.call("/api/connectors");
   }
   addConnector(kind: string, label: string, settings: Record<string, string>): Promise<Connection> {

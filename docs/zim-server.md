@@ -3,7 +3,7 @@
 `server/`: a Node 24 program (no framework; `node:sqlite`, `node:crypto`, and `nodemailer` for SMTP) that serves the web app **and** `/api/`, in one
 process. It exists so that a person can have an **account**; an account is optional, and without one nothing changes: notebooks stay on the device.
 Accounts can keep **open notebooks on the server, in clear**, in step with other devices (below; 1 MB per user). A sealed copy of the encrypted notebooks (below) and
-connected services (Nextcloud / WebDAV, a GitHub repository and a GitLab project; Dropbox and Google Drive are later steps (`docs/zim-cloud-feasibility.md`, roadmap lots 3 to 6). Decided 2026-10-15: Google and GitHub
+connected services (Nextcloud / WebDAV, a GitHub repository, a GitLab project, Dropbox and Google Drive; `docs/zim-cloud-feasibility.md`, roadmap lots 3 to 6). Decided 2026-10-15: Google and GitHub
 first, a mailed code **only at sign-up**, and run on this server (a VPS later if the project succeeds; the shared hosting idea is dropped).
 
 ## What it does
@@ -120,8 +120,32 @@ Verified by `server/test/gitlab.test.mjs` (a GitLab in memory, listings in pages
 branches, a project with no commit, the exact words GitLab uses to refuse a stale commit: the conflict is recognised from them, so a GitLab that words it differently would show as an error instead of a question).
 A review of the validators for this found that a repository named `../..` passed for GitHub and GitLab: a dot segment is now refused in both (a test each).
 
-- Not done: Dropbox, Google Drive (each needs an OAuth app of yours, and its own driver: the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what they plug into), connecting a service
-  for the encrypted notebooks' sealed copy, and a sync of connected services from the native apps.
+### Dropbox and Google Drive (`server/src/connectors/dropbox.mjs`, `gdrive.mjs`, `oauth.mjs`, `oauth-token.mjs`)
+
+These two are **allowed in the service's own window**: *Connect Dropbox…* / *Connect Google Drive…* (shown only where this server has an app for them) leaves for Dropbox's or Google's page, the person allows the access there, and the browser
+comes back to the app, which says how it went. The server never sees the person's password; it keeps the **refresh token**, sealed like every other connection's settings, trades it for an access token (kept only in memory, renewed when it ends or is
+refused) and, when the connection is removed, **tells the service that the access is over** (best effort).
+
+- The window's flow is the authorisation-code flow with PKCE. It is begun by someone who is signed in and finished by the same person in the same browser: a one-use state kept hashed and **bound to the user**, a nonce cookie (`zim-connect`),
+  ten minutes. A return that is not the one begun here (another person's state, another browser's cookie, a state used twice) is refused with fixed words and connects nothing (a test makes “Bob begins, Ada's browser finishes”: it would have put
+  Bob's Dropbox in Ada's account).
+- **Dropbox**: an *app folder* app, so it can see only `/Apps/<the app>`; a notebook is a folder of it. There is no commit across files: a send is a series of uploads, each replacing a file **by the revision that was listed** (`update`) or adding it only if
+  absent (`add`), so a file that changed meanwhile is refused as a conflict instead of overwritten — but the files sent before it stay sent. The folder's version is Dropbox's own content hashes.
+- **Google Drive**: the narrowest scope there is, `drive.file` (only files and folders **this app** made, never the rest of the Drive). Everything is under a folder "Zim Notebooks" that the app makes; sub-folders are real Drive folders, so the files can be opened
+  in Drive. Drive allows two files of one name in a folder: the first is used. A send is a series of calls guarded by the version check (a shorter window than none, not airtight).
+- Verified by `server/test/dropbox.test.mjs` and `gdrive.test.mjs` (a Dropbox and a Drive in memory, with listing in pages of two, ids, revisions, multipart uploads, token endpoints that check PKCE and the client's secret, tokens that end and are revoked; 18 tests;
+  21 mutants of the drivers, the token cache, the window's checks and the sealing, all caught but one that changes nothing a person could see) and the browser scenarios “…kept on Dropbox…” and “…kept on Google Drive…” (out to the stand-in's window and back,
+  an address that is cleaned, a failure that says fixed words, one file written for one changed page, a change made on the service itself fetched, stop deletes only the notebook's files, disconnect tells the service). **Not tried against the real Dropbox or Google**.
+- **What you do once, to turn each on** (then restart the server; the buttons appear):
+  - *Dropbox*: dropbox.com/developers/apps → **Create app** → *Scoped access* → **App folder** → a name that is not taken. *Permissions*: tick `files.metadata.read`, `files.content.read`, `files.content.write` and submit. *Settings*: copy the **App key** and **App secret**, and
+    add the redirect URI `<ZIM_BASE_URL>/api/connectors/oauth/dropbox/callback` (Dropbox accepts `http://` only for `localhost`). An app left in *Development* status can be linked by up to 50 accounts, yours included.
+  - *Google Drive*: console.cloud.google.com → a project → **Enable** the *Google Drive API* → *OAuth consent screen* (External) → add the scope `…/auth/drive.file` → *Credentials* → **Create OAuth client ID** → *Web application* → the redirect URI
+    `<ZIM_BASE_URL>/api/connectors/oauth/gdrive/callback`. **Careful**: while the consent screen is in *Testing*, Google ends a refresh token after 7 days (the connection then says “connect it again”); `drive.file` is, to my knowledge, a scope that does not need Google's
+    review, so the app can be moved to *In production* — check that on Google's own page before relying on it.
+  - Then, in `~/.local/state/zim-server/oauth.json` (or `ZIM_DROPBOX_CLIENT_ID` / `ZIM_DROPBOX_CLIENT_SECRET`, `ZIM_GDRIVE_CLIENT_ID` / `ZIM_GDRIVE_CLIENT_SECRET`): `{ "dropbox": { "clientId": "…", "clientSecret": "…" }, "gdrive": { … } }` beside the sign-in apps' entries
+    (these are separate apps, with their own ids, from the Google and GitHub sign-in ones).
+
+- Not done: a connected service for the encrypted notebooks' sealed copy, a sync of connected services from the native apps, and other services (the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what a new one plugs into).
 
 ## Run it
 
@@ -166,4 +190,4 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## Not yet
 
-Merging two versions of a page (today one copy replaces the other), the Dropbox / Google Drive connectors, login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).
+Merging two versions of a page (today one copy replaces the other), login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).

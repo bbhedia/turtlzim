@@ -2,7 +2,7 @@
 // talk to the account client; what they know of the app is `say` (a line of the status bar) and `saveFile`.
 import { h } from "../app/dom";
 import { showDialog } from "../app/dialogs";
-import { AccountClient, ApiError, SIGN_IN_PROBLEMS } from "./client";
+import { AccountClient, ApiError, CONNECT_PROBLEMS, SIGN_IN_PROBLEMS } from "./client";
 import type { Account, Offer } from "./client";
 
 const SERVICE_NAMES: Record<string, string> = { google: "Google", github: "GitHub" };
@@ -32,15 +32,18 @@ export class AccountUi {
     const url = new URL(location.href);
     const problem = url.searchParams.get("account_error");
     const signedIn = url.searchParams.get("signed_in");
-    if (problem !== null || signedIn !== null) {
-      url.searchParams.delete("account_error");
-      url.searchParams.delete("signed_in");
+    const connected = url.searchParams.get("connected");
+    const connectProblem = url.searchParams.get("connect_error");
+    if (problem !== null || signedIn !== null || connected !== null || connectProblem !== null) {
+      for (const name of ["account_error", "signed_in", "connected", "connect_error"]) url.searchParams.delete(name);
       history_.replaceState(history_.state, "", url.pathname + (url.search || "") + url.hash);
     }
-    if (problem === null && signedIn === null) return;
+    if (problem === null && signedIn === null && connected === null && connectProblem === null) return;
     await this.refresh();
     if (problem !== null) this.say(SIGN_IN_PROBLEMS[problem] ?? SIGN_IN_PROBLEMS.failed!);
     else if (signedIn !== null && this.account) this.say(`Signed in as ${this.account.email}.`);
+    else if (connectProblem !== null) this.say(CONNECT_PROBLEMS[connectProblem] ?? CONNECT_PROBLEMS.failed!);
+    else if (connected !== null) this.say("The service is connected. Choose it in “Keep this notebook on the server…”.");
   }
 
   /** Ask the server what it offers and who is signed in (a server that doesn't answer is no account server: nothing is shown). */

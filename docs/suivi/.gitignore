@@ -1,0 +1,4 @@
+version.tex
+*.aux
+*.log
+*.out
