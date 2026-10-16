@@ -81,6 +81,7 @@ mod dispatch;
 mod schema;
 mod turtl;
 mod vault_backup;
+mod seal;
 // How a JS host runs the core on wasm32: the replacement for the thread-based `start()`, the
 // channel-reading `recv()`s and the C API below, which are native only.
 #[cfg(target_arch = "wasm32")]

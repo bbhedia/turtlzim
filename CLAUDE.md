@@ -37,6 +37,7 @@ three apps: **desktop** (Win/macOS/Linux), **web** (browser), **mobile** (iOS/An
   A notebook is **either encrypted or clear** (never both kinds of page) and **either local or remote** (never both durably; mixed only transiently while it is being changed: first send, change of destination, a conflict being settled). Encryption is **per notebook**
   (one key each); storage and sync of a remote notebook are **per page** (an object per page and attachment, with an index; only changed pages travel; different pages changed on two devices merge, the same page asks). An encrypted notebook reuses the
   **local vault's passphrase** (no second passphrase). The interface keeps one list with two worded badges (encrypted; synced where / this device only) and a state icon. These are choices, to relax later if the use shows a need.
+  The sealing of a remote encrypted notebook is in the core (`core/turtl-core-rs/src/seal.rs`, commands `seal:*` in `LOCAL_COMMANDS`, `web/src/vault/seal.ts`; `docs/zim-encrypted-notebooks.md`): the master key stays in the vault's keychain and is never handed out unwrapped; objects are sealed with the same libsodium primitives as everything else (no second crypto path), and its known answers are asserted on native and wasm32.
 - **Product license: GPL-3.0** (because it embeds `core-rs`, which is GPLv3).
 
 UI decision (confirmed by the user 2026-10-05, see Open issues #1): **shared web UI** — build

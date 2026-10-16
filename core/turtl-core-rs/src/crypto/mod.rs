@@ -52,6 +52,9 @@ pub use crate::crypto::low::{
 };
 pub use crate::crypto::low::chacha20poly1305::{random_nonce, random_key, noncelen, keylen};
 pub use crate::crypto::key::Key;
+// What the sealing of notebook copies (`seal`) is made of: the same libsodium primitives, on both targets.
+pub(crate) use crate::crypto::low::{hmac, rand_bytes};
+pub(crate) use crate::crypto::low::chacha20poly1305::{encrypt as aead_encrypt, decrypt as aead_decrypt};
 // The host must call and await `initWasmCrypto(sodium)` exactly once before any other crypto::
 // function is used on wasm32 -- see `wasm_sodium::init_wasm_crypto`'s doc comment.
 #[cfg(target_arch = "wasm32")]

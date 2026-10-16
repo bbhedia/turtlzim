@@ -14,6 +14,7 @@ use ::config;
 use crate::util::logger;
 use crate::util::exec;
 use crate::turtl::Turtl;
+use crate::seal;
 use crate::search::Query;
 use crate::profile::{Profile, Export, ImportMode};
 use crate::models::model::Model;
@@ -54,6 +55,14 @@ pub(crate) const LOCAL_COMMANDS: &[&str] = &[
     "vault:restore:write",
     "vault:restore:commit",
     "vault:restore:cancel",
+    "seal:master:status",
+    "seal:master:create",
+    "seal:master:wrap",
+    "seal:master:unwrap",
+    "seal:objects:seal",
+    "seal:objects:open",
+    "seal:index:seal",
+    "seal:index:open",
     "profile:load",
     "profile:batch:begin",
     "profile:batch:commit",
@@ -245,6 +254,39 @@ async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
             }
             let end = offset + ::std::cmp::min(length, backup.len() - offset);
             Ok(Value::String(crypto::to_base64(&backup[offset..end])?))
+        }
+        // sealed copies of a notebook, for a place that must not read it (see `seal`): the key stays in the vault's keychain
+        "seal:master:status" => {
+            local_only_or_refuse(turtl, cmd)?;
+            seal::master_status(turtl)
+        }
+        "seal:master:create" => {
+            local_only_or_refuse(turtl, cmd)?;
+            seal::master_create(turtl, &data)
+        }
+        "seal:master:wrap" => {
+            local_only_or_refuse(turtl, cmd)?;
+            seal::master_wrap(turtl, &data)
+        }
+        "seal:master:unwrap" => {
+            local_only_or_refuse(turtl, cmd)?;
+            seal::master_unwrap(turtl, &data)
+        }
+        "seal:objects:seal" => {
+            local_only_or_refuse(turtl, cmd)?;
+            seal::seal_objects(turtl, &data)
+        }
+        "seal:objects:open" => {
+            local_only_or_refuse(turtl, cmd)?;
+            seal::open_objects(turtl, &data)
+        }
+        "seal:index:seal" => {
+            local_only_or_refuse(turtl, cmd)?;
+            seal::seal_index_command(turtl, &data)
+        }
+        "seal:index:open" => {
+            local_only_or_refuse(turtl, cmd)?;
+            seal::open_index_command(turtl, &data)
         }
         "vault:backup:drop" | "vault:restore:cancel" => {
             local_only_or_refuse(turtl, cmd)?;

@@ -169,6 +169,43 @@ zeros after the delete, where the section below used to say it might linger. Wha
 operating system does with the storage below SQLite, flash that remaps blocks, a snapshot of the disk,
 is not the app's to wipe.)
 
+## Sealed copies of a notebook (the engine's side: `core/turtl-core-rs/src/seal.rs`, `web/src/vault/seal.ts`)
+
+A notebook that is kept somewhere that must not be able to read it (the account's server, a folder of a cloud service) is kept **page by page**, every page and attachment as one *sealed object*, plus a sealed index. This is the engine's part (step E16b of the plan):
+the keys, the objects, the index and the commands. What uses them (sending an encrypted notebook, opening one on another device) is E16d. It is made on the same libsodium primitives as the rest of the core, so a copy sealed in a
+browser opens in the desktop program and the other way round.
+
+```text
+master (32 random bytes)     one for the account: made once, kept in the vault's keychain (item "zim-cloud-master", type "cloud"), so it is sealed there by the vault's key,
+                             goes with a backup of the vault, and is never given out unwrapped
+  notebook key  = HMAC-SHA-512/256(master, "zim-seal v1 notebook" 0 notebook id)     nothing is stored per notebook: its key is made from the master and its id
+    names key   = HMAC(notebook key, "zim-seal v1 names")      an object's name is hex(HMAC(names key, path))[0..32] + ".zseal": the path does not show
+    content key = HMAC(notebook key, "zim-seal v1 content")
+an object  "ZSO1"  nonce (12, random)  ChaCha20-Poly1305-IETF(content key, nonce, ad = "zim-seal v1 object" 0 name, plaintext)
+the index  an object named "index.zseal": JSON { v, counter, title, files: [{ path, name, size, sha256 }] }, sealed like any other
+the master wrapped by a passphrase   "ZSW1"  ops (u32)  mem (u32)  salt (32)  nonce (12)  ChaCha20-Poly1305(scrypt(passphrase, salt, ops, mem), nonce, ad = the 44 bytes before the nonce, master)   (104 bytes)
+```
+
+- **Why this shape**: the study asked for a master key wrapped by the passphrase, so that a changed passphrase wraps again without sealing anything again, and for hidden names and a sealed index, so that the other place sees only that objects exist, their sizes and when they
+  changed. The title of a notebook, its pages' names and its layout are all inside the sealed index.
+- **One passphrase** (decided 2026-10-16): the vault's. The wrapped master is made with the vault's cost (128 MiB of memory a try; the tests make vaults at a cheaper cost, and say so). On a device that has no key yet, `seal:master:unwrap` takes it out of the wrapped one
+  with the passphrase that wrapped it (the app will ask for it once, and not again: the key is then in that device's vault). A device whose vault has another passphrase is asked for the one that wrapped the key; it is told so by the dialog (E16d). A changed vault passphrase
+  is followed by `seal:master:wrap` with the new one, to put the new wrapping where the old one was (nothing sealed is touched). **No recovery key** (decided 2026-10-16): a lost passphrase loses the notebooks, as for the vault.
+- **The cipher**: the study named XChaCha20-Poly1305; what the core has, on both targets, is ChaCha20-Poly1305 (IETF), so that is what is used, with a random 96-bit nonce for each object. One key is made to seal fewer than 2^32 objects, which is billions of edits; a notebook's key is the only key that
+  seals its objects. (A different nonce per object, not a counter, so that two devices that seal with one key do not have to agree on anything.)
+- **The commands** (all of a core without a server, and in `LOCAL_COMMANDS`; each needs the vault unlocked): `seal:master:status`, `seal:master:create` (passphrase → the wrapped key), `seal:master:wrap` (passphrase → the wrapped key), `seal:master:unwrap` (wrapped key, passphrase → kept or not; a vault that has
+  *another* master is refused), `seal:objects:seal` (notebook id, files → names, sealed objects, sizes, SHA-256 sums), `seal:objects:open` (objects → files; one that does not open fails the whole call), `seal:index:seal` / `seal:index:open`. At most 2000 objects and 64 MiB at a time. A path that
+  leaves the notebook, an id that is not 8 to 64 of letters, digits, `_`, `-`, an index that lists a name twice: refused.
+- **What is checked on an object**: an object's *name* is its additional data, so an object put under another name does not open (nor with another key, nor with a changed byte: the test changes every byte, one at a time, and cuts at every length); the index holds each page's SHA-256, so an old version
+  of a page put back is noticed once the index is newer; the index's `counter` goes up with each version, so a device that remembers the highest it has seen can tell that a whole old copy was put back (E16d keeps it).
+- **What it does not defend against**: whoever keeps the objects keeps every version that was ever sent, and can try passphrases at the cost of the wrapped master; a whole old copy that is consistent is believable to a device that has never seen a newer one; and the sizes and times of the objects are visible.
+- **Verified**: known answers (the keys, the names, an object with a fixed nonce, a wrapped master) are asserted on **native and wasm32** (`crypto_test!`; 79 tests on wasm32, 121 native), and were **reproduced byte for byte by a second implementation** (Python's `hmac`, `hashlib.scrypt` and `cryptography`'s ChaCha20-Poly1305,
+  written from the description above, not from the Rust). Flow tests drive the commands through the dispatcher: the key made once, sealed objects that name nothing and show nothing, every refusal, a second vault that takes the key from the wrapped one with the passphrase that wrapped it (and not its own), a third that takes
+  the re-wrapped one with the new passphrase and not the old, a vault that has a key of its own that is not given another, the key still there after the vault is locked and unlocked **on disk**, and **with a backup restored on another computer**; nothing asked of a server. In a real browser (`npm run test:vault`,
+  "sealed copies…"): the engine's Worker seals, the key is there after a reload, another browser takes it, and **Node, with only the passphrase and the wrapped key, derives the same names and opens what the browser sealed** (a third implementation, on the shipped wasm). 11 mutants of the code
+  (the name not in the additional data, the magic not checked, the wrap's header not authenticated, a cost too high or too low run, a notebook key that ignores the notebook, one key for names and content, an index with a name twice, another master overwriting, the key made twice, a path that leaves) are all caught.
+- **Not done yet**: nothing uses it (E16c, E16d): no encrypted notebook is sent anywhere. `seal:master:wrap` is not called by the app when the passphrase changes yet. The index's counter is not remembered by any device yet.
+
 ## Backup and restore
 
 **Back up the encrypted notebooks…** saves one file with everything in the vault, **still encrypted**, as

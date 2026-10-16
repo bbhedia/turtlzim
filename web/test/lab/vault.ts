@@ -5,6 +5,7 @@ import { pageKey } from "../../src/notebook-core";
 import type { PageChange, StoredFile, StoredPage } from "../../src/notebook/store";
 import { Vault, VaultBusyError, VaultExistsError, WrongPassphraseError, NoVaultError, NotABackupError, WorkerTransport, vaultSupport } from "../../src/vault";
 import { base64ToBytes, bytesToBase64 } from "../../src/vault/base64";
+import { VaultSeal } from "../../src/vault/seal";
 import { TurtlStore } from "../../src/vault/turtl-store";
 import { initZim } from "../../src/zim";
 
@@ -61,7 +62,21 @@ const store = new TurtlStore(() => vault.core, pageKey);
 const page = (name: string, text: string): StoredPage => ({ name, text, bom: false, lineEnding: "lf", modified: 1 });
 const file = (path: string, text: string, type: string): StoredFile => ({ path, blob: new Blob([text], { type }), modified: 2 });
 
+const sealer = new VaultSeal(() => vault.core);
+const textBytes = (text: string) => new TextEncoder().encode(text);
+
 const lab = {
+  /** Sealed copies (src/vault/seal.ts): what a page hands a test is base64. */
+  sealStatus: () => attempt(() => sealer.hasKey()),
+  sealCreate: (passphrase: string) => attempt(async () => bytesToBase64(await sealer.createKey(passphrase))),
+  sealWrap: (passphrase: string) => attempt(async () => bytesToBase64(await sealer.wrapKey(passphrase))),
+  sealTake: (wrapped: string, passphrase: string) => attempt(() => sealer.takeKey(base64ToBytes(wrapped), passphrase)),
+  sealFiles: (notebook: string, files: Array<{ path: string; text: string }>) =>
+    attempt(async () => (await sealer.seal(notebook, files.map((f) => ({ path: f.path, bytes: textBytes(f.text) })))).map((o) => ({ ...o, sealed: bytesToBase64(o.sealed) }))),
+  openObjects: (notebook: string, objects: Array<{ name: string; sealed: string }>) =>
+    attempt(async () => (await sealer.open(notebook, objects.map((o) => ({ name: o.name, sealed: base64ToBytes(o.sealed) })))).map((o) => ({ name: o.name, text: new TextDecoder().decode(o.bytes) }))),
+  sealIndex: (notebook: string, index: { counter: number; title: string; files: Array<{ path: string; name: string; size: number; sha256: string }> }) => attempt(async () => bytesToBase64(await sealer.sealIndex(notebook, index))),
+  openIndex: (notebook: string, sealed: string) => attempt(() => sealer.openIndex(notebook, base64ToBytes(sealed))),
   /** Count what the engine's Worker says to the page (its heartbeat included) from now on. */
   listen: () => {
     const transport = lastTransport;

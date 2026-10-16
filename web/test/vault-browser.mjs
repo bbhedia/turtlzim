@@ -11,6 +11,7 @@
 //
 // Environment: CHROME_PATH, CHROME_LIB_PATH (see browser-launch.mjs); ONLY (run the scenarios whose name contains this text).
 import { execFileSync } from "node:child_process";
+import { createDecipheriv, createHmac, scryptSync } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { fileURLToPath } from "node:url";
 import { createStaticServer } from "../scripts/serve.mjs";
@@ -339,6 +340,112 @@ try {
       }
     });
   }
+
+  // A second implementation of what core/turtl-core-rs/src/seal.rs does, written here from its description only (Node's own crypto: HMAC-SHA-512 cut to 256 bits, scrypt, ChaCha20-Poly1305),
+  // so that what the engine seals in the browser is checked by something that is not the engine.
+  const hmac256 = (key, data) => createHmac("sha512", key).update(data).digest().subarray(0, 32);
+  const derive = (key, label, extra = Buffer.alloc(0)) => hmac256(key, Buffer.concat([Buffer.from(`zim-seal v1 ${label}`), Buffer.from([0]), extra]));
+  const chacha = (key, nonce, aad, body, tag) => {
+    const decipher = createDecipheriv("chacha20-poly1305", key, nonce, { authTagLength: 16 });
+    decipher.setAAD(aad);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(body), decipher.final()]);
+  };
+  function nodeUnwrap(wrappedBase64, passphrase) {
+    const wrapped = Buffer.from(wrappedBase64, "base64");
+    assertEqual(wrapped.subarray(0, 4).toString(), "ZSW1", "a wrapped key says what it is");
+    const mem = wrapped.readUInt32BE(8);
+    const key = scryptSync(passphrase.normalize("NFKC"), wrapped.subarray(12, 44), 32, { N: mem / 1024, r: 8, p: 1, maxmem: mem * 2 + (1 << 20) });
+    const body = wrapped.subarray(56);
+    return chacha(key, wrapped.subarray(44, 56), wrapped.subarray(0, 44), body.subarray(0, body.length - 16), body.subarray(body.length - 16));
+  }
+  const nodeKeys = (master, notebook) => {
+    const nb = derive(master, "notebook", Buffer.from(notebook));
+    return { names: derive(nb, "names"), content: derive(nb, "content") };
+  };
+  const nodeName = (keys, path) => `${hmac256(keys.names, Buffer.from(path)).toString("hex").slice(0, 32)}.zseal`;
+  function nodeOpen(keys, name, sealedBase64) {
+    const sealed = Buffer.from(sealedBase64, "base64");
+    assertEqual(sealed.subarray(0, 4).toString(), "ZSO1", "an object says what it is");
+    return chacha(keys.content, sealed.subarray(4, 16), Buffer.concat([Buffer.from("zim-seal v1 object\0"), Buffer.from(name)]), sealed.subarray(16, sealed.length - 16), sealed.subarray(sealed.length - 16)).toString();
+  }
+
+  await scenario("sealed copies: the engine seals pages under names that say nothing, the key is in the vault across a reload, another vault takes it from the wrapped key with the passphrase that wrapped it, and a Node program that has only that passphrase opens what the browser sealed", async () => {
+    const first = await fresh();
+    const other = await fresh();
+    const NB = "garden-0001";
+    const SECRET = "The vault door code is 7391 SEAL-MARKER";
+    try {
+      const page = await openLab(first);
+      await mustWork(await lab(page, "create", PASSPHRASE), "making the vault");
+      assertEqual(await mustWork(await lab(page, "sealStatus"), "asking"), false, "a new vault has no key for sealed copies");
+      assert(!(await lab(page, "sealFiles", NB, [{ path: "Home.txt", text: "x" }])).ok, "and cannot seal before it has one");
+      const wrapped = await mustWork(await lab(page, "sealCreate", PASSPHRASE), "making the key");
+      assertEqual(Buffer.from(wrapped, "base64").length, 104, "the wrapped key is 104 bytes");
+      assert(!(await lab(page, "sealCreate", PASSPHRASE)).ok, "the key is made once");
+      assertEqual(await mustWork(await lab(page, "sealStatus"), "asking"), true, "now it has one");
+
+      const files = [{ path: "Home.txt", text: SECRET }, { path: "Sub/Page two.txt", text: "the second page, with some words" }];
+      const sealed = await mustWork(await lab(page, "sealFiles", NB, files), "sealing");
+      for (const object of sealed) {
+        assert(/^[0-9a-f]{32}\.zseal$/.test(object.name), `a name that says nothing: ${object.name}`);
+        const bytes = Buffer.from(object.sealed, "base64");
+        assert(!contains(bytes, "SEAL-MARKER") && !contains(bytes, "second page") && !contains(bytes, "Home") && !contains(bytes, "Page two"), "the sealed object holds nothing that can be read");
+      }
+      const opened = await mustWork(await lab(page, "openObjects", NB, sealed.map((o) => ({ name: o.name, sealed: o.sealed }))), "opening");
+      assertEqual(opened.map((o) => o.text), files.map((f) => f.text), "the engine opens what it sealed");
+      assert(!(await lab(page, "openObjects", "orchard-0002", [{ name: sealed[0].name, sealed: sealed[0].sealed }])).ok, "another notebook's key does not open it");
+      assert(!(await lab(page, "openObjects", NB, [{ name: sealed[1].name, sealed: sealed[0].sealed }])).ok, "nor does another name");
+      const index = { counter: 5, title: "Garden", files: sealed.map((o) => ({ path: o.path, name: o.name, size: o.size, sha256: o.sha256 })) };
+      const sealedIndex = await mustWork(await lab(page, "sealIndex", NB, index), "sealing the index");
+      assert(!contains(Buffer.from(sealedIndex, "base64"), "Garden"), "the index's title does not show");
+      const canonical = (value) => (Array.isArray(value) ? value.map(canonical) : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((k) => [k, canonical(value[k])])) : value);
+      assertEqual(canonical(await mustWork(await lab(page, "openIndex", NB, sealedIndex), "opening the index")), canonical(index), "and the index opens");
+
+      // the key is in the vault: after the page is reloaded and the vault unlocked, it is there and opens what was sealed
+      await page.reload();
+      await page.waitForFunction(() => window.lab !== undefined);
+      await mustWork(await lab(page, "unlock", PASSPHRASE), "unlocking after a reload");
+      assertEqual(await mustWork(await lab(page, "sealStatus"), "asking after the reload"), true, "the key is still there");
+      assertEqual((await mustWork(await lab(page, "openObjects", NB, [{ name: sealed[0].name, sealed: sealed[0].sealed }]), "opening after the reload"))[0].text, SECRET, "and opens what was sealed");
+
+      // what another implementation, given only the passphrase and the wrapped key, makes of it: the same names, and the same pages
+      const master = nodeUnwrap(wrapped, PASSPHRASE);
+      assertEqual(master.length, 32, "the key comes out of the wrapped one with the passphrase");
+      const keys = nodeKeys(master, NB);
+      for (const [i, object] of sealed.entries()) {
+        assertEqual(nodeName(keys, object.path), object.name, `the name of ${object.path} is the one the engine gave`);
+        assertEqual(nodeOpen(keys, object.name, object.sealed), files[i].text, `Node opens ${object.path}`);
+      }
+      let refusedByNode = false;
+      try {
+        nodeUnwrap(wrapped, `${PASSPHRASE}!`);
+      } catch {
+        refusedByNode = true;
+      }
+      assert(refusedByNode, "and a wrong passphrase does not unwrap it");
+
+      // another browser: its own vault and passphrase; it has no key; the wrapped key with the passphrase that wrapped it gives it the key, and then it opens what the first sealed
+      const page2 = await openLab(other);
+      await mustWork(await lab(page2, "create", NEXT), "making the second vault");
+      assertEqual(await mustWork(await lab(page2, "sealStatus"), "asking"), false, "the second vault has no key");
+      assert(!(await lab(page2, "openObjects", NB, [{ name: sealed[0].name, sealed: sealed[0].sealed }])).ok, "and opens nothing");
+      assert(!(await lab(page2, "sealTake", wrapped, NEXT)).ok, "its own passphrase is not the one that wrapped the key");
+      assertEqual(await mustWork(await lab(page2, "sealStatus"), "asking"), false, "a refusal keeps nothing");
+      assertEqual(await mustWork(await lab(page2, "sealTake", wrapped, PASSPHRASE), "taking the key"), true, "the passphrase that wrapped it gives the key");
+      assertEqual((await mustWork(await lab(page2, "openObjects", NB, sealed.map((o) => ({ name: o.name, sealed: o.sealed }))), "opening in the second vault")).map((o) => o.text), files.map((f) => f.text), "the second vault opens what the first sealed");
+      assertEqual(await mustWork(await lab(page2, "sealTake", wrapped, PASSPHRASE), "taking it again"), false, "taking it again changes nothing");
+      // (and what this vault seals, the first opens: one key, two vaults)
+      const back = await mustWork(await lab(page2, "sealFiles", NB, [{ path: "From second.txt", text: "written in the second browser" }]), "sealing in the second vault");
+      assertEqual((await mustWork(await lab(page, "openObjects", NB, [{ name: back[0].name, sealed: back[0].sealed }]), "opening in the first"))[0].text, "written in the second browser", "the first vault opens what the second sealed");
+      // a changed passphrase wraps the key again: the new wrapping opens with the new passphrase and not the old
+      const rewrapped = await mustWork(await lab(page, "sealWrap", NEXT), "wrapping again");
+      assertEqual(nodeUnwrap(rewrapped, NEXT).equals(master), true, "the same key, under the new passphrase");
+    } finally {
+      await first.close();
+      await other.close();
+    }
+  });
 
   await scenario("what the browser keeps does not hold the passphrase", async () => {
     const context = await fresh();

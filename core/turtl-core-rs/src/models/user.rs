@@ -111,7 +111,7 @@ thread_local! {
 }
 
 /// What an account of a core without a server is made at.
-fn local_kdf() -> Kdf {
+pub(crate) fn local_kdf() -> Kdf {
     #[cfg(test)]
     {
         if let Some(kdf) = TEST_LOCAL_KDF.with(|kdf| kdf.borrow().clone()) {
