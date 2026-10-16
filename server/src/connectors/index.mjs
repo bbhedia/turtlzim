@@ -128,18 +128,19 @@ export class Connectors {
   async files(userId, id, dir) {
     const { driver, settings } = this.open(userId, id);
     const files = await this.guard(() => driver.list(settings, this.options, dir));
-    return { version: files.length ? versionOf(files) : "", files: files.map((f) => ({ path: f.path, size: f.size })) };
+    return { version: files.length ? versionOf(files) : "", files: files.map((f) => ({ path: f.path, size: f.size, mark: f.mark })) };
   }
 
-  async read(userId, id, dir) {
+  async read(userId, id, dir, only = null) {
     const { driver, settings } = this.open(userId, id);
     return this.guard(async () => {
-      const files = await driver.list(settings, this.options, dir);
+      const everything = await driver.list(settings, this.options, dir);
+      const files = only ? everything.filter((f) => only.includes(f.path)) : everything;
       const total = files.reduce((sum, f) => sum + f.size, 0);
       if (total > 8 * 1024 * 1024) throw new ConnectorError("That notebook is bigger than 8 MB, which is more than can be fetched here.", 413, "too-big");
       const out = [];
       for (const file of files) out.push({ path: file.path, base64: (await driver.read(settings, this.options, dir, file.path, file)).toString("base64") });
-      return { version: files.length ? versionOf(files) : "", files: out };
+      return { version: everything.length ? versionOf(everything) : "", files: out };
     });
   }
 

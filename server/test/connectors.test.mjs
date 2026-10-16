@@ -141,6 +141,17 @@ describe("connected services, through the API", () => {
     assert.equal(dav.files.get("Garden-abc123/Help/Editor page.txt").bytes.toString(), "deep", "the service has it where a person would look");
   });
 
+  it("gives each file's mark in a listing, and reads only the files that are asked for", async () => {
+    const dir = "Garden-abc123";
+    const listed = await call("ada", `/api/connectors/${id}/list`, { dir });
+    assert.ok(listed.json.files.every((f) => typeof f.mark === "string" && f.mark.length > 0), "every file has a mark");
+    const some = await call("ada", `/api/connectors/${id}/read`, { dir, paths: ["Home.txt", "Nope.txt"] });
+    assert.deepEqual(some.json.files.map((f) => f.path), ["Home.txt"]);
+    assert.equal(some.json.version, listed.json.version, "the version is the folder's, not the subset's");
+    assert.equal((await call("ada", `/api/connectors/${id}/read`, { dir, paths: ["../x"] })).status, 400);
+    assert.equal((await call("ada", `/api/connectors/${id}/read`, { dir, paths: "Home.txt" })).status, 400);
+  });
+
   it("lists the folders at the root of the service, which are the notebooks there", async () => {
     dav.folders.add("Other book-1");
     dav.folders.add(".hidden");

@@ -98,10 +98,99 @@ describe("notebooks kept on the server", () => {
     assert.equal(validPath("Home/Sub page.txt"), true);
   });
 
+  describe("page by page", () => {
+    const NB = "patched-0001";
+    before(async () => {
+      await call("cara", "/api/register", { email: "cara@example.org", password: PASSWORD });
+      await call("cara", "/api/verify", { email: "cara@example.org", code: lastCode(parts.mailer, "cara@example.org") });
+    });
+    const sha = async (text) => Buffer.from(await crypto.subtle.digest("SHA-256", Buffer.from(text))).toString("hex");
+    const manifest = (who = "cara", id = NB) => call(who, `/api/sync/notebooks/${id}/manifest`);
+
+    it("says what a notebook holds without its bytes, with a mark that is the SHA-256 of each file", async () => {
+      const put = await call("cara", `/api/sync/notebooks/${NB}`, { title: "Pages", baseRevision: 0, files: [{ path: "A.txt", base64: b64("alpha") }, { path: "Sub/B.txt", base64: b64("beta") }] }, "PUT");
+      assert.equal(put.status, 200);
+      const m = await manifest();
+      assert.equal(m.status, 200);
+      assert.equal(m.json.revision, 1);
+      assert.deepEqual(m.json.files, [{ path: "A.txt", size: 5, mark: await sha("alpha") }, { path: "Sub/B.txt", size: 4, mark: await sha("beta") }]);
+      assert.equal(JSON.stringify(m.json).includes(b64("alpha")), false, "no bytes in it");
+      assert.equal((await manifest("bob")).status, 404, "another account has none");
+      assert.equal((await call("nobody", `/api/sync/notebooks/${NB}/manifest`)).status, 401);
+    });
+
+    it("gives some of the files, and leaves out a path that is not there", async () => {
+      const got = await call("cara", `/api/sync/notebooks/${NB}/read`, { paths: ["Sub/B.txt", "Nope.txt"] }, "POST");
+      assert.equal(got.status, 200);
+      assert.deepEqual(got.json.files, [{ path: "Sub/B.txt", base64: b64("beta") }]);
+      assert.equal(got.json.revision, 1);
+      assert.equal((await call("cara", `/api/sync/notebooks/${NB}/read`, { paths: ["../x"] }, "POST")).status, 400);
+      assert.equal((await call("bob", `/api/sync/notebooks/${NB}/read`, { paths: ["A.txt"] }, "POST")).status, 404);
+      assert.equal((await call("cara", `/api/sync/notebooks/${NB}/read`, { paths: ["A.txt"] }, "POST", { "content-type": "application/json" })).status, 403, "the site's header is needed");
+    });
+
+    it("changes only the files it is told to, and the revision moves once", async () => {
+      const patch = (body) => call("cara", `/api/sync/notebooks/${NB}`, { title: "Pages", ...body }, "PATCH");
+      const done = await patch({ baseRevision: 1, put: [{ path: "A.txt", base64: b64("alpha two") }, { path: "New.txt", base64: b64("n") }], remove: ["Sub/B.txt"] });
+      assert.equal(done.status, 200, done.text);
+      assert.equal(done.json.revision, 2);
+      const m = (await manifest()).json;
+      assert.deepEqual(m.files.map((f) => f.path), ["A.txt", "New.txt"]);
+      assert.equal(m.files[0].mark, await sha("alpha two"));
+      assert.equal(done.json.usedBytes, 9 + 1, "what is used is what is kept");
+      // nothing to change: no new revision
+      const same = await patch({ baseRevision: 2, put: [], remove: [] });
+      assert.equal(same.json.revision, 2);
+      // the title alone is a change
+      assert.equal((await patch({ title: "Renamed", baseRevision: 2, put: [], remove: [] })).json.revision, 3);
+    });
+
+    it("refuses an old revision, a file written and deleted at once, bad paths, and a notebook that is not there", async () => {
+      const patch = (body, id = NB, who = "cara") => call(who, `/api/sync/notebooks/${id}`, { title: "Pages", ...body }, "PATCH");
+      const stale = await patch({ baseRevision: 1, put: [{ path: "A.txt", base64: b64("lost") }], remove: [] });
+      assert.equal(stale.status, 409);
+      assert.equal(stale.json.revision, 3);
+      assert.equal((await patch({ baseRevision: 3, put: [{ path: "A.txt", base64: "" }], remove: ["a.TXT"] })).status, 400);
+      assert.equal((await patch({ baseRevision: 3, put: [{ path: "../x", base64: "" }], remove: [] })).status, 400);
+      assert.equal((await patch({ baseRevision: 3, put: [], remove: [".hidden"] })).status, 400);
+      assert.equal((await patch({ baseRevision: 0, put: [], remove: [] })).status, 400);
+      assert.equal((await patch({ baseRevision: 1, put: [], remove: [] }, "missing-book")).status, 404);
+      assert.equal((await patch({ baseRevision: 3, put: [], remove: [] }, NB, "bob")).status, 404, "another account's");
+      assert.equal(JSON.parse(JSON.stringify((await manifest()).json)).files.length, 2, "nothing was changed by the refusals");
+    });
+
+    it("counts the quota by what is kept after the change (a replaced file is counted once)", async () => {
+      const patch = (put, remove = []) => call("cara", `/api/sync/notebooks/${NB}`, { title: "Renamed", baseRevision: (JSON.parse("{}"), 3), put, remove }, "PATCH");
+      const rev = async () => (await manifest()).json.revision;
+      const r = await rev();
+      const big = (n) => b64("x".repeat(n));
+      const tooBig = await call("cara", `/api/sync/notebooks/${NB}`, { title: "Renamed", baseRevision: r, put: [{ path: "A.txt", base64: big(1001) }], remove: [] }, "PATCH");
+      assert.equal(tooBig.status, 413);
+      assert.equal(tooBig.json.code, "quota");
+      assert.equal(await rev(), r, "nothing changed");
+      const exact = await call("cara", `/api/sync/notebooks/${NB}`, { title: "Renamed", baseRevision: r, put: [{ path: "A.txt", base64: big(999) }], remove: [] }, "PATCH");
+      assert.equal(exact.status, 200, "999 + the 1 byte of New.txt is the whole 1000");
+      const over = await call("cara", `/api/sync/notebooks/${NB}`, { title: "Renamed", baseRevision: exact.json.revision, put: [{ path: "More.txt", base64: big(1) }], remove: [] }, "PATCH");
+      assert.equal(over.status, 413);
+      const swap = await call("cara", `/api/sync/notebooks/${NB}`, { title: "Renamed", baseRevision: exact.json.revision, put: [{ path: "More.txt", base64: big(1) }], remove: ["New.txt"] }, "PATCH");
+      assert.equal(swap.status, 200, "deleting a file makes room for another in the same change");
+      void patch;
+    });
+
+    it("treats names that differ only by case as one file", async () => {
+      const r = (await manifest()).json.revision;
+      const done = await call("cara", `/api/sync/notebooks/${NB}`, { title: "Renamed", baseRevision: r, put: [{ path: "a.txt", base64: b64("lower") }], remove: [] }, "PATCH");
+      assert.equal(done.status, 200, done.text);
+      const files = (await manifest()).json.files.map((f) => f.path);
+      assert.equal(files.filter((p) => p.toLowerCase() === "a.txt").length, 1, `one file for A.txt and a.txt (${files.join(", ")})`);
+    });
+  });
+
   it("deletes a notebook, and the account's notebooks go with the account", async () => {
     assert.equal((await call("bob", `/api/sync/notebooks/${ID}`, undefined, "DELETE")).status, 200);
     assert.equal((await call("bob", "/api/sync/notebooks")).json.notebooks.length, 0);
     assert.equal((await call("ada", "/api/account/delete", { password: PASSWORD })).status, 200);
+    assert.equal((await call("cara", "/api/account/delete", { password: PASSWORD })).status, 200);
     assert.equal(parts.db.prepare("select count(*) as n from notebook_files").get().n, 0);
     assert.equal(parts.db.prepare("select count(*) as n from notebooks").get().n, 0);
   });

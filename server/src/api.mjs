@@ -132,20 +132,26 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
         if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
         return void send(res, 200, accounts.exportData(found.user.id), { "content-disposition": 'attachment; filename="zim-notebook-account.json"' });
       }
-      const notebookRoute = /^\/api\/sync\/notebooks(?:\/([^/]+))?$/.exec(route);
+      const notebookRoute = /^\/api\/sync\/notebooks(?:\/([^/]+)(?:\/(manifest|read))?)?$/.exec(route);
       if (notebookRoute) {
         const found = sessionOf(req);
         if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
         const id = notebookRoute[1] && decodeURIComponent(notebookRoute[1]);
         if (get && !id) return void send(res, 200, { notebooks: sync.list(found.user.id), usedBytes: sync.used(found.user.id), quotaBytes: found.user.quotaBytes });
-        if (get) return void send(res, 200, sync.get(found.user.id, id));
-        if (id && (method === "PUT" || method === "DELETE")) {
+        if (get && notebookRoute[2] === "manifest") return void send(res, 200, sync.manifest(found.user.id, id));
+        if (get && !notebookRoute[2]) return void send(res, 200, sync.get(found.user.id, id));
+        if (id && notebookRoute[2] === "read" && method === "POST") {
+          checkSameSite(req);
+          return void send(res, 200, sync.readFiles(found.user.id, id, (await readJson(req)).paths));
+        }
+        if (id && !notebookRoute[2] && (method === "PUT" || method === "DELETE" || method === "PATCH")) {
           checkSameSite(req);
           if (method === "DELETE") return void send(res, 200, sync.remove(found.user.id, id));
           const body = await readJson(req, MAX_SYNC_BODY);
+          if (method === "PATCH") return void send(res, 200, sync.patch(found.user.id, found.user.quotaBytes, id, body));
           return void send(res, 200, sync.put(found.user.id, found.user.quotaBytes, id, body));
         }
-        return void send(res, 405, { error: "Not that way." }, { allow: "GET, PUT, DELETE" });
+        return void send(res, 405, { error: "Not that way." }, { allow: "GET, PUT, PATCH, POST, DELETE" });
       }
       // allowing a service (Dropbox, Google Drive) to be reached for the person: out to its window and back, as the person who began it
       const connectOauthRoute = /^\/api\/connectors\/oauth\/([a-z]+)\/(start|callback)$/.exec(route);
@@ -193,7 +199,10 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
           if (action === "folders") return void send(res, 200, await connectors.folders(userId, id));
           if (!validDir(body.dir)) throw new AccountError("That is not a folder name that can be used.", 400, { code: "bad-dir" });
           if (action === "list") return void send(res, 200, await connectors.files(userId, id, body.dir));
-          if (action === "read") return void send(res, 200, await connectors.read(userId, id, body.dir));
+          if (action === "read") {
+            if (body.paths !== undefined && (!Array.isArray(body.paths) || body.paths.length > 2000 || !body.paths.every(validPath))) throw new AccountError("Those are not paths of a notebook.", 400, { code: "bad-files" });
+            return void send(res, 200, await connectors.read(userId, id, body.dir, body.paths ?? null));
+          }
           const put = Array.isArray(body.put) ? body.put : [];
           const remove = Array.isArray(body.remove) ? body.remove : [];
           if (put.length > 2000 || remove.length > 2000 || typeof body.baseVersion !== "string") throw new AccountError("That change is not valid.", 400, { code: "bad-files" });
