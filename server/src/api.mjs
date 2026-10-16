@@ -5,7 +5,8 @@
 // site's own scripts can add, and an `Origin` that is this site's); a cookie that a script can read (it is HttpOnly); one that is sent along to other sites (SameSite) or over plain
 // http (Secure, and the `__Host-` name that a browser only accepts with Secure, Path=/ and no Domain); a body that is huge; and answers that are kept by a cache.
 import { AccountError } from "./accounts.mjs";
-import { Connectors, DRIVERS, validDir } from "./connectors/index.mjs";
+import { Connectors, validDir } from "./connectors/index.mjs";
+import { ConnectorOAuth } from "./connectors/oauth.mjs";
 import { Sync, validPath } from "./sync.mjs";
 
 const MAX_BODY = 16 * 1024;
@@ -15,10 +16,11 @@ const MAX_SYNC_BODY = 2 * 1024 * 1024;
 const MAX_CONNECTOR_BODY = 12 * 1024 * 1024;
 const NONCE_SECONDS = 600;
 
-export function createApi({ accounts, oauth, config, log = () => {}, sync = new Sync({ db: accounts.db }), connectors = new Connectors({ db: accounts.db, config }) }) {
+export function createApi({ accounts, oauth, config, log = () => {}, sync = new Sync({ db: accounts.db }), connectors = new Connectors({ db: accounts.db, config }), connectOAuth = new ConnectorOAuth({ db: accounts.db, connectors, config }) }) {
   const prefix = config.secure ? "__Host-" : "";
   const SESSION = `${prefix}zim`;
   const NONCE = `${prefix}zim-oauth`;
+  const CONNECT_NONCE = `${prefix}zim-connect`;
 
   const cookieOf = (req) => {
     const jar = {};
@@ -145,6 +147,30 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
         }
         return void send(res, 405, { error: "Not that way." }, { allow: "GET, PUT, DELETE" });
       }
+      // allowing a service (Dropbox, Google Drive) to be reached for the person: out to its window and back, as the person who began it
+      const connectOauthRoute = /^\/api\/connectors\/oauth\/([a-z]+)\/(start|callback)$/.exec(route);
+      if (connectOauthRoute && get) {
+        const [, kind, step] = connectOauthRoute;
+        const found = sessionOf(req);
+        if (!found) return void redirect(res, "/?connect_error=signed-out");
+        if (step === "start") {
+          try {
+            const started = connectOAuth.start(found.user.id, kind);
+            return void redirect(res, started.url, [setCookie(CONNECT_NONCE, started.nonce, NONCE_SECONDS)]);
+          } catch (error) {
+            if (error instanceof AccountError) return void redirect(res, `/?connect_error=${error.extra.code ?? "failed"}`);
+            throw error;
+          }
+        }
+        const clear = setCookie(CONNECT_NONCE, "", 0);
+        try {
+          await connectOAuth.finish(found.user.id, kind, Object.fromEntries(url.searchParams), cookieOf(req)[CONNECT_NONCE], { ip });
+          return void redirect(res, "/?connected=1", [clear]);
+        } catch (error) {
+          if (!(error instanceof AccountError)) throw error;
+          return void redirect(res, `/?connect_error=${encodeURIComponent(error.extra.code ?? "failed")}`, [clear]);
+        }
+      }
       const connectorRoute = /^\/api\/connectors(?:\/(\d{1,9})(?:\/(list|read|write|folders))?)?$/.exec(route);
       if (connectorRoute) {
         const found = sessionOf(req);
@@ -152,7 +178,7 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
         const userId = found.user.id;
         const id = connectorRoute[1] ? Number(connectorRoute[1]) : null;
         const action = connectorRoute[2];
-        if (get && id === null) return void send(res, 200, { connectors: connectors.list(userId), services: Object.values(DRIVERS).map((d) => ({ kind: d.kind, label: d.label })) });
+        if (get && id === null) return void send(res, 200, { connectors: connectors.list(userId), services: connectors.services() });
         if (get) return void send(res, 405, { error: "Not that way." }, { allow: "POST, DELETE" });
         checkSameSite(req);
         if (id === null && method === "POST") {
@@ -160,7 +186,7 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
           const body = await readJson(req);
           return void send(res, 200, await connectors.add(userId, body.kind, body.label, body.settings));
         }
-        if (id !== null && !action && method === "DELETE") return void send(res, 200, connectors.remove(userId, id));
+        if (id !== null && !action && method === "DELETE") return void send(res, 200, await connectors.remove(userId, id));
         if (id !== null && action && method === "POST") {
           accounts.limit(`connector:io:${userId}`, 600, 600);
           const body = await readJson(req, MAX_CONNECTOR_BODY);

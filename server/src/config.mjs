@@ -41,6 +41,14 @@ export function loadConfig(env = process.env, given = {}) {
     if (clientId && clientSecret) providers[name] = { clientId, clientSecret, ...(oauth[name]?.endpoints ? { endpoints: oauth[name].endpoints } : {}) };
   }
 
+  // the apps that the connected services (Dropbox, Google Drive) are reached through: separate from the sign-in apps, with their own ids
+  const connectorApps = {};
+  for (const kind of ["dropbox", "gdrive"]) {
+    const clientId = env[`ZIM_${kind.toUpperCase()}_CLIENT_ID`] ?? oauth[kind]?.clientId;
+    const clientSecret = env[`ZIM_${kind.toUpperCase()}_CLIENT_SECRET`] ?? oauth[kind]?.clientSecret;
+    if (clientId && clientSecret) connectorApps[kind] = { clientId, clientSecret };
+  }
+
   const smtpHost = env.ZIM_SMTP_HOST ?? file.smtp?.host;
   return {
     dataDir,
@@ -53,6 +61,7 @@ export function loadConfig(env = process.env, given = {}) {
     sessionDays: given.sessionDays ?? 30,
     quotaBytes: given.quotaBytes ?? 1024 * 1024,
     providers: given.providers ?? providers,
+    connectorApps: given.connectorApps ?? connectorApps,
     mail: given.mail ?? {
       driver: smtpHost ? "smtp" : "outbox",
       from: env.ZIM_MAIL_FROM ?? file.mail?.from ?? "Zim Notebook <no-reply@localhost>",

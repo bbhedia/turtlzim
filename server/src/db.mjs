@@ -81,6 +81,9 @@ const STEPS = [
   );
   create index connectors_by_user on connectors (user_id);
   `,
+  `
+  alter table oauth_states add column user_id integer;
+  `,
 ];
 
 /** Open (and make or bring up to date) the database at `path` (`:memory:` for a test). */

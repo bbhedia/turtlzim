@@ -3,11 +3,13 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { AccountError } from "../accounts.mjs";
 import { ConnectorError } from "./safe-fetch.mjs";
+import { dropbox } from "./dropbox.mjs";
+import { gdrive } from "./gdrive.mjs";
 import { github } from "./github.mjs";
 import { gitlab } from "./gitlab.mjs";
 import { versionOf, webdav } from "./webdav.mjs";
 
-export const DRIVERS = { webdav, github, gitlab };
+export const DRIVERS = { webdav, github, gitlab, dropbox, gdrive };
 const MAX_CONNECTORS = 10;
 const SEGMENT = /^[^\u0000-\u001f\\/]{1,120}$/;
 
@@ -28,8 +30,14 @@ export class Connectors {
     this.key = Buffer.from(hkdfSync("sha256", config.secret, Buffer.alloc(0), "zim connectors v1", 32));
   }
 
+  /** What a driver is given besides a connection's own settings: the operator's options, and the apps (client id and secret) that the OAuth services are reached through. */
   get options() {
-    return this.config.connectorOptions ?? {};
+    return { ...(this.config.connectorOptions ?? {}), apps: this.config.connectorApps ?? {} };
+  }
+
+  /** The kinds of service, and for each whether it is reached through an authorisation window and whether this server has what it needs to offer it. */
+  services() {
+    return Object.values(DRIVERS).map((d) => ({ kind: d.kind, label: d.label, oauth: !!d.oauth, available: d.oauth ? !!this.options.apps[d.kind]?.clientId : true }));
   }
 
   seal(settings) {
@@ -58,6 +66,7 @@ export class Connectors {
   async add(userId, kind, labelInput, input) {
     const driver = DRIVERS[kind];
     if (!driver) throw new AccountError("That kind of service is not supported.", 400, { code: "bad-kind" });
+    if (driver.oauth) throw new AccountError(`${driver.label} is connected with its own button, which opens its window to allow access.`, 400, { code: "bad-kind" });
     if (this.db.prepare("select count(*) as n from connectors where user_id = ?").get(userId).n >= MAX_CONNECTORS) throw new AccountError(`At most ${MAX_CONNECTORS} services can be connected.`, 400, { code: "too-many" });
     const settings = await this.guard(() => driver.validate(input));
     await this.guard(() => driver.test(settings, this.options));
@@ -66,8 +75,31 @@ export class Connectors {
     return { id, kind, label, service: driver.label };
   }
 
-  remove(userId, id) {
-    if (!this.db.prepare("delete from connectors where user_id = ? and id = ?").run(userId, id).changes) throw new AccountError("No such connection.", 404, { code: "not-found" });
+  /** Keep a service that the person has just allowed (the refresh token its window gave), after trying it. */
+  async addOAuth(userId, kind, refreshToken, labelInput) {
+    const driver = DRIVERS[kind];
+    if (!driver?.oauth) throw new AccountError("That kind of service is not supported.", 400, { code: "bad-kind" });
+    if (this.db.prepare("select count(*) as n from connectors where user_id = ?").get(userId).n >= MAX_CONNECTORS) throw new AccountError(`At most ${MAX_CONNECTORS} services can be connected.`, 400, { code: "too-many" });
+    const settings = await this.guard(() => driver.validate({ refreshToken }));
+    await this.guard(() => driver.test(settings, this.options));
+    const label = String(labelInput ?? "").trim().slice(0, 80) || driver.describe(settings);
+    const id = Number(this.db.prepare("insert into connectors (user_id, kind, label, config, created_at) values (?, ?, ?, ?, ?)").run(userId, kind, label, this.seal(settings), this.now()).lastInsertRowid);
+    return { id, kind, label, service: driver.label };
+  }
+
+  /** Forget a connection. Where the service can be told that the access is over, it is (best effort: a service that can't be reached does not keep the person from disconnecting). */
+  async remove(userId, id) {
+    const row = this.db.prepare("select kind, config from connectors where user_id = ? and id = ?").get(userId, id);
+    if (!row) throw new AccountError("No such connection.", 404, { code: "not-found" });
+    this.db.prepare("delete from connectors where user_id = ? and id = ?").run(userId, id);
+    const driver = DRIVERS[row.kind];
+    if (driver?.revoke) {
+      try {
+        await driver.revoke(this.unseal(row.config), this.options);
+      } catch {
+        // (the access is gone from here all the same)
+      }
+    }
     return { ok: true };
   }
 
@@ -106,7 +138,7 @@ export class Connectors {
       const total = files.reduce((sum, f) => sum + f.size, 0);
       if (total > 8 * 1024 * 1024) throw new ConnectorError("That notebook is bigger than 8 MB, which is more than can be fetched here.", 413, "too-big");
       const out = [];
-      for (const file of files) out.push({ path: file.path, base64: (await driver.read(settings, this.options, dir, file.path)).toString("base64") });
+      for (const file of files) out.push({ path: file.path, base64: (await driver.read(settings, this.options, dir, file.path, file)).toString("base64") });
       return { version: files.length ? versionOf(files) : "", files: out };
     });
   }
