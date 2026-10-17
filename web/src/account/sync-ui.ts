@@ -191,6 +191,11 @@ export class SyncUi {
     this.onStatus?.();
   }
 
+  /** Whether a notebook is kept on a server or a service by any account (there is a link for it): for what is said when a page is moved into or out of it. */
+  keptAnywhere(id: string): boolean {
+    return (isEncryptedId(id) ? this.vaultLinks.get(id) : this.links.get(id)) != null;
+  }
+
   /** What to say of a notebook: null if it is only on this device. */
   statusOf(id: string): SyncStatus | null {
     const link = this.linkOf(id);

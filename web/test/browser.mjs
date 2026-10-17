@@ -1425,13 +1425,13 @@ try {
     const toggle = page.locator(".actions-toggle");
     assert(await toggle.isVisible(), "there is a button for the actions");
     assertEqual(await toggle.getAttribute("aria-expanded"), "false", "(which says that they are not shown)");
-    for (const name of ["Rename", "New sub-page", "Attach…", "Table", "Download", "Delete"]) assert(!(await page.getByRole("button", { name, exact: true }).isVisible()), `${name} is not on the first screen`);
+    for (const name of ["Rename", "Move…", "New sub-page", "Attach…", "Table", "Download", "Delete"]) assert(!(await page.getByRole("button", { name, exact: true }).isVisible()), `${name} is not on the first screen`);
     // the first screen is the page: its title is high up
     const title = await page.locator(".cm-zim-h1").first().boundingBox();
     assert(title.y < 250, `the title of the page is in the upper third of the screen (${Math.round(title.y)} pixels down of 800)`);
     await toggle.tap();
     assertEqual(await toggle.getAttribute("aria-expanded"), "true", "a tap opens them");
-    for (const name of ["Rename", "New sub-page", "Attach…", "Table", "Download", "Delete"]) {
+    for (const name of ["Rename", "Move…", "New sub-page", "Attach…", "Table", "Download", "Delete"]) {
       const box = await page.getByRole("button", { name, exact: true }).boundingBox();
       assert(box && box.x >= 0 && box.x + box.width <= 390 && box.height >= 40, `${name} is on the screen, big enough for a finger (${JSON.stringify(box)})`);
     }
@@ -1446,7 +1446,8 @@ try {
     await page.keyboard.press("Escape");
     assertEqual(await toggle.getAttribute("aria-expanded"), "false", "Escape puts them away");
     await toggle.tap();
-    await page.locator(".cm-line", { hasText: "Plant the beans" }).tap();
+    // (the open list covers the right of the page: the press is at the left of the line)
+    await page.locator(".cm-line", { hasText: "Plant the beans" }).tap({ position: { x: 110, y: 6 } });
     assertEqual(await toggle.getAttribute("aria-expanded"), "false", "a press on the page puts them away");
     assert(await hasFocus(page), "(and is a press on the page)");
   });
@@ -1455,7 +1456,7 @@ try {
     const { page } = ui;
     await ui.goto("Projects:Garden");
     assert(!(await page.locator(".actions-toggle").isVisible()), "no button for them");
-    for (const name of ["Rename", "New sub-page", "Attach…", "Table", "Download", "Delete"]) assert(await page.getByRole("button", { name, exact: true }).isVisible(), `${name} is there`);
+    for (const name of ["Rename", "Move…", "New sub-page", "Attach…", "Table", "Download", "Delete"]) assert(await page.getByRole("button", { name, exact: true }).isVisible(), `${name} is there`);
   });
 
   await app("on a phone a tap on the folded header unfolds it, and the first screen of a page is mostly the page", phone, async (ui) => {
@@ -7139,6 +7140,269 @@ try {
     } finally {
       await rig.close();
     }
+  });
+
+  // ==========================================================================================
+  // Moving a page to another notebook (E16e)
+  // ==========================================================================================
+  const PLAIN_HOME = "Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== Home ======\nthe other notebook\n";
+  /** A second, open notebook with a home page, made through the store as a person would have made one; its id. */
+  const makeOtherNotebook = (page, title) =>
+    page.evaluate(async ([name, text]) => (await window.__zim.app.store.createNotebook({ title: name, home: "Home", kind: "open" }, [{ name: "Home", text, bom: false, lineEnding: "lf", modified: 1 }])).id, [title, PLAIN_HOME]);
+  const storedPages = (page, id) => page.evaluate(async (notebook) => Object.fromEntries((await window.__zim.app.store.loadPages(notebook)).map((p) => [p.name, p.text])), id);
+  const storedPaths = (page, id) => page.evaluate(async (notebook) => (await window.__zim.app.store.listFiles(notebook)).map((f) => f.path).sort(), id);
+
+  await app("a page is moved to another notebook with what lies below it and its attachments: the pages that link to it are told, a name in the way is refused, and it is gone from here", {}, async (ui) => {
+    const { page } = ui;
+    const archive = await makeOtherNotebook(page, "Archive");
+    await page.evaluate(async () => {
+      const s = window.__zim.app.session;
+      await s.save("Moving:Plan", "====== Plan ======\nsee [[+Step]] and [[Moving]] {{./sketch.png}}\n");
+      await s.save("Moving:Plan:Step", "====== Step ======\nback to [[:Moving:Plan]]\n");
+      await s.save("Linker", "====== Linker ======\ngo to [[Moving:Plan]]\n");
+      await s.addFile("Moving:Plan", new Blob(["SKETCH-BYTES"], { type: "image/png" }), "sketch.png");
+    });
+    await ui.goto("Moving:Plan");
+    const move = page.locator("#page-actions").getByRole("button", { name: "Move…" });
+    assert(await move.isEnabled(), "the action is there for a page");
+    await move.click();
+    let dialog = topDialog(page);
+    assert((await dialog.innerText()).includes("below it"), "the dialog speaks of the pages below it");
+    await dialog.getByLabel("To notebook").selectOption({ label: "Archive" });
+    await dialog.getByLabel("Name there").fill("Moved:Plan");
+    await dialog.getByRole("button", { name: "Move", exact: true }).click();
+    // a page here links to it: that is said, and asked about
+    await page.getByRole("heading", { name: "Move 2 pages and 1 attachment to “Archive”?" }).waitFor();
+    dialog = topDialog(page);
+    const said = await dialog.innerText();
+    assert(said.includes("Linker") && said.includes("lead nowhere"), `the pages that link to it are named: ${said}`);
+    if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, "move-page-confirm.png") });
+    await dialog.getByRole("button", { name: "Move", exact: true }).click();
+    await noDialogs(page);
+    assert((await page.locator("#status").innerText()).includes("Moved 2 pages and 1 attachment to “Archive”"), "the status line says what was moved");
+    // it is gone from here (the pages that stay are not touched), and there with its pages, its attachment, and the links among them written for the new name
+    const here = await page.evaluate(() => window.__zim.app.session.names());
+    assertDeepEqual(here.filter((n) => /Moving|Linker/.test(n)).sort(), ["Linker"], "what moved is gone from here, what linked to it stays");
+    assertEqual(await ui.current(), "Home", "the page shown is not the one that went: it is the notebook's home");
+    assertEqual(await page.evaluate(() => window.__zim.app.session.text("Linker")), "====== Linker ======\ngo to [[Moving:Plan]]\n", "and is as it was");
+    const there = await storedPages(page, archive);
+    assertDeepEqual(Object.keys(there).sort(), ["Home", "Moved:Plan", "Moved:Plan:Step"], "the pages are in the other notebook");
+    assert(there["Moved:Plan:Step"].includes("[[:Moved:Plan]]"), `its links were written for the new names: ${there["Moved:Plan:Step"]}`);
+    assertDeepEqual(await storedPaths(page, archive), ["Moved/Plan/sketch.png"], "with the attachment, in the folder of the new name");
+    assertEqual(await page.evaluate(async (id) => (await (await window.__zim.app.store.loadFile(id, "Moved/Plan/sketch.png")).text()), archive), "SKETCH-BYTES", "byte for byte");
+
+    // a name in the way is refused, in words, in the dialog, and nothing is moved
+    await ui.goto("Linker");
+    await page.locator("#page-actions").getByRole("button", { name: "Move…" }).click();
+    dialog = topDialog(page);
+    await dialog.getByLabel("To notebook").selectOption({ label: "Archive" });
+    await dialog.getByLabel("Name there").fill("Moved:Plan");
+    await dialog.getByRole("button", { name: "Move", exact: true }).click();
+    await dialog.locator(".dialog-error").filter({ hasText: "In “Archive”: A page called Moved:Plan already exists" }).waitFor();
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await noDialogs(page);
+    assert(await page.evaluate(() => window.__zim.app.session.has("Linker")), "the page is still here");
+    // with nothing that costs anything, it goes without a question: the page alone, with no link to it
+    await page.evaluate(async () => {
+      await window.__zim.app.session.save("Loose", "====== Loose ======\nnobody links here\n");
+    });
+    await ui.goto("Loose");
+    await page.locator("#page-actions").getByRole("button", { name: "Move…" }).click();
+    dialog = topDialog(page);
+    await dialog.getByLabel("To notebook").selectOption({ label: "Archive" });
+    await dialog.getByRole("button", { name: "Move", exact: true }).click();
+    await noDialogs(page);
+    assert((await storedPages(page, archive)).Loose?.includes("nobody links here"), "a page that nothing links to goes at once");
+    // the page alone, with the box for the pages below it left unticked: the pages below stay, with their attachment
+    await page.evaluate(async () => {
+      const s = window.__zim.app.session;
+      await s.save("Alone:Top", "====== Top ======\njust this one\n");
+      await s.save("Alone:Top:Kid", "====== Kid ======\nstays\n");
+      await s.addFile("Alone:Top:Kid", new Blob(["KID-BYTES"], { type: "image/png" }), "kid.png");
+    });
+    await ui.goto("Alone:Top");
+    await page.locator("#page-actions").getByRole("button", { name: "Move…" }).click();
+    dialog = topDialog(page);
+    await dialog.getByLabel("To notebook").selectOption({ label: "Archive" });
+    await dialog.getByLabel("Move the 1 page below it too").uncheck();
+    await dialog.getByRole("button", { name: "Move", exact: true }).click();
+    await noDialogs(page);
+    assertDeepEqual((await page.evaluate(() => window.__zim.app.session.names())).filter((n) => n.startsWith("Alone")), ["Alone:Top:Kid"], "only the page went");
+    assertDeepEqual(Object.keys(await storedPages(page, archive)).filter((n) => n.startsWith("Alone")), ["Alone:Top"], "and it is in the other notebook alone");
+    assertDeepEqual((await storedPaths(page, archive)).filter((n) => n.startsWith("Alone")), [], "the attachments of the page below stayed with it");
+    assertEqual(await page.evaluate(() => window.__zim.app.session.filesBelow("Alone:Top:Kid")), 1, "here");
+  });
+
+  await app("a page moved from an encrypted notebook to one that is not says that it will no longer be encrypted and needs a tick; between two encrypted notebooks nothing is asked and nothing is left in the browser's storage", {}, async (ui) => {
+    const { page } = ui;
+    const MARKER = "MOVE-MARKER-4471 the garage code";
+    await newEncryptedNotebook(ui, "Vaulted");
+    const vaulted = await page.evaluate(() => window.__zim.app.session.info.id);
+    await page.evaluate(async (text) => window.__zim.app.session.save("Secret Plan", `====== Secret Plan ======\n${text}\n`), MARKER);
+    await ui.goto("Secret Plan");
+    const other = await makeOtherNotebook(page, "Plain notebook");
+    await page.locator("#page-actions").getByRole("button", { name: "Move…" }).click();
+    let dialog = topDialog(page);
+    await dialog.getByLabel("To notebook").selectOption({ label: "Plain notebook" });
+    await dialog.getByRole("button", { name: "Move", exact: true }).click();
+    await page.getByRole("heading", { name: /^Move 1 page to “Plain notebook”\?$/ }).waitFor();
+    dialog = topDialog(page);
+    const warned = await dialog.innerText();
+    assert(warned.includes("It will no longer be encrypted") && warned.includes("can be read by anyone who can read this browser's data"), `the page says what it costs: ${warned}`);
+    if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, "move-page-downgrade.png") });
+    await dialog.getByRole("button", { name: "Move", exact: true }).click();
+    await dialog.locator(".dialog-error").filter({ hasText: "Tick the box" }).waitFor();
+    assert(await page.evaluate(() => window.__zim.app.session.has("Secret Plan")), "nothing moved without the tick");
+    await dialog.getByLabel("I understand").check();
+    await dialog.getByRole("button", { name: "Move", exact: true }).click();
+    await noDialogs(page);
+    assertEqual((await storedPages(page, other))["Secret Plan"]?.includes(MARKER), true, "once it was ticked the page is in the notebook that is not encrypted");
+    assertEqual(await page.evaluate(() => window.__zim.app.session.has("Secret Plan")), false, "and gone from the encrypted one");
+
+    // an open notebook's page into an encrypted one: the traces are said, then it goes; and between two encrypted notebooks nothing is asked
+    await page.evaluate(async (id) => window.__zim.app.openNotebook(id), other);
+    await ui.goto("Secret Plan");
+    await page.locator("#page-actions").getByRole("button", { name: "Move…" }).click();
+    dialog = topDialog(page);
+    await dialog.getByLabel("To notebook").selectOption({ label: "Vaulted (encrypted)" });
+    await dialog.getByRole("button", { name: "Move", exact: true }).click();
+    await page.getByRole("heading", { name: /^Move 1 page to “Vaulted”\?$/ }).waitFor();
+    assert((await topDialog(page).innerText()).includes("may keep traces"), "the traces that the browser may keep are said");
+    await topDialog(page).getByRole("button", { name: "Move", exact: true }).click();
+    await noDialogs(page);
+    assertEqual((await storedPages(page, vaulted))["Secret Plan"]?.includes(MARKER), true, "the page is in the encrypted notebook");
+    // two encrypted notebooks: a new page with another marker goes from one to the other, and nothing of it is in what the browser keeps
+    await page.evaluate(async (id) => window.__zim.app.openNotebook(id), vaulted);
+    await newEncryptedNotebook(ui, "Second vaulted", { first: false });
+    const second = await page.evaluate(() => window.__zim.app.session.info.id);
+    await page.evaluate(async (id) => window.__zim.app.openNotebook(id), vaulted);
+    await page.evaluate(async () => window.__zim.app.session.save("Between Vaults", "====== Between Vaults ======\nBETWEEN-MARKER-8820 the second code\n"));
+    await ui.goto("Between Vaults");
+    await page.locator("#page-actions").getByRole("button", { name: "Move…" }).click();
+    dialog = topDialog(page);
+    await dialog.getByLabel("To notebook").selectOption({ label: "Second vaulted (encrypted)" });
+    await dialog.getByRole("button", { name: "Move", exact: true }).click();
+    await noDialogs(page);
+    assertEqual((await storedPages(page, second))["Between Vaults"]?.includes("BETWEEN-MARKER-8820"), true, "it is in the second encrypted notebook, with no question asked");
+    const places = await keptByTheBrowser(page);
+    for (const needle of ["BETWEEN-MARKER-8820", "Between Vaults", "Second vaulted"]) {
+      const forms = [needle, Buffer.from(needle, "utf8").toString("latin1"), Buffer.from(needle, "utf16le").toString("latin1")];
+      const where = Object.entries(places).filter(([, value]) => forms.some((form) => value.includes(form))).map(([place]) => place);
+      assertDeepEqual(where, [], `${JSON.stringify(needle)} is nowhere the browser keeps things`);
+    }
+  });
+
+  await scenario("a page moved into an encrypted notebook that is kept on the server goes there sealed when that notebook is next opened, and opens on the other device", async () => {
+    const rig = await sealedRig();
+    try {
+      const A = await rig.device();
+      await A.signIn();
+      await keepSealed(A, SEALED_SECRETS.notebook, { secret: SEALED_SECRETS.text });
+      // a second encrypted notebook, only here, with a page
+      await newEncryptedNotebook(A.ui, SEALED_SECRETS.second, { first: false });
+      await A.page.evaluate(async (text) => window.__zim.app.session.save("Travelling Page", `====== Travelling Page ======\n${text}\n`), SEALED_SECRETS.fromA);
+      await A.ui.goto("Travelling Page");
+      // a notebook that is not encrypted and is kept on the server: a page that is encrypted here would be sent there in clear, and the question says so (it is given up here)
+      await A.ui.openMenu();
+      await A.ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+      const making = A.dialog();
+      await making.getByLabel("Name").fill("Public on the server");
+      await making.getByLabel("Where").selectOption("account");
+      await making.getByRole("button", { name: "Create", exact: true }).click();
+      await A.says("is kept on the server");
+      await noDialogs(A.page);
+      await A.ui.openMenu();
+      await A.ui.menu().locator(".menu-item", { hasText: SEALED_SECRETS.second }).click();
+      await isEncryptedOpen(A.page);
+      await A.ui.goto("Travelling Page");
+      await A.page.locator("#page-actions").getByRole("button", { name: "Move…" }).click();
+      const toPublic = A.dialog();
+      await toPublic.getByLabel("To notebook").selectOption({ label: "Public on the server" });
+      await toPublic.getByRole("button", { name: "Move", exact: true }).click();
+      const sendsInClear = A.dialog().filter({ has: A.page.getByRole("heading", { name: /^Move 1 page to “Public on the server”\?$/ }) });
+      await sendsInClear.waitFor();
+      assert((await sendsInClear.innerText()).includes("kept on a server, so it will be sent there in clear"), "the question says that the other notebook is kept on a server and that the page would be sent there in clear");
+      await sendsInClear.getByRole("button", { name: "Cancel" }).click();
+      await toPublic.locator(".dialog-error").filter({ hasText: "Nothing was moved" }).waitFor();
+      await toPublic.getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(A.page);
+      assert(await A.page.evaluate(() => window.__zim.app.session.has("Travelling Page")), "nothing was moved");
+      await A.page.locator("#page-actions").getByRole("button", { name: "Move…" }).click();
+      const dialog = A.dialog();
+      await dialog.getByLabel("To notebook").selectOption({ label: `${SEALED_SECRETS.notebook} (encrypted)` });
+      await dialog.getByRole("button", { name: "Move", exact: true }).click();
+      await noDialogs(A.page);
+      // the notebook that is kept is not open: it is brought up to date, with the page that came, when it is
+      const index = () => Buffer.from(rig.db.prepare("select bytes from notebook_files where path = 'index.zseal'").get().bytes).toString("hex");
+      const before = index();
+      await A.ui.openMenu();
+      await A.ui.menu().locator(".menu-item", { hasText: SEALED_SECRETS.notebook }).click();
+      for (let waited = 0; index() === before; waited += 250) {
+        assert(waited < 60_000, "the sealed copy on the server never changed");
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      await A.page.waitForFunction(() => document.querySelector(".notebook-button .badge.sync")?.getAttribute("data-state") === "ok", null, { timeout: 60_000 });
+      assertDeepEqual(leaks(rig, [A], [...SEALED_NEEDLES, "Travelling Page"]), [], "and nothing readable went with it");
+      // the second device has the page
+      const B = await rig.device();
+      await B.signIn();
+      await takeSealed(B, { vaultPassphrase: NEXT_PASSPHRASE, passphrase: PASSPHRASE });
+      assert((await B.pageText("Travelling Page")).includes(SEALED_SECRETS.fromA), "the page that was moved in is on the other device");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  await app("with no other notebook to move a page to, Move… says so and how to make one", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    await page.locator("#page-actions").getByRole("button", { name: "Move…" }).click();
+    const said = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Move to another notebook", exact: true }) });
+    await said.waitFor();
+    assert((await said.innerText()).includes("There is no other notebook") && (await said.innerText()).includes("New notebook"), "it says that there is no other notebook, and how to make one");
+    await said.getByRole("button", { name: "OK" }).click();
+    await noDialogs(page);
+    assert(await page.evaluate(() => window.__zim.app.session.has("Projects:Garden")), "the page is where it was");
+  });
+
+  await app("the page's actions are seven in one row, or behind the … button: never wrapped over several rows at a width in between", {}, async (ui) => {
+    const { page } = ui;
+    await ui.goto("Projects:Garden");
+    const state = () =>
+      page.evaluate(() => {
+        const shown = (el) => !!el && getComputedStyle(el).display !== "none" && el.getBoundingClientRect().width > 0;
+        const bar = document.querySelector(".pagebar").getBoundingClientRect();
+        const crumb = document.querySelector(".breadcrumb").getBoundingClientRect();
+        const buttons = [...document.querySelectorAll("#page-actions button")].filter(shown);
+        const tops = new Set(buttons.map((b) => Math.round(b.getBoundingClientRect().top)));
+        return { toggle: shown(document.querySelector(".actions-toggle")), buttons: buttons.length, rows: tops.size, besideBreadcrumb: buttons.length > 0 && Math.round(buttons[0].getBoundingClientRect().top) < Math.round(crumb.bottom), barHeight: Math.round(bar.height) };
+      });
+    for (const width of [1400, 1100, 1000, 940]) {
+      await page.setViewportSize({ width, height: 700 });
+      const s = await state();
+      assert(!s.toggle && s.buttons === 7 && s.rows === 1, `at ${width} px the seven actions are visible in one row (${JSON.stringify(s)})`);
+    }
+    for (const width of [920, 860, 800, 780]) {
+      await page.setViewportSize({ width, height: 700 });
+      const s = await state();
+      assert(s.toggle && s.buttons === 0, `at ${width} px they are behind the … button (${JSON.stringify(s)})`);
+    }
+  });
+
+  await app("on a phone the page actions have Move…, and its dialog fits the screen", phone, async (ui) => {
+    const { page } = ui;
+    await makeOtherNotebook(page, "Archive");
+    await ui.goto("Projects:Garden");
+    await page.locator(".actions-toggle").tap();
+    await page.locator("#page-actions").getByRole("button", { name: "Move…" }).tap();
+    const dialog = topDialog(page);
+    await dialog.waitFor();
+    const box = await dialog.boundingBox();
+    const view = page.viewportSize();
+    assert(box && box.x >= 0 && box.y >= 0 && box.x + box.width <= view.width && box.y + box.height <= view.height, `the dialog is inside the screen: ${JSON.stringify(box)}`);
+    if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, "move-page-phone.png") });
+    await dialog.getByRole("button", { name: "Cancel" }).tap();
+    await noDialogs(page);
   });
 
   for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"} ${r.name}${r.ok ? ` (${r.ms} ms)` : `\n    ${r.error}`}`);

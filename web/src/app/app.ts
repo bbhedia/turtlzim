@@ -5,7 +5,7 @@
 import { createFormatBar, createZimEditor } from "../editor";
 import type { FormatBar, ImageSource, LinkInfo, LinkStatus, ZimEditor } from "../editor";
 import { anchorsIn, checkPageName, classifyLink, journalDayOf, journalPage, pageKey, startingText, zimTimestamp } from "../notebook-core";
-import type { Backlink, JournalDay, SearchHit } from "../notebook-core";
+import type { Backlink, JournalDay, MovePlan, NotebookModel, SearchHit } from "../notebook-core";
 import { FileUrls } from "../notebook/file-urls";
 import { FolderStore } from "../notebook/folder-store";
 import { IndexedDbStore } from "../notebook/idb";
@@ -32,6 +32,7 @@ import type { Phase, Pwa } from "../pwa/register";
 import { CalendarPanel, localToday } from "./calendar";
 import { ContentsPanel, headingsOf } from "./contents";
 import { clear, h, highlighted } from "./dom";
+import type { Child } from "./dom";
 import { TagsPanel } from "./tags";
 import { TreeView } from "./tree-view";
 import { showScreenDetails } from "./screen-details";
@@ -237,6 +238,7 @@ export class App {
     status: HTMLElement;
     saveState: HTMLElement;
     rename: HTMLButtonElement;
+    move: HTMLButtonElement;
     subpage: HTMLButtonElement;
     download: HTMLButtonElement;
     remove: HTMLButtonElement;
@@ -391,6 +393,7 @@ export class App {
 
     const breadcrumb = h("nav", { class: "breadcrumb", "aria-label": "Page path" });
     const rename = h("button", { type: "button", text: "Rename", on: { click: () => void this.renamePage() } });
+    const move = h("button", { type: "button", text: "Move…", title: "Move this page to another notebook", on: { click: () => void this.movePage() } });
     const subpage = h("button", { type: "button", text: "New sub-page", on: { click: () => void this.newPage(this.current ? `${this.current.name}:` : "") } });
     const attachInput = h("input", { type: "file", hidden: true, multiple: true, "aria-label": "Choose files to attach to this page", on: { change: () => { const files = [...(attachInput.files ?? [])]; attachInput.value = ""; if (files.length) void this.attachFiles(files); } } });
     const attach = h("button", { type: "button", text: "Attach…", title: "Attach files or pictures to this page (you can also drop them on the page, or paste a picture)", on: { click: () => attachInput.click() } });
@@ -423,7 +426,7 @@ export class App {
       h("div", { class: "side-panels" }, this.contents.element, this.calendar.element, this.tagList.element),
     );
     // (on a narrow screen the page's actions are behind one button, `...`: six buttons are two rows of the first screen)
-    const actions = h("div", { class: "page-actions", id: "page-actions" }, rename, subpage, attach, table, download, remove);
+    const actions = h("div", { class: "page-actions", id: "page-actions" }, rename, move, subpage, attach, table, download, remove);
     const pagebar = h("div", { class: "pagebar", "data-actions": "closed" });
     const actionsToggle = h("button", { type: "button", class: "actions-toggle", "aria-label": "Page actions", title: "Page actions", "aria-haspopup": "true", "aria-expanded": "false", "aria-controls": "page-actions", text: "\u22ef" });
     const showActions = (open: boolean): void => {
@@ -594,7 +597,7 @@ export class App {
     zipInput.addEventListener("change", () => void this.readPickedFiles(zipInput, "zip"));
     backupInput.addEventListener("change", () => void this.restoreFromPickedBackup(backupInput));
 
-    return { root, page, sidebarToggle, notebookButton, notebookMenu, lock, search, searchResults, markup, breadcrumb, notice, updateBanner, updateText, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, subpage, download, remove, attach, table, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput, backupInput };
+    return { root, page, sidebarToggle, notebookButton, notebookMenu, lock, search, searchResults, markup, breadcrumb, notice, updateBanner, updateText, editorHost, backlinks, backlinkCount, backlinkList, status, saveState, rename, move, subpage, download, remove, attach, table, attachInput, attachments, attachmentCount, attachmentList, folderInput, zipInput, backupInput };
   }
 
   private toggleSidebar(): void {
@@ -1700,6 +1703,7 @@ export class App {
   private renderActions(): void {
     const exists = !!this.current && this.session.exists(this.current.name);
     this.els.rename.disabled = !exists;
+    this.els.move.disabled = !exists;
     this.els.remove.disabled = !exists;
     this.els.download.disabled = !this.current?.exists;
     this.els.subpage.disabled = !this.current;
@@ -2082,6 +2086,94 @@ export class App {
         this.renderActions();
         this.say(`Renamed ${from} to ${moved?.[1] ?? String(values.name)}${report.linksChanged ? `; ${report.linksChanged} link${report.linksChanged === 1 ? "" : "s"} updated on ${report.rewritten.length} page${report.rewritten.length === 1 ? "" : "s"}` : ""}.`);
       },
+    });
+  }
+
+  /**
+   * Move the page shown, with what lies below it if asked, and its attachments, to another notebook (E16e): the rules that decide what goes, what is in the way and what is told are the
+   * notebook's (`planMove`); this asks which notebook and what name, says what the move costs when it costs something (links that lead nowhere, an encrypted page that stops being encrypted),
+   * and carries it out (`moveOut`: copied to the other notebook first, taken out of this one after).
+   */
+  async movePage(): Promise<void> {
+    if (!this.current) return;
+    await this.flush();
+    const session = this.session;
+    const from = this.current.name;
+    const others = (await this.store.listNotebooks()).filter((n) => n.id !== session.info.id);
+    if (others.length === 0) {
+      await showMessage("Move to another notebook", "There is no other notebook to move this page to. Make one with “New notebook…” (the encrypted notebooks are listed here once they are unlocked).");
+      return;
+    }
+    const below = this.session.names().filter((n) => n.toLowerCase().startsWith(`${from.toLowerCase()}:`)).length;
+    await showDialog({
+      title: "Move to another notebook",
+      body: [`“${from}”, its attachments${below ? " and, if you choose, the pages below it" : ""} are copied to the notebook you choose, and then taken out of this one. If other pages here link to it you are told, first: those links will lead nowhere.`],
+      choices: [{ name: "notebook", label: "To notebook", value: others[0]!.id, options: others.map((n) => ({ value: n.id, label: n.kind === "encrypted" ? `${n.title} (encrypted)` : n.title })) }],
+      fields: [{ name: "name", label: "Name there", value: from, validate: (value) => { const p = checkPageName(value); return "error" in p ? p.error : null; } }],
+      ...(below > 0 ? { checks: [{ name: "below", label: `Move the ${below} page${below === 1 ? "" : "s"} below it too`, checked: true }] } : {}),
+      confirm: "Move",
+      working: "Moving…",
+      submit: async (values) => {
+        const stale = this.stale(session);
+        if (stale) return stale;
+        const dest = others.find((n) => n.id === String(values.notebook));
+        if (!dest) return "Choose the notebook to move it to.";
+        let planned: { plan: MovePlan } | { error: string };
+        let model: NotebookModel | undefined;
+        try {
+          model = await NotebookSession.modelOf(this.store, dest.id);
+          planned = { plan: session.planMove(model, from, String(values.name), below > 0 ? Boolean(values.below) : true) };
+        } catch (error) {
+          planned = { error: `In “${dest.title}”: ${error instanceof Error ? error.message : String(error)}` };
+        } finally {
+          model?.free();
+        }
+        if ("error" in planned) return planned.error;
+        const plan = planned.plan;
+        if (!(await this.confirmMove(session, dest, plan))) return "Nothing was moved.";
+        const gone = this.stale(session);
+        if (gone) return gone;
+        try {
+          await session.moveOut(plan, { store: this.store, id: dest.id });
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+        const parent = from.includes(":") ? from.slice(0, from.lastIndexOf(":")) : null;
+        await this.openPage(parent && this.session.exists(parent) ? parent : this.session.home, { push: true });
+        this.say(`Moved ${plan.pages.length} page${plan.pages.length === 1 ? "" : "s"}${plan.files.length ? ` and ${plan.files.length} attachment${plan.files.length === 1 ? "" : "s"}` : ""} to “${dest.title}”.`);
+      },
+    });
+  }
+
+  /**
+   * Say what a move costs, where it costs something, and ask. Nothing is asked of a move that costs nothing. A page that stops being encrypted is the one that has to be ticked for.
+   * Gives whether to go on.
+   */
+  private async confirmMove(session: NotebookSession, dest: NotebookInfo, plan: MovePlan): Promise<boolean> {
+    const pages = (n: number) => `${n} page${n === 1 ? "" : "s"}`;
+    const links = (n: number) => `${n} link${n === 1 ? "" : "s"}`;
+    const lines: Child[] = [];
+    const here = session.info;
+    const downgrade = here.kind === "encrypted" && dest.kind !== "encrypted";
+    if (downgrade) {
+      lines.push(h("p", {}, h("strong", { text: "It will no longer be encrypted. " }), `“${dest.title}” is not an encrypted notebook: what is moved there can be read by anyone who can read this browser's data${this.sync.keptAnywhere(dest.id) ? ", and that notebook is kept on a server, so it will be sent there in clear" : ""}. Moving it back later does not take back what could be read meanwhile.`));
+    }
+    if (here.kind !== "encrypted" && dest.kind === "encrypted") {
+      lines.push(`It is taken out of this notebook, but the browser may keep traces of what it said in its own storage until it writes over them${this.sync.keptAnywhere(here.id) ? ", and a copy of it was sent to the server in clear, which the next sync deletes there" : ""}.`);
+    }
+    if (plan.incoming.length > 0) {
+      const count = plan.incoming.reduce((n, b) => n + b.count, 0);
+      lines.push(`${pages(plan.incoming.length)} here ${plan.incoming.length === 1 ? "links" : "link"} to what moves (${links(count)}, the first on “${plan.incoming[0]!.from}”): they will lead nowhere.`);
+    }
+    if (plan.leavingLinks > 0) lines.push(plan.leavingLinks === 1 ? `1 link or picture on the moved pages leads to something that stays here: it can't lead there from “${dest.title}”.` : `${plan.leavingLinks} links or pictures on the moved pages lead to something that stays here: they can't lead there from “${dest.title}”.`);
+    if (lines.length === 0) return true;
+    return showDialog({
+      title: `Move ${pages(plan.pages.length)}${plan.files.length ? ` and ${plan.files.length} attachment${plan.files.length === 1 ? "" : "s"}` : ""} to “${dest.title}”?`,
+      body: lines,
+      ...(downgrade ? { checks: [{ name: "understood", label: "I understand that it will no longer be encrypted." }] } : {}),
+      confirm: "Move",
+      danger: downgrade,
+      submit: (values) => (downgrade && !values.understood ? "Tick the box to say you understand that it will no longer be encrypted." : undefined),
     });
   }
 

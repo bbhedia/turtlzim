@@ -112,6 +112,16 @@ links that led nowhere are left exactly as written; only link *targets* are edit
 only existed because of the pages that moved away is gone, and a link to it names a missing page.
 A rename that can't be done (nothing there, onto a page that exists, below itself) changes nothing.
 
+**Moving a page to another notebook** (`plan_move(page, new_name, with_subpages, dest)`, E16e) works out what a move would do and changes nothing, here or there; the app does it
+(`NotebookSession.moveOut`: copy first, remove after, so that a failure in between loses nothing). The plan lists the pages that go (the page and what lies below it, or the page alone) with
+the text each has there, and the files that go with them (a page's folder holds its attachments: with the page below it, or only the files of its own folder), and **refuses**, with a message
+ready to show, where there is nothing to move or where something of `dest` is in the way (a page that would land on one of its pages, a file on one of its files, a file where a folder is or
+a folder where a file is). Links among the pages that go are written for their new names by the rename's own rules, run on a notebook made of just those pages (so a page can go to a name below
+its own: it goes by way of a name that is nowhere); and then **every one that led to a page that goes still leads to it in the other notebook**, whatever pages that notebook has: a link written
+relative to its page is read by looking among the pages around it, which there are other pages, so where it would lead astray it is written from the top (`[[:Plants:Veg]]`). The plan also
+counts what cannot be kept: the pages that stay and link to what goes (each once, with how many links and the line of the first), and the links and pictures of what goes that lead to something
+that stays (they can't lead there from the other notebook). A page moved to its own name takes its text as it is.
+
 ## Tags (`tags.rs`)
 
 Every page keeps the `@tags` it writes, found once when its text is set (`tags_in`, which is the format
@@ -178,6 +188,12 @@ resolves every suggestion over random notebooks from random pages.
   leads to the page asked for (20,000 cases); after a random rename every link still leads to the
   same (renamed) page, pages change in nothing but link targets, refused renames change nothing
   (6,000 cases); backlinks equal a brute-force count (300 notebooks).
+* **Moving to another notebook**: hand-written cases (what goes, the page alone, links among the pages that go, a name below its own, everything in the way, who is told and what is left behind, the
+  same name, a section) and a random test of 4,000 plans between random notebooks that share their small alphabet of names (so that the other notebook's pages shadow and clash): a plan changes
+  nothing and a refused one changes nothing; the pages and files that go are exactly those under the name; no page or file lands on another; every link and every picture among what goes
+  still leads where it did; the pages told are exactly the pages that stay and link to what goes. It found that a relative link can be answered by another notebook's page (a link `b#sec`
+  that led to `c` led to `c:c` there), which the plan now prevents; 14 mutants of the plan (the pages that go counted among those told, counts not added up, a kind of leaving link not
+  counted, links not written from the top, each way of being in the way not refused, the page alone taking what is below it, a name below its own refused, the same name renamed) are caught.
 * The same rename invariant on the real manual for eight renames (a section moving down a level, a
   nested page to the top, ...): `Help` to `Docs:Handbook` moves 27 pages and rewrites 77 links, and
   every link still leads where it did; `Plugins` to `Addons` moves 40 pages and 32 files and

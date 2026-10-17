@@ -388,6 +388,129 @@ describe("a notebook session", () => {
   });
 });
 
+describe("moving pages to another notebook", () => {
+  const file = (path: string, content: string, type = "image/png") => ({ path, blob: new Blob([content], { type }), modified: 7 });
+
+  /** A store with two notebooks: the one that is open (its pages and files as given), and an empty-ish one. */
+  async function two(pages: StoredPage[], files: Array<ReturnType<typeof file>> = [], others: StoredPage[] = [page("Home", "there")], store: NotebookStore = new MemoryStore(pageKey)) {
+    const a = await store.createNotebook({ title: "From", home: "Home", kind: "open" }, pages, files);
+    const b = await store.createNotebook({ title: "To", home: "Home", kind: "open" }, others);
+    return { store, source: await NotebookSession.open(store, a.id), a, b };
+  }
+
+  const names = async (store: NotebookStore, id: string) => (await store.loadPages(id)).map((p) => p.name).sort();
+  const paths = async (store: NotebookStore, id: string) => (await store.listFiles(id)).map((f) => f.path).sort();
+
+  it("copies the pages and their files to the other notebook, and takes them out of this one", async () => {
+    const { store, source, b } = await two(
+      [page("Home", "see [[Garden]]"), page("Garden", "g {{./plan.png}}"), page("Garden:Beans", "beans"), page("Other", "o")],
+      [file("Garden/plan.png", "PLAN"), file("Garden/Beans/photo.png", "PHOTO"), file("Other/x.png", "X")],
+    );
+    const dest = await NotebookSession.modelOf(store, b.id);
+    const plan = source.planMove(dest, "Garden", "Plants", true);
+    dest.free();
+    expect(plan.pages.map((m) => [m.from, m.to])).toEqual([["Garden", "Plants"], ["Garden:Beans", "Plants:Beans"]]);
+    expect(plan.incoming.map((l) => l.from)).toEqual(["Home"]);
+    const events: string[] = [];
+    source.onChange((e) => events.push(e.kind));
+    await source.moveOut(plan, { store, id: b.id });
+    expect(await names(store, b.id)).toEqual(["Home", "Plants", "Plants:Beans"]);
+    expect(await paths(store, b.id)).toEqual(["Plants/Beans/photo.png", "Plants/plan.png"]);
+    expect(await (await store.loadFile(b.id, "Plants/plan.png"))?.text()).toBe("PLAN");
+    expect((await store.loadPages(b.id)).find((p) => p.name === "Plants")?.text).toBe("g {{./plan.png}}");
+    // and it is gone from here, in the model and in the store; what is not under the page stays
+    expect(source.names()).toEqual(["Home", "Other"]);
+    expect(await names(store, source.info.id)).toEqual(["Home", "Other"]);
+    expect(await paths(store, source.info.id)).toEqual(["Other/x.png"]);
+    expect(source.filesBelow("Garden")).toBe(0);
+    expect(events).toEqual(["structure", "files"]);
+  });
+
+  it("goes with what lies below the page, or without it, and keeps a page's byte-order mark and line endings", async () => {
+    const { store, source, b } = await two([page("Home", "h"), page("Garden", "line one\nline two", { bom: true, lineEnding: "crlf", modified: 5 }), page("Garden:Beans", "beans")]);
+    const dest = await NotebookSession.modelOf(store, b.id);
+    const alone = source.planMove(dest, "Garden", "Garden", false);
+    dest.free();
+    expect(alone.pages.map((m) => m.from)).toEqual(["Garden"]);
+    await source.moveOut(alone, { store, id: b.id });
+    expect(source.names()).toEqual(["Garden:Beans", "Home"]);
+    const moved = (await store.loadPages(b.id)).find((p) => p.name === "Garden");
+    expect(moved).toMatchObject({ text: "line one\nline two", bom: true, lineEnding: "crlf" });
+  });
+
+  it("tells what is in the way, with a message to show, and changes nothing anywhere", async () => {
+    const { store, source, b } = await two([page("Home", "h"), page("Garden", "g")], [file("Garden/plan.png", "P")], [page("Home", "x"), page("garden", "there already")]);
+    const dest = await NotebookSession.modelOf(store, b.id);
+    expect(() => source.planMove(dest, "Garden", "Garden", true)).toThrow(/already exists/);
+    expect(() => source.planMove(dest, "Nope", "Nope", true)).toThrow(/no page called/);
+    dest.free();
+    // a file of the other notebook is in the way too (its paths are read, not only its pages)
+    const withFile = await store.createNotebook({ title: "With a file", home: "Home", kind: "open" }, [page("Home", "x")], [file("Garden/plan.png", "THERE")]);
+    const model = await NotebookSession.modelOf(store, withFile.id);
+    expect(() => source.planMove(model, "Garden", "Garden", true)).toThrow(/already exists/);
+    model.free();
+    expect(await names(store, b.id)).toEqual(["Home", "garden"]);
+    expect(source.names()).toEqual(["Garden", "Home"]);
+    expect(await paths(store, source.info.id)).toEqual(["Garden/plan.png"]);
+  });
+
+  it("leaves both notebooks as they were when the other one cannot be written, and keeps a copy in both when it is this one that cannot", async () => {
+    class Failing extends MemoryStore {
+      failing: string | null = null;
+      override async replacePages(id: string, change: PageChange): Promise<void> {
+        if (this.failing === id) throw new Error("the disk is full");
+        return super.replacePages(id, change);
+      }
+    }
+    const store = new Failing(pageKey);
+    const { source, a, b } = await two([page("Home", "h"), page("Garden", "g")], [file("Garden/plan.png", "P")], [page("Home", "x")], store);
+    const dest = await NotebookSession.modelOf(store, b.id);
+    const plan = source.planMove(dest, "Garden", "Garden", true);
+    dest.free();
+    store.failing = b.id;
+    await expect(source.moveOut(plan, { store, id: b.id })).rejects.toThrow(/disk is full/);
+    expect(source.names()).toEqual(["Garden", "Home"]);
+    expect(await names(store, a.id)).toEqual(["Garden", "Home"]);
+    expect(await names(store, b.id)).toEqual(["Home"]);
+    expect(await paths(store, b.id)).toEqual([]);
+    // the copy was written, and then it can't be taken out of here: it is in both places, and it says so
+    store.failing = a.id;
+    await expect(source.moveOut(plan, { store, id: b.id })).rejects.toThrow(/copied to the other notebook, but could not be removed.*nothing is lost/);
+    expect(await names(store, b.id)).toEqual(["Garden", "Home"]);
+    expect(await names(store, a.id)).toEqual(["Garden", "Home"]);
+    expect(source.names()).toEqual(["Garden", "Home"]);
+    expect(source.filesBelow("Garden")).toBe(1);
+  });
+
+  it("moves nothing when an attachment can't be read, and says so", async () => {
+    class Unreadable extends MemoryStore {
+      override async loadFile(id: string, path: string): Promise<Blob | undefined> {
+        return path.endsWith("plan.png") ? undefined : super.loadFile(id, path);
+      }
+    }
+    const store = new Unreadable(pageKey);
+    const { source, a, b } = await two([page("Home", "h"), page("Garden", "g")], [file("Garden/plan.png", "P")], [page("Home", "x")], store);
+    const dest = await NotebookSession.modelOf(store, b.id);
+    const plan = source.planMove(dest, "Garden", "Garden", true);
+    dest.free();
+    await expect(source.moveOut(plan, { store, id: b.id })).rejects.toThrow(/could not be read, so nothing was moved/);
+    expect(await names(store, b.id)).toEqual(["Home"]);
+    expect(await names(store, a.id)).toEqual(["Garden", "Home"]);
+    expect(source.names()).toEqual(["Garden", "Home"]);
+  });
+
+  it("reads another notebook as a model without opening it, and a notebook that has no pages as an empty one", async () => {
+    const { store, b } = await two([page("Home", "h")], [], [page("Home", "x"), page("A:B", "y")]);
+    const model = await NotebookSession.modelOf(store, b.id);
+    expect(model.names().sort()).toEqual(["A:B", "Home"]);
+    model.free();
+    const empty = await store.createNotebook({ title: "Empty", home: "Home", kind: "open" }, []);
+    const none = await NotebookSession.modelOf(store, empty.id);
+    expect(none.names()).toEqual([]);
+    none.free();
+  });
+});
+
 describe("the sample notebook", () => {
   it("has valid pages whose links all lead somewhere, except the two left missing on purpose", async () => {
     const store = new MemoryStore(pageKey);

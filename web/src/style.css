@@ -428,9 +428,13 @@ dialog code { font-family: ui-monospace, monospace; font-size: 0.9em; }
   .topbar > .primary { order: 3; }
   .search { order: 4; flex: 1 1 12rem; max-width: none; }
   .check { order: 5; }
-  .pagebar { padding-inline: 0.6rem; position: relative; flex-wrap: nowrap; }
+  .pagebar { padding-inline: 0.6rem; }
+}
+
+/* (the page's actions are behind one button when the seven of them do not fit in a row beside the breadcrumb: that is a phone, and a window not much wider with the tree beside the page) */
+@media (max-width: 58rem) {
+  .pagebar { position: relative; flex-wrap: nowrap; }
   .breadcrumb { flex: 1 1 auto; }
-  /* (the page's actions are behind one button: six buttons are two rows of a screen that has few) */
   .actions-toggle { display: inline-block; flex: none; font-size: 1.2rem; line-height: 1; padding: 0.2rem 0.7rem; }
   .page-actions { display: none; }
   .pagebar[data-actions="open"] .page-actions {

@@ -516,6 +516,42 @@ impl Notebook {
         Ok(self.inner.file_link(&name(from)?, path))
     }
 
+    /// Work out moving `page` to the notebook `dest` as `newName` (with what lies below it if `withSubpages`, otherwise the page alone and the files of its own folder), and change nothing, here or
+    /// there. JSON `{pages: [{from, to, text}], files: [[from, to]], incoming: [{from, count, context}], leavingLinks, linksChanged}`: the pages that go with the text each has
+    /// there (links among them written for their new names), the files that go with them, the pages that stay and link to what goes, how many links and pictures of what goes lead to
+    /// something that stays, and how many links were written again. Throws, with a message ready to show, if there is nothing to move or if something in `dest` is in the way.
+    #[wasm_bindgen(js_name = planMove)]
+    pub fn plan_move(&self, page: &str, new_name: &str, with_subpages: bool, dest: &Notebook) -> Result<String, JsError> {
+        let plan = self
+            .inner
+            .plan_move(&name(page)?, &name(new_name)?, with_subpages, &dest.inner)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(J::Obj(vec![
+            (
+                "pages",
+                J::Arr(
+                    plan.pages
+                        .iter()
+                        .map(|m| J::Obj(vec![("from", s(m.from.as_str())), ("to", s(m.to.as_str())), ("text", s(m.text.as_str()))]))
+                        .collect(),
+                ),
+            ),
+            ("files", J::Arr(plan.files.iter().map(|(from, to)| J::Arr(vec![s(from.as_str()), s(to.as_str())])).collect())),
+            (
+                "incoming",
+                J::Arr(
+                    plan.incoming
+                        .iter()
+                        .map(|b| J::Obj(vec![("from", s(b.from.as_str())), ("count", J::Num(b.count)), ("context", s(b.context.as_str()))]))
+                        .collect(),
+                ),
+            ),
+            ("leavingLinks", J::Num(plan.leaving_links)),
+            ("linksChanged", J::Num(plan.links_changed)),
+        ])
+        .render())
+    }
+
     /// Move a page and everything below it; with `updateLinks`, rewrite links so that every one
     /// still leads where it did. JSON `{moved: [[from, to]], rewritten: [page], linksChanged,
     /// filesMoved: [[from, to]]}` (the files of the pages moved go with them).
@@ -574,6 +610,24 @@ mod tests {
             nb.put(page, text).ok().expect("a valid name");
         }
         nb
+    }
+
+    #[test]
+    #[allow(clippy::ok_expect)]
+    fn the_shape_of_a_plan_to_move_a_page_to_another_notebook() {
+        let mut src = Notebook::new();
+        src.put("Garden", "see [[+Beans]] {{./plan.png}}").ok().expect("ok");
+        src.put("Garden:Beans", "beans").ok().expect("ok");
+        src.put("Home", "[[Garden]]").ok().expect("ok");
+        src.put_file("Garden/plan.png").ok().expect("ok");
+        let dest = Notebook::new();
+        let plan = src.plan_move("Garden", "Plants", true, &dest).ok().expect("a plan");
+        assert_eq!(
+            plan,
+            r#"{"pages":[{"from":"Garden","to":"Plants","text":"see [[+Beans]] {{./plan.png}}"},{"from":"Garden:Beans","to":"Plants:Beans","text":"beans"}],"files":[["Garden/plan.png","Plants/plan.png"]],"incoming":[{"from":"Home","count":1,"context":"Garden"}],"leavingLinks":0,"linksChanged":0}"#
+        );
+        assert_eq!(src.len(), 3, "a plan changes nothing");
+        assert!(dest.is_empty());
     }
 
     // `JsError` isn't `Debug`, so these tests take the `Ok` of each result with `.ok().expect()`.

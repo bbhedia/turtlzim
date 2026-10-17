@@ -20,6 +20,22 @@ page (`zim-server.md`); without one nothing leaves the browser.
   Forward, an address per page: `#/Projects%3AGarden`), new page and new sub-page, rename (with
   "update the links"), delete, download one page as its `.txt`. Writing is saved by itself 700 ms
   after the last keystroke, at once with Ctrl+S, and when the page is left or hidden.
+* **Moving a page to another notebook** (**Move…** among the page's actions, E16e). The page, its attachments and, if asked, the pages below it (with theirs) are copied to the notebook chosen,
+  under the name chosen (a name below its own is fine there), and then taken out of this one: copied first, so that a failure in between loses nothing (the page is then in both places, and
+  the message says so; a failure of the first write changes nothing). What goes, what is in the way (a page or a file of the other notebook, a file where a folder is) and which links are
+  written again are the notebook rules' (`plan_move` in `core/zim-notebook`, `docs/zim-notebook.md`); links among the pages that go still lead to each other there. When the move costs
+  something a question says so first, and asks: pages here that link to what goes (named: those links lead nowhere afterwards), links and pictures of the moved pages that lead to
+  something that stays; **a page that leaves an encrypted notebook for one that is not says that it will no longer be encrypted (readable by anyone who can read the browser's data, and
+  sent to the server in clear if that notebook is kept there) and is not moved until a box is ticked**; a page that goes into an encrypted notebook says that the browser may keep traces of
+  it (and, if it was kept on the server, that a copy was sent there in clear). A move that costs nothing asks nothing. Between two encrypted notebooks nothing leaves the vault. The other
+  notebook need not be open: it is brought up to date with the pages that came (and, if it is kept on the server, sealed or not, sent) when it is next opened. Verified by browser scenarios
+  (an open notebook to another: pages, attachment bytes, links written for the new name, the pages that link to it named, a name in the way refused, a page nothing links to going without a
+  question; encrypted to open with the tick, open to encrypted, and between two encrypted ones with nothing of it in the browser's storage; into a sealed notebook that is kept on the
+  server, which then has it sealed, and a second device that has it; on a phone, from the `⋯` actions; with no other notebook, which says so and how to make one), by unit tests of the session (what is copied and removed, with and without what is below,
+  the byte-order mark and line endings kept, every failure) and by the rules' own tests. WebKit keeps a Blob that IndexedDB hands out *by reference to its record*, so an attachment put into the other
+  notebook from that Blob became unreadable once the record it came from was deleted (the browser scenario failed in 6 of 12 runs in WebKit): `moveOut` writes the attachments from bytes it has read. **Seven actions no longer fit in a row beside the breadcrumb** in a window with the tree beside the page
+  that is not much wider than a phone: the page's actions fold into the `⋯` button below 58rem (928 px, it was 48rem), and a browser test checks that between 780 and 1400 px they are either seven
+  in one row or behind the button, never wrapped over several rows (a window of 860 px was left with a lone Delete on a row of its own).
 * **Links.** Ctrl/Cmd-click follows one: to a page (found as Zim finds it), to a heading or anchor
   (the caret goes there), to a web address (only `http`, `https` and `ftp`, in a window with no way
   back to the app). A link to a page that doesn't exist is drawn differently, and following it shows

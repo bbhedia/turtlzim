@@ -221,6 +221,9 @@ docker compose up                   # Postgres + server (define compose file)
   `window.__zimShell.folders`; the page names a folder only by the id the program gave it, and `desktop/src-tauri/src/folders.rs` (no Tauri in it, `cargo test` in
   `desktop/src-tauri`) is all the program knows of one: paths are checked there, links are not followed, and a change is made entirely or not at all, with a journal. A
   folder is the person's: only what is listed and read as a page or an attachment is written, and removing a notebook only unlists it.
+- **Moving a page to another notebook** (E16e, `docs/zim-web-app.md`): what goes with the page, what is in the way and how the links are written for the new names are the notebook rules'
+  (`Notebook::plan_move` in `core/zim-notebook`, through wasm: the app holds none of it); `NotebookSession.moveOut` copies first and removes after, so that a failure in between loses nothing. A page
+  that leaves an encrypted notebook for one that is not must be ticked for (it stops being encrypted: the question says so), and nothing about a move is kept anywhere the browser keeps things.
 - **The follow-up document** (`docs/suivi/suivi.tex` and its PDF): at the end of **every milestone**, in the same commit, change the state and the "reste à faire" of the points it touches, add a line to the journal with the commit ids, update the test counts in
   `docs/suivi/releves.tex`, run `scripts/suivi.sh` and commit the source and the PDF together. A point is *fait* only when tests ran it; what was never tried against the real thing says so in its "reste à faire". Written in French, for the user.
 - **Accounts** (`server/`, `docs/zim-server.md`; decided 2026-10-15: Google + GitHub first, a mailed code only at sign-up, on this server): optional;

@@ -3,7 +3,7 @@
 // a page's file properties (byte-order mark, line endings) are kept so that export writes each page
 // back as it was read.
 import { NotebookModel, checkPageName, newPageText, pageKey, pageToPath, startingText, zimTimestamp } from "../notebook-core";
-import type { Backlink, LinkSuggestion, RenameReport, ResolvedFile, ResolvedLink, SearchHit, TagInfo, TreeNode } from "../notebook-core";
+import type { Backlink, LinkSuggestion, MovePlan, RenameReport, ResolvedFile, ResolvedLink, SearchHit, TagInfo, TreeNode } from "../notebook-core";
 import { encodePage } from "../zim";
 import type { LineEnding } from "../zim";
 import { typed } from "./media";
@@ -47,6 +47,29 @@ export class NotebookSession {
     const session = new NotebookSession(store, info);
     await session.reload();
     return session;
+  }
+
+  /**
+   * The pages and the paths of the files of a notebook, as a model that nothing is shown by: to work out something between two notebooks (`planMove`) without opening the other one.
+   * The caller frees it.
+   */
+  static async modelOf(store: NotebookStore, id: string): Promise<NotebookModel> {
+    const [pages, stored] = await Promise.all([store.loadPages(id), store.listFiles(id)]);
+    const model = new NotebookModel();
+    try {
+      for (const page of pages) model.put(page.name, page.text);
+      for (const file of stored) {
+        try {
+          model.putFile(file.path);
+        } catch {
+          // (a stored path the rules refuse is not a file of the notebook)
+        }
+      }
+    } catch (error) {
+      model.free();
+      throw error;
+    }
+    return model;
   }
 
   /** Read every page again from the store (after a failed write, to be sure what is there). */
@@ -312,6 +335,58 @@ export class NotebookSession {
     this.emit({ kind: "structure" });
     if (report.filesMoved.length > 0) this.emit({ kind: "files" });
     return report;
+  }
+
+  /**
+   * Work out moving `page` to the notebook that `dest` is the model of (`modelOf`), as `newName`; nothing is changed. Throws, with a message to show, if there is nothing to move or something
+   * of the other notebook is in the way.
+   */
+  planMove(dest: NotebookModel, page: string, newName: string, withSubpages: boolean): MovePlan {
+    return this.model.planMove(dest, page, newName, withSubpages);
+  }
+
+  /**
+   * Carry out a plan: the pages and files that go are put into the other notebook first, in one write that happens entirely or not at all, and only then taken out of this one. A failure
+   * in between leaves them in both places and loses nothing (and says so); a failure of the first write leaves both notebooks as they were.
+   */
+  moveOut(plan: MovePlan, to: { store: NotebookStore; id: string }): Promise<void> {
+    return this.exclusive(() => this.moveOutNow(plan, to));
+  }
+
+  private async moveOutNow(plan: MovePlan, to: { store: NotebookStore; id: string }): Promise<void> {
+    const now = Date.now();
+    // everything that goes is read first: if something can't be, nothing has been changed anywhere
+    const pages: StoredPage[] = plan.pages.map((moved) => {
+      const kept = this.files.get(pageKey(moved.from));
+      return { name: moved.to, text: moved.text, bom: kept?.bom ?? false, lineEnding: kept?.lineEnding ?? "lf", modified: now };
+    });
+    const files: StoredFile[] = [];
+    for (const [from, toPath] of plan.files) {
+      const blob = await this.store.loadFile(this.info.id, from);
+      if (!blob) throw new Error(`The attachment ${from} could not be read, so nothing was moved.`);
+      // (written from bytes read now, not from the Blob that the store handed out: WebKit keeps a Blob of IndexedDB's by reference to the record it came from, and the record is deleted next)
+      files.push({ path: toPath, blob: new Blob([new Uint8Array(await blob.arrayBuffer())], { type: blob.type }), modified: this.fileInfos.get(fileKey(from))?.modified ?? now });
+    }
+    await to.store.replacePages(to.id, { remove: [], put: pages, files: { put: files } });
+    // it is there; now it goes from here
+    const names = plan.pages.map((moved) => moved.from);
+    const paths = plan.files.map(([from]) => from);
+    for (const name of names) {
+      this.model.remove(name);
+      this.files.delete(pageKey(name));
+    }
+    for (const path of paths) {
+      this.model.removeFile(path);
+      this.fileInfos.delete(fileKey(path));
+    }
+    try {
+      await this.store.replacePages(this.info.id, { remove: names, put: [], ...(paths.length > 0 ? { files: { remove: paths } } : {}) });
+    } catch (error) {
+      await this.reload();
+      throw new Error(`It was copied to the other notebook, but could not be removed from this one (${error instanceof Error ? error.message : String(error)}). It is in both places now: nothing is lost.`);
+    }
+    this.emit({ kind: "structure" });
+    if (paths.length > 0) this.emit({ kind: "files" });
   }
 
   /** Delete a page and everything below it, and the attachments in their folders. The names deleted. */

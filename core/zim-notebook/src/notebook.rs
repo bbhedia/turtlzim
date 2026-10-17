@@ -172,6 +172,30 @@ pub struct RenameReport {
     pub files_moved: Vec<(String, String)>,
 }
 
+/// One page of a move to another notebook: where it was, where it goes, and what it says there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovedPage {
+    pub from: PageName,
+    pub to: PageName,
+    /// Its text there: the same, but for the links among the pages that go, which are written for their new names.
+    pub text: String,
+}
+
+/// What moving a page (and what lies below it, if asked) to another notebook would do: worked out, not done.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MovePlan {
+    /// The pages that go, in name order (by their names here).
+    pub pages: Vec<MovedPage>,
+    /// The files that go with them (a page's folder holds its attachments), from their paths here to their paths there.
+    pub files: Vec<(String, String)>,
+    /// The pages that stay and link to a page that goes: their links lead nowhere once it has gone. Each page once, with how many of its links.
+    pub incoming: Vec<Backlink>,
+    /// How many links and pictures of the pages that go lead to a page or a file that stays: they can't lead there from the other notebook.
+    pub leaving_links: usize,
+    /// How many links among the pages that go were written again for their new names.
+    pub links_changed: usize,
+}
+
 /// The text of a new page, as Zim starts one: its header and a title heading.
 /// `created` is a time such as `2026-10-06T09:41:03+02:00`.
 pub fn new_page_text(name: &PageName, created: &str) -> String {
@@ -807,6 +831,211 @@ impl Notebook {
         report.rewritten.sort_by_key(|n| n.key());
         Ok(report)
     }
+}
+
+impl Notebook {
+    /// Work out moving the page `page` to the notebook `dest` as `new_name`: with what lies below it if `with_subpages` (its pages and the files of their folders), otherwise the page alone and the
+    /// files in its own folder. Nothing is changed, here or there. Links among the pages that go are written for their new names (as a rename does it); the links that cannot lead where they did
+    /// from the other notebook, and those that will lead nowhere here, are counted so that they can be told. It fails, with a message ready to show, where there is nothing to move, or where a
+    /// page or a file of `dest` is in the way (a page that would land on one of its pages, a file on one of its files, a file where a folder is or a folder where a file is).
+    pub fn plan_move(&self, page: &PageName, new_name: &PageName, with_subpages: bool, dest: &Notebook) -> Result<MovePlan, RenameError> {
+        let key = page.key();
+        let moving: Vec<String> = if with_subpages {
+            self.keys_in_tree(&key)
+        } else if self.pages.contains_key(&key) {
+            vec![key.clone()]
+        } else {
+            Vec::new()
+        };
+        if moving.is_empty() {
+            return Err(RenameError::NothingThere(page.clone()));
+        }
+        let moving_files: Vec<String> = if with_subpages { self.files_below(page) } else { self.files_of(page) };
+
+        // What goes, by itself in a notebook of its own, so that a rename there rewrites the links among the pages that go and the references to their files, and nothing else.
+        let mut scratch = Notebook::new();
+        for k in &moving {
+            let entry = &self.pages[k];
+            scratch.put(&entry.name, entry.text.clone());
+        }
+        for path in &moving_files {
+            scratch.put_file(path).expect("a path that is a file of this notebook is one of that notebook's");
+        }
+        let (pairs, file_pairs, links_changed) = if page.as_str() == new_name.as_str() {
+            (moving.iter().map(|k| (self.pages[k].name.clone(), self.pages[k].name.clone())).collect::<Vec<_>>(), moving_files.iter().map(|p| (p.clone(), p.clone())).collect::<Vec<_>>(), 0)
+        } else {
+            // (a page can't be renamed below itself, which in another notebook is no trouble: it goes by way of a name that is nowhere)
+            let report = if new_name.is_inside(page) {
+                let way = PageName::parse("Zim move in progress").expect("a valid name");
+                scratch.rename(page, &way, true)?;
+                scratch.rename(&way, new_name, true)?
+            } else {
+                scratch.rename(page, new_name, true)?
+            };
+            // (through a name that is nowhere, the report of the second move is told in its names: put the first ones back)
+            let pairs = if new_name.is_inside(page) {
+                let renamed = |name: &PageName| -> PageName {
+                    let rest: Vec<&str> = name.levels().skip(page.depth()).collect();
+                    if rest.is_empty() {
+                        new_name.clone()
+                    } else {
+                        new_name.child(&rest.join(":")).expect("a valid name below a valid name")
+                    }
+                };
+                moving.iter().map(|k| (self.pages[k].name.clone(), renamed(&self.pages[k].name))).collect()
+            } else {
+                report.moved.clone()
+            };
+            let files = if new_name.is_inside(page) {
+                let new_folder = new_name.folder_path();
+                moving_files
+                    .iter()
+                    .map(|path| {
+                        let rest: Vec<&str> = path.split('/').skip(page.depth()).collect();
+                        (path.clone(), format!("{new_folder}/{}", rest.join("/")))
+                    })
+                    .collect()
+            } else {
+                report.files_moved.clone()
+            };
+            (pairs, files, report.links_changed)
+        };
+
+        // Nothing may land on what is in the other notebook.
+        for (_, to) in &pairs {
+            if dest.has_page(to) {
+                return Err(RenameError::Taken(dest.page_name(to).unwrap_or_else(|| to.clone())));
+            }
+            let folder = to.folder_path().to_lowercase();
+            if let Some(file) = file_in_the_way(dest, &folder) {
+                return Err(RenameError::FileAndFolder(file));
+            }
+        }
+        for (_, to) in &file_pairs {
+            if let Some(existing) = dest.file_path(to) {
+                return Err(RenameError::FileTaken(existing.to_string()));
+            }
+            let lower = to.to_lowercase();
+            if let Some((at, _)) = lower.rmatch_indices('/').next() {
+                if let Some(file) = file_in_the_way(dest, &lower[..at]) {
+                    return Err(RenameError::FileAndFolder(file));
+                }
+            }
+            let below = format!("{lower}/");
+            if let Some(file) = dest.files().find(|f| f.to_lowercase().starts_with(&below)) {
+                return Err(RenameError::FileAndFolder(file.to_string()));
+            }
+        }
+
+        // What goes in the texts it has there.
+        let mut moved: Vec<MovedPage> = pairs
+            .iter()
+            .map(|(from, to)| MovedPage { from: from.clone(), to: to.clone(), text: scratch.get(to).expect("a page that went is in the notebook it went to").to_string() })
+            .collect();
+        moved.sort_by_key(|m| m.from.key());
+        let mut file_pairs = file_pairs;
+        file_pairs.sort_by_key(|(from, _)| from.to_lowercase());
+
+        // A link among the pages that go has to lead to the same page there. A link written relative to its page is read by looking among the pages around it, and there those are other pages
+        // (the other notebook has pages of its own that can answer first): where one would lead astray it is written from the top, which no page around it can change.
+        let mut links_changed = links_changed;
+        {
+            let moved_names: BTreeMap<String, PageName> = moved.iter().map(|m| (m.to.key(), m.to.clone())).collect();
+            let landing = |name: &PageName| -> Option<PageName> {
+                let key = name.key();
+                if let Some(found) = moved_names.get(&key) {
+                    return Some(found.clone());
+                }
+                if let Some(found) = dest.find(name) {
+                    return Some(found);
+                }
+                let below = format!("{key}:");
+                moved_names.range(below.clone()..).next().filter(|(k, _)| k.starts_with(&below)).map(|(_, n)| n.prefix(name.depth()))
+            };
+            let goes = |name: &PageName| if with_subpages { name.same_page(page) || name.is_inside(page) } else { name.same_page(page) };
+            let renamed = |name: &PageName| -> PageName {
+                let rest: Vec<&str> = name.levels().skip(page.depth()).collect();
+                if rest.is_empty() {
+                    new_name.clone()
+                } else {
+                    new_name.child(&rest.join(":")).expect("a valid name below a valid name")
+                }
+            };
+            for m in &mut moved {
+                let before = self.links(&m.from);
+                let now = links_in(&m.text);
+                debug_assert_eq!(before.len(), now.len(), "rewriting the links of a page does not change how many it has");
+                let mut edits: Vec<(usize, usize, String)> = Vec::new();
+                for (link_before, link_now) in before.iter().zip(now.iter()) {
+                    let Link::Page { page: led_before, exists: true, .. } = resolve(&m.from, &link_before.target, self) else { continue };
+                    if !goes(&led_before) {
+                        continue;
+                    }
+                    let want = renamed(&led_before);
+                    let leads_right = matches!(resolve(&m.to, &link_now.target, &landing), Link::Page { ref page, exists: true, .. } if page.same_page(&want));
+                    if !leads_right {
+                        let trimmed = link_now.target.trim();
+                        let anchor = trimmed.find('#').map(|i| &trimmed[i..]).unwrap_or("");
+                        edits.push((link_now.target_start, link_now.target_end, format!(":{want}{anchor}")));
+                    }
+                }
+                edits.sort_by_key(|e| std::cmp::Reverse(e.0));
+                links_changed += edits.len();
+                for (start, end, text) in edits {
+                    m.text.replace_range(start..end, &text);
+                }
+            }
+        }
+
+        // Who links to what goes (and stays), and what goes still links to (and stays).
+        let moved_keys: HashSet<String> = moving.iter().cloned().collect();
+        let moving_file_keys: HashSet<String> = moving_files.iter().map(|p| p.to_lowercase()).collect();
+        let mut incoming: BTreeMap<String, Backlink> = BTreeMap::new();
+        let mut leaving_links = 0;
+        for k in &moving {
+            let entry = &self.pages[k];
+            for backlink in self.backlinks(&entry.name) {
+                if moved_keys.contains(&backlink.from.key()) {
+                    continue;
+                }
+                incoming
+                    .entry(backlink.from.key())
+                    .and_modify(|seen| seen.count += backlink.count)
+                    .or_insert(backlink);
+            }
+            for link in &entry.links {
+                if let Link::Page { page, exists: true, .. } = resolve(&entry.name, &link.target, self) {
+                    if !moved_keys.contains(&page.key()) {
+                        leaving_links += 1;
+                    }
+                }
+                if classify(&link.target) == LinkKind::File {
+                    if let FileTarget::Notebook { path, exists: true } = resolve_file(&entry.name, &link.target, self) {
+                        if !moving_file_keys.contains(&path.to_lowercase()) {
+                            leaving_links += 1;
+                        }
+                    }
+                }
+            }
+            for image in &entry.images {
+                if let FileTarget::Notebook { path, exists: true } = resolve_file(&entry.name, &image.path, self) {
+                    if !moving_file_keys.contains(&path.to_lowercase()) {
+                        leaving_links += 1;
+                    }
+                }
+            }
+        }
+        Ok(MovePlan { pages: moved, files: file_pairs, incoming: incoming.into_values().collect(), leaving_links, links_changed })
+    }
+}
+
+/// A file of `notebook` that is, or is above, the folder `folder` (a lower-case path): where a folder can't be made.
+fn file_in_the_way(notebook: &Notebook, folder: &str) -> Option<String> {
+    folder
+        .match_indices('/')
+        .map(|(at, _)| &folder[..at])
+        .chain(std::iter::once(folder))
+        .find_map(|prefix| notebook.file_path(prefix).map(str::to_string))
 }
 
 /// The new text of a link target so that it leads to `want` from page `from`. A target keeps its

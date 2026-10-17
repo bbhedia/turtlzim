@@ -87,6 +87,28 @@ export interface RenameReport {
   filesMoved: Array<[from: string, to: string]>;
 }
 
+/** One page of a move to another notebook: where it was, where it goes, and the text it has there. */
+export interface MovedPage {
+  from: string;
+  to: string;
+  /** The page's text there: the same but for the links among the pages that go, which are written for their new names. */
+  text: string;
+}
+
+/** What moving a page to another notebook would do (`core/zim-notebook`, `plan_move`): worked out, nothing changed. */
+export interface MovePlan {
+  /** The pages that go, in name order (by their names here). */
+  pages: MovedPage[];
+  /** The files that go with them (a page's folder holds its attachments), old path to new. */
+  files: Array<[from: string, to: string]>;
+  /** The pages that stay and link to a page that goes: those links lead nowhere once it has gone. Each page once. */
+  incoming: Backlink[];
+  /** How many links and pictures of the pages that go lead to something that stays: they can't lead there from the other notebook. */
+  leavingLinks: number;
+  /** How many links among the pages that go were written again for their new names. */
+  linksChanged: number;
+}
+
 /** Where a reference to a file (an image's path, a `[[./file]]` link) leads. */
 export type ResolvedFile =
   /** A path in the notebook (as the notebook spells it, if there is such a file) and whether there is one. */
@@ -449,5 +471,13 @@ export class NotebookModel {
    */
   rename(from: string, to: string, updateLinks = true): RenameReport {
     return JSON.parse(this.inner.rename(from, to, updateLinks)) as RenameReport;
+  }
+
+  /**
+   * Work out moving `page` to the notebook `dest` as `newName`: with what lies below it if `withSubpages`, otherwise the page alone and the files of its own folder. Nothing is changed, here or in
+   * `dest`. Throws an Error with a message ready to show if there is nothing to move or something of `dest` is in the way.
+   */
+  planMove(dest: NotebookModel, page: string, newName: string, withSubpages: boolean): MovePlan {
+    return JSON.parse(this.inner.planMove(page, newName, withSubpages, dest.inner)) as MovePlan;
   }
 }

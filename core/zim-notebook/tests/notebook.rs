@@ -4,7 +4,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use common::{name, Rng};
-use zim_notebook::{links_in, new_page_text, Link, Notebook, PageName, PageSet, RenameError};
+use zim_notebook::{classify, links_in, new_page_text, FileTarget, Link, LinkKind, MovePlan, Notebook, PageName, PageSet, RenameError};
 
 fn notebook(pages: &[(&str, &str)]) -> Notebook {
     let mut nb = Notebook::new();
@@ -623,4 +623,275 @@ fn after_a_rename_every_link_still_leads_to_the_page_it_led_to() {
     }
     assert!(renamed > 2_000 && refused > 100 && rewritten > 1_000, "the generator exercised too little: {renamed} renamed, {refused} refused, {rewritten} links rewritten");
     assert!(files_moved > 1_000 && file_clashes > 10, "too few files in play: {files_moved} moved, {file_clashes} renames refused for landing on a file");
+}
+
+
+// ---- moving a page to another notebook (`plan_move`)
+
+fn with_files(pages: &[(&str, &str)], files: &[&str]) -> Notebook {
+    let mut nb = notebook(pages);
+    for file in files {
+        nb.put_file(file).unwrap();
+    }
+    nb
+}
+
+fn files_of_notebook(nb: &Notebook) -> Vec<String> {
+    nb.files().map(String::from).collect()
+}
+
+/// What `dest` is once the plan has been carried out: its pages and files, and the ones that came.
+fn landed(dest: &Notebook, plan: &MovePlan) -> Notebook {
+    let mut after = Notebook::new();
+    for n in dest.names() {
+        after.put(n, dest.get(n).unwrap());
+    }
+    for f in dest.files() {
+        after.put_file(f).unwrap();
+    }
+    for moved in &plan.pages {
+        after.put(&moved.to, moved.text.clone());
+    }
+    for (_, to) in &plan.files {
+        after.put_file(to).unwrap();
+    }
+    after
+}
+
+#[test]
+fn a_page_goes_to_another_notebook_with_what_lies_below_it_and_its_files() {
+    let src = with_files(
+        &[
+            ("Projects", "top"),
+            ("Projects:Garden", "see [[+Beans]] {{./plan.png}}"),
+            ("Projects:Garden:Beans", "beans {{./photo.png}}"),
+            ("Projects:Taxes", "taxes"),
+            ("Home", "go to [[Projects:Garden]] and [[Projects:Taxes]]"),
+        ],
+        &["Projects/Garden/plan.png", "Projects/Garden/Beans/photo.png", "Projects/Taxes/receipt.pdf", "Other/x.png"],
+    );
+    let dest = notebook(&[("Home", "there")]);
+    let plan = src.plan_move(&name("Projects:Garden"), &name("Projects:Garden"), true, &dest).unwrap();
+    assert_eq!(plan.pages.iter().map(|m| (m.from.to_string(), m.to.to_string())).collect::<Vec<_>>(), [("Projects:Garden".to_string(), "Projects:Garden".to_string()), ("Projects:Garden:Beans".to_string(), "Projects:Garden:Beans".to_string())]);
+    assert_eq!(plan.files, [("Projects/Garden/Beans/photo.png".to_string(), "Projects/Garden/Beans/photo.png".to_string()), ("Projects/Garden/plan.png".to_string(), "Projects/Garden/plan.png".to_string())]);
+    assert_eq!(plan.pages[0].text, "see [[+Beans]] {{./plan.png}}", "the same name: nothing is rewritten");
+    assert_eq!(plan.links_changed, 0);
+    assert_eq!(plan.incoming.len(), 1);
+    assert_eq!((plan.incoming[0].from.as_str(), plan.incoming[0].count), ("Home", 1), "the page that stays and links to it is told");
+    // the parent section is not in the plan, nor is anything that is not under the page
+    assert!(plan.pages.iter().all(|m| m.from.as_str().starts_with("Projects:Garden")));
+}
+
+#[test]
+fn a_page_can_go_alone_with_the_files_of_its_own_folder() {
+    let src = with_files(
+        &[("Garden", "see [[+Beans]] {{./plan.png}} {{./Beans/photo.png}}"), ("Garden:Beans", "beans")],
+        &["Garden/plan.png", "Garden/Beans/photo.png"],
+    );
+    let dest = Notebook::new();
+    let plan = src.plan_move(&name("Garden"), &name("Plants"), false, &dest).unwrap();
+    assert_eq!(plan.pages.len(), 1);
+    assert_eq!((plan.pages[0].from.as_str(), plan.pages[0].to.as_str()), ("Garden", "Plants"));
+    assert_eq!(plan.files, [("Garden/plan.png".to_string(), "Plants/plan.png".to_string())], "its own files go, the files of the pages below it stay with them");
+    assert_eq!(plan.leaving_links, 2, "the link to the page below and the picture in its folder stay behind");
+    let after = landed(&dest, &plan);
+    assert!(after.has_page(&name("Plants")) && !after.has_page(&name("Garden:Beans")));
+}
+
+#[test]
+fn the_links_among_the_pages_that_go_follow_their_new_names() {
+    let src = with_files(
+        &[
+            ("Garden", "see [[Garden:Beans]] and [[+Peas]] and [[:Garden]] {{./plan.png}}"),
+            ("Garden:Beans", "back to [[Garden]] and [[:Garden:Peas]] {{../plan.png}}"),
+            ("Garden:Peas", "peas {{./pod.png}}"),
+            ("Elsewhere", "stays: [[Garden:Beans]]"),
+        ],
+        &["Garden/plan.png", "Garden/Peas/pod.png"],
+    );
+    let dest = notebook(&[("Home", "h")]);
+    let plan = src.plan_move(&name("Garden"), &name("Plants:Veg"), true, &dest).unwrap();
+    let text = |from: &str| plan.pages.iter().find(|m| m.from.as_str() == from).unwrap().text.clone();
+    assert_eq!(text("Garden"), "see [[+Beans]] and [[+Peas]] and [[:Plants:Veg]] {{./plan.png}}");
+    assert_eq!(text("Garden:Beans"), "back to [[Veg]] and [[:Plants:Veg:Peas]] {{../plan.png}}", "a picture in the folder above still is, and needs no rewriting");
+    assert!(plan.links_changed >= 3);
+    assert_eq!(plan.files.iter().map(|(_, to)| to.as_str()).collect::<Vec<_>>(), ["Plants/Veg/Peas/pod.png", "Plants/Veg/plan.png"]);
+    // and the pages that stay are not touched: their links lead nowhere once the pages have gone, and they are told
+    assert_eq!(plan.incoming.iter().map(|b| (b.from.to_string(), b.count)).collect::<Vec<_>>(), [("Elsewhere".to_string(), 1)]);
+    assert_eq!(src.get(&name("Elsewhere")), Some("stays: [[Garden:Beans]]"), "a plan changes nothing here");
+}
+
+#[test]
+fn a_page_can_go_to_a_name_below_its_own_in_the_other_notebook() {
+    let src = with_files(&[("Garden", "see [[+Beans]] {{./plan.png}}"), ("Garden:Beans", "back to [[Garden]]")], &["Garden/plan.png"]);
+    let dest = Notebook::new();
+    let plan = src.plan_move(&name("Garden"), &name("Garden:Old"), true, &dest).unwrap();
+    assert_eq!(plan.pages.iter().map(|m| (m.from.to_string(), m.to.to_string())).collect::<Vec<_>>(), [("Garden".to_string(), "Garden:Old".to_string()), ("Garden:Beans".to_string(), "Garden:Old:Beans".to_string())]);
+    assert_eq!(plan.files, [("Garden/plan.png".to_string(), "Garden/Old/plan.png".to_string())]);
+    let after = landed(&dest, &plan);
+    // the links still lead where they did, among the pages that went
+    match after.resolve(&name("Garden:Old:Beans"), "Old") {
+        Link::Page { page, exists, .. } => assert_eq!((page.as_str(), exists), ("Garden:Old", true)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn what_is_in_the_way_in_the_other_notebook_refuses_the_move_and_changes_nothing() {
+    let src = with_files(&[("Garden", "g {{./plan.png}}"), ("Garden:Beans", "b")], &["Garden/plan.png"]);
+    let page_in_the_way = notebook(&[("garden:beans", "there already")]);
+    assert_eq!(src.plan_move(&name("Garden"), &name("Garden"), true, &page_in_the_way), Err(RenameError::Taken(name("garden:beans"))), "a page there with the name of a page that goes, whatever the case");
+    assert!(src.plan_move(&name("Garden"), &name("Garden"), false, &page_in_the_way).is_ok(), "(the page alone is not in its way)");
+    let file_in_the_way = with_files(&[("Home", "h")], &["Garden/plan.png"]);
+    assert_eq!(src.plan_move(&name("Garden"), &name("Garden"), true, &file_in_the_way), Err(RenameError::FileTaken("Garden/plan.png".to_string())));
+    let file_where_a_folder_is = with_files(&[("Home", "h")], &["Garden"]);
+    assert_eq!(src.plan_move(&name("Garden"), &name("Garden"), true, &file_where_a_folder_is), Err(RenameError::FileAndFolder("Garden".to_string())), "a file there where the page's folder would be");
+    let folder_where_a_file_goes = with_files(&[("Home", "h")], &["Garden/plan.png/inside.bin"]);
+    assert!(matches!(src.plan_move(&name("Garden"), &name("Garden"), true, &folder_where_a_file_goes), Err(RenameError::FileAndFolder(_))), "a folder there where a file would land");
+    // (a page with no files of its own is refused too, where its folder would be a file there)
+    let bare = notebook(&[("Garden", "g")]);
+    assert_eq!(bare.plan_move(&name("Garden"), &name("Garden"), true, &file_where_a_folder_is), Err(RenameError::FileAndFolder("Garden".to_string())));
+    assert_eq!(src.plan_move(&name("Missing"), &name("X"), true, &Notebook::new()), Err(RenameError::NothingThere(name("Missing"))));
+    assert_eq!(files_of_notebook(&src), ["Garden/plan.png"]);
+    assert_eq!(src.len(), 2);
+    assert_eq!(files_of_notebook(&page_in_the_way), Vec::<String>::new());
+}
+
+#[test]
+fn who_links_to_what_goes_and_what_goes_still_links_to_are_counted() {
+    let src = with_files(
+        &[
+            ("Secret", "see [[Public]] and [[Public:Deep]] and [[Secret:Part]] and {{../Shared/logo.png}} and [[../Shared/logo.png|file]] {{./own.png}}"),
+            ("Secret:Part", "part [[Public]]"),
+            ("Public", "mentions [[Secret]] twice: [[Secret]] and [[Secret:Part]]"),
+            ("Public:Deep", "deep [[Secret:Part]]"),
+            ("Unrelated", "nothing"),
+        ],
+        &["Secret/own.png", "Shared/logo.png"],
+    );
+    let plan = src.plan_move(&name("Secret"), &name("Secret"), true, &Notebook::new()).unwrap();
+    assert_eq!(plan.incoming.iter().map(|b| (b.from.to_string(), b.count)).collect::<Vec<_>>(), [("Public".to_string(), 3), ("Public:Deep".to_string(), 1)], "each page that stays, once, with all its links to what goes");
+    assert!(plan.incoming.iter().all(|b| !b.context.is_empty()));
+    // what goes links to two pages that stay (Public twice: from Secret and Secret:Part, and Public:Deep once), and to a file that stays, as a picture and as a link
+    assert_eq!(plan.leaving_links, 5);
+    assert!(plan.files.iter().all(|(from, _)| from == "Secret/own.png"));
+}
+
+#[test]
+fn the_same_name_rewrites_no_text() {
+    let src = with_files(&[("A", "[[B]] {{./x.png}}"), ("A:B", "[[A]]")], &["A/x.png"]);
+    let plan = src.plan_move(&name("A"), &name("a"), true, &Notebook::new());
+    // (another spelling of the same name is a name that is not the same: the case is kept as it is given)
+    let plan = plan.unwrap();
+    assert_eq!(plan.pages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["[[B]] {{./x.png}}", "[[A]]"].map(|t| t.to_string()));
+    let identical = src.plan_move(&name("A"), &name("A"), true, &Notebook::new()).unwrap();
+    assert_eq!(identical.links_changed, 0);
+    assert_eq!(identical.pages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["[[B]] {{./x.png}}", "[[A]]"].map(|t| t.to_string()));
+}
+
+#[test]
+fn a_section_goes_with_the_pages_below_it_but_not_alone() {
+    let src = notebook(&[("Section:One", "1"), ("Section:Two", "2")]);
+    let plan = src.plan_move(&name("Section"), &name("Moved"), true, &Notebook::new()).unwrap();
+    assert_eq!(plan.pages.iter().map(|m| m.to.to_string()).collect::<Vec<_>>(), ["Moved:One", "Moved:Two"]);
+    assert_eq!(src.plan_move(&name("Section"), &name("Moved"), false, &Notebook::new()), Err(RenameError::NothingThere(name("Section"))), "a section has no page of its own to go alone");
+}
+
+/// Every link that led to a page that goes, from a page that goes, leads to that page's new name in the notebook that it lands in; every reference to a file that goes leads to its new path;
+/// the pages that stay and link to what goes are exactly the ones that are told; and a refused plan changes nothing, here or there.
+#[test]
+fn after_a_plan_every_link_among_the_pages_that_go_still_leads_to_the_page_it_led_to() {
+    let mut rng = Rng(0x00D0_F00D_1357_9BDF);
+    let (mut planned, mut refused, mut taken) = (0, 0, 0);
+    let (mut rewritten, mut told, mut leaving, mut with_files_moving) = (0, 0, 0, 0);
+    for case in 0..4_000 {
+        let (src_pages, dest_pages) = (2 + rng.below(12), rng.below(6));
+        let src = random_notebook(&mut rng, src_pages);
+        let dest = random_notebook(&mut rng, dest_pages);
+        let all: Vec<PageName> = src.names().cloned().collect();
+        let page = &all[rng.below(all.len())];
+        let old = page.prefix(1 + rng.below(page.depth()));
+        let parts = ["a", "b", "c", "d", "e"];
+        let new = PageName::parse(&(0..1 + rng.below(3)).map(|_| parts[rng.below(parts.len())]).collect::<Vec<_>>().join(":")).unwrap();
+        let with_subpages = rng.below(4) != 0;
+        let texts = |nb: &Notebook| -> BTreeMap<String, String> { nb.names().map(|n| (n.to_string(), nb.get(n).unwrap().to_string())).collect() };
+        let (src_before, dest_before) = ((texts(&src), files_of_notebook(&src)), (texts(&dest), files_of_notebook(&dest)));
+        let plan = match src.plan_move(&old, &new, with_subpages, &dest) {
+            Ok(plan) => plan,
+            Err(e) => {
+                refused += 1;
+                taken += usize::from(matches!(e, RenameError::Taken(_) | RenameError::FileTaken(_) | RenameError::FileAndFolder(_)));
+                assert_eq!(((texts(&src), files_of_notebook(&src)), (texts(&dest), files_of_notebook(&dest))), (src_before, dest_before), "case {case}: a refused plan changed something");
+                continue;
+            }
+        };
+        planned += 1;
+        assert_eq!(((texts(&src), files_of_notebook(&src)), (texts(&dest), files_of_notebook(&dest))), (src_before, dest_before), "case {case}: a plan changed something");
+        let after = landed(&dest, &plan);
+        let moved_from: BTreeMap<String, &PageName> = plan.pages.iter().map(|m| (m.from.key(), &m.to)).collect();
+        let moved_files: BTreeMap<String, &String> = plan.files.iter().map(|(from, to)| (from.to_lowercase(), to)).collect();
+        // the pages that go are those under the name (or the page alone), and the files those in their folders
+        for n in &all {
+            let goes = if with_subpages { n.same_page(&old) || n.is_inside(&old) } else { n.same_page(&old) };
+            assert_eq!(moved_from.contains_key(&n.key()), goes, "case {case}: {n}");
+        }
+        assert_eq!(plan.pages.len(), moved_from.len(), "case {case}: a page twice");
+        assert_eq!(after.len(), dest.len() + plan.pages.len(), "case {case}: a page landed on a page");
+        assert_eq!(after.file_count(), dest.file_count() + plan.files.len(), "case {case}: a file landed on a file");
+        with_files_moving += usize::from(!plan.files.is_empty());
+        // links among the pages that go
+        for moved in &plan.pages {
+            let before = src.links(&moved.from);
+            let now = links_in(&moved.text);
+            assert_eq!(before.len(), now.len(), "case {case}: {} lost or gained a link", moved.from);
+            for (i, link) in before.iter().enumerate() {
+                if let Link::Page { page, exists: true, .. } = src.resolve(&moved.from, &link.target) {
+                    if let Some(to) = moved_from.get(&page.key()).filter(|_| src.has_page(&page)) {
+                        match after.resolve(&moved.to, &now[i].target) {
+                            Link::Page { page: led, exists: true, .. } => assert!(led.same_page(to), "case {case}: {} link {i} ({:?} -> {:?}) leads to {led}, not {to}", moved.from, link.target, now[i].target),
+                            other => panic!("case {case}: {} link {i} ({:?} -> {:?}) leads nowhere now: {other:?}", moved.from, link.target, now[i].target),
+                        }
+                    }
+                }
+                if classify(&link.target) == LinkKind::File {
+                    if let FileTarget::Notebook { path, exists: true } = src.resolve_file(&moved.from, &link.target) {
+                        if let Some(to) = moved_files.get(&path.to_lowercase()) {
+                            assert!(matches!(after.resolve_file(&moved.to, &now[i].target), FileTarget::Notebook { path: ref led, exists: true } if led.to_lowercase() == to.to_lowercase()), "case {case}: a file link of {} leads astray", moved.from);
+                        }
+                    }
+                }
+            }
+            let images_before = src.images(&moved.from);
+            let images_now = zim_notebook::images_in(&moved.text);
+            assert_eq!(images_before.len(), images_now.len(), "case {case}: {} lost or gained a picture", moved.from);
+            for (i, image) in images_before.iter().enumerate() {
+                if let FileTarget::Notebook { path, exists: true } = src.resolve_file(&moved.from, &image.path) {
+                    if let Some(to) = moved_files.get(&path.to_lowercase()) {
+                        assert!(matches!(after.resolve_file(&moved.to, &images_now[i].path), FileTarget::Notebook { path: ref led, exists: true } if led.to_lowercase() == to.to_lowercase()), "case {case}: a picture of {} leads astray ({:?} -> {:?})", moved.from, image.path, images_now[i].path);
+                    }
+                }
+            }
+            rewritten += usize::from(moved.text != src.get(&moved.from).unwrap());
+        }
+        // who is told: exactly the pages that stay and have a link that led to a page that goes
+        let mut expected: BTreeMap<String, usize> = BTreeMap::new();
+        for q in &all {
+            if moved_from.contains_key(&q.key()) {
+                continue;
+            }
+            for link in src.links(q) {
+                if let Link::Page { page, .. } = src.resolve(q, &link.target) {
+                    if moved_from.contains_key(&page.key()) && src.has_page(&page) {
+                        *expected.entry(q.to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let told_now: BTreeMap<String, usize> = plan.incoming.iter().map(|b| (b.from.to_string(), b.count)).collect();
+        assert_eq!(told_now, expected, "case {case}: the pages told are not the pages that link to what goes");
+        told += told_now.len();
+        leaving += plan.leaving_links;
+    }
+    assert!(planned > 1_500 && refused > 100 && taken > 50, "the generator exercised too little: {planned} planned, {refused} refused ({taken} for something in the way)");
+    assert!(rewritten > 500 && told > 500 && leaving > 500 && with_files_moving > 500, "too little in play: {rewritten} texts rewritten, {told} pages told, {leaving} links leaving, {with_files_moving} plans with files");
 }
