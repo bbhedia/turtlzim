@@ -59,6 +59,7 @@ pub(crate) const LOCAL_COMMANDS: &[&str] = &[
     "seal:master:make",
     "seal:master:wrap",
     "seal:master:unwrap",
+    "seal:master:forget",
     "seal:objects:seal",
     "seal:objects:open",
     "seal:index:seal",
@@ -271,6 +272,10 @@ async fn dispatch(cmd: &String, turtl: &Turtl, data: Value) -> TResult<Value> {
         "seal:master:unwrap" => {
             local_only_or_refuse(turtl, cmd)?;
             seal::master_unwrap(turtl, &data)
+        }
+        "seal:master:forget" => {
+            local_only_or_refuse(turtl, cmd)?;
+            seal::master_forget(turtl, &data)
         }
         "seal:objects:seal" => {
             local_only_or_refuse(turtl, cmd)?;

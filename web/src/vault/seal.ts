@@ -82,6 +82,15 @@ export class VaultSeal {
     return { kept: taken.kept === true, check: taken.check };
   }
 
+  /**
+   * Forget this vault's key for sealed copies, so that it can take another (`takeKey`). The vault's own passphrase is needed (the engine checks it): what this vault sealed with the key and
+   * that is kept where only it opens (a copy on a connected service) can't be opened here afterwards, and the key can't be got back from here. Tells whether there was a key to forget.
+   */
+  async forgetKey(passphrase: string): Promise<boolean> {
+    const done = await this.core().request<{ forgot: boolean }>("seal:master:forget", normalizePassphrase(passphrase));
+    return done.forgot === true;
+  }
+
   async seal(notebook: string, files: PlainFile[]): Promise<SealedFile[]> {
     const made = await this.core().request<Array<{ path: string; name: string; sealed: string; size: number; sha256: string }>>("seal:objects:seal", notebook, files.map((f) => ({ path: f.path, data: bytesToBase64(f.bytes) })));
     return made.map((m) => ({ ...m, sealed: base64ToBytes(m.sealed) }));

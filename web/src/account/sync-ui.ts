@@ -68,6 +68,15 @@ export interface SyncStatus {
 /** The notebooks that can be kept elsewhere: ones that are not encrypted, as they are, and encrypted ones, sealed. (A folder of Zim files on the computer is its own copy.) */
 const kept = (kind: NotebookInfo["kind"]): boolean => kind === "open" || kind === "encrypted";
 
+/** The SHA-256 of a wrapped key, in hex, as the account's server names a key: what a replacement or a deletion says it saw. */
+async function sumOfKey(wrapped: string): Promise<string> {
+  const sum = new Uint8Array(await crypto.subtle.digest("SHA-256", base64ToBytes(wrapped) as BufferSource));
+  return [...sum].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** What is said where the sealed copies were deleted and the question was only about opening one. */
+const NOTHING_LEFT = "The sealed copies of this account were deleted, so there is nothing to open.";
+
 /** A connection as the person is shown it: “Dropbox”, or “GitLab project: My notes”. */
 const nameOf = (c: Connection): string => (c.label === c.service ? c.service : `${c.service}: ${c.label}`);
 
@@ -766,17 +775,22 @@ export class SyncUi {
     if (local.has && server.wrapped) {
       this.keyStatus = local;
       if (server.check === local.check) return;
-      return "The key for sealed copies that this browser has is not the one of this account (another account made it). Sealed copies of this account can't be opened with it.";
+      // not the same key: another vault made the account's, or its copies were started over since. The person chooses how to get out of it, and then it is tried again.
+      const way = await this.mismatchDialog(seal, server.wrapped);
+      if (way) return way === "reset" && options.create === false ? NOTHING_LEFT : this.ensureSealKey(options);
+      return "The key for sealed copies that this browser has is not the one of this account, so nothing was sent. Sealed copies of this account can't be opened with it.";
     }
     if (!server.wrapped && options.create === false) return "This account has no key for sealed copies, so no sealed notebook of it can be opened.";
     const taking = !local.has && !!server.wrapped;
     let finished = false;
+    let forgot = false;
     const done = await showDialog({
       title: taking ? "Open the key for sealed copies" : "Seal your encrypted notebooks for the server",
       body: taking
         ? [
             "This account keeps sealed copies of encrypted notebooks. To open them here, this browser needs the key that seals them: type the passphrase that they were sealed with, which is the passphrase of the encrypted notebooks of the device that sent them.",
             "It is asked for once: the key is then kept in this browser's encrypted notebooks.",
+            "If you forgot it, nobody can open the sealed copies: “I forgot it…” deletes them and the key, and lets you start again.",
           ]
         : [
             "A sealed copy is encrypted here, before it is sent: the server keeps pages that it cannot read. For that, your encrypted notebooks get a key for sealed copies, kept with them and, wrapped by your passphrase, in your account, so that your other devices can open the copies.",
@@ -786,6 +800,7 @@ export class SyncUi {
       fields: [{ name: "passphrase", label: "Passphrase of the encrypted notebooks", type: "password", autocomplete: "current-password", validate: (v) => (v ? null : "Type the passphrase.") }],
       confirm: taking ? "Open the key" : "Seal and continue",
       working: taking ? "Opening…" : "Sealing…",
+      ...(taking ? { actions: [{ label: "I forgot it…", run: (close: () => void) => ((forgot = true), close()) }] } : {}),
       submit: async (values) => {
         const passphrase = String(values.passphrase);
         try {
@@ -823,7 +838,83 @@ export class SyncUi {
         }
       },
     });
+    if (!done && forgot && (await this.startOverDialog(server.wrapped as string))) return options.create === false ? NOTHING_LEFT : this.ensureSealKey(options);
     return done && finished ? undefined : "The passphrase was not given, so nothing was sent.";
+  }
+
+  /**
+   * This browser has a key for sealed copies and the account has another. Two ways out, said in the dialog: forget this browser's key (it takes the vault's passphrase) and then take the account's
+   * with the passphrase that wraps it (the usual question comes next), or start the account's sealed copies over. Says which of the two was done, if one was.
+   */
+  private async mismatchDialog(seal: VaultSeal, serverWrapped: string): Promise<"forgot" | "reset" | null> {
+    let changed = false;
+    let startOver = false;
+    await showDialog({
+      title: "This browser's key is not the account's",
+      body: [
+        "Your account keeps sealed copies made with another key than the one in this browser's encrypted notebooks: another vault made them, or the account's copies were started over since. Two ways out.",
+        h("p", {}, h("strong", { text: "Use the account's key. " }), "This browser forgets its own key, then asks for the passphrase that wraps the account's. A copy that this browser sealed with its own key on a connected service can't be opened here afterwards (the notebooks are not touched: keeping them again seals them with the account's key)."),
+        h("p", {}, h("strong", { text: "Or start the account's sealed copies over. " }), "The key and the sealed notebooks that the account keeps on the server are deleted, and this browser's key becomes the account's."),
+      ],
+      fields: [{ name: "passphrase", label: "Passphrase of the encrypted notebooks (to forget this browser's key)", type: "password", autocomplete: "current-password", validate: (v) => (v ? null : "Type the passphrase.") }],
+      confirm: "Forget this browser's key",
+      working: "Forgetting…",
+      actions: [{ label: "Start the account's copies over…", run: (close) => ((startOver = true), close()) }],
+      submit: async (values) => {
+        try {
+          await seal.forgetKey(String(values.passphrase));
+          this.keyStatus = await seal.status();
+        } catch (error) {
+          return this.passphraseProblem(error, false);
+        }
+        changed = true;
+      },
+    });
+    if (changed) return "forgot";
+    return startOver && (await this.startOverDialog(serverWrapped)) ? "reset" : null;
+  }
+
+  /**
+   * Delete the key for sealed copies that the account keeps, and the sealed notebooks in its space on the server, so that a key can be made again: for a passphrase that is forgotten, or a key that
+   * is not the one of this person's devices. It names the key it saw, so that a key made by another device meanwhile is not deleted unseen. Copies on a connected service are not touched. Gives true if it was done.
+   */
+  private async startOverDialog(serverWrapped: string): Promise<boolean> {
+    const client = this.account.client;
+    let count: number | null = null;
+    try {
+      count = (await client.listNotebooks()).notebooks.filter((n) => n.id.startsWith(SEALED_PREFIX)).length;
+    } catch {
+      // (the number is only for the words: the deletion itself says if the server can't be reached)
+    }
+    let done = false;
+    await showDialog({
+      title: "Start the sealed copies over",
+      body: [
+        `This deletes the key for sealed copies that your account keeps, and ${count === null ? "the sealed notebooks" : count === 1 ? "the sealed notebook" : `the ${count} sealed notebooks`} kept in its space on the server. Nothing on your devices is touched: the encrypted notebooks stay as they are, and can be kept again afterwards with a new key.`,
+        "What a connected service holds is not deleted: its sealed folders can't be opened with a new key, and can be deleted there by hand.",
+        h("p", {}, h("strong", { text: "This can't be undone. " }), "A sealed copy that is deleted here can only be made again from a device that has the notebook."),
+      ],
+      checks: [{ name: "understood", label: "I understand that these sealed copies will be gone from the server for good." }],
+      confirm: "Delete the key and the sealed copies",
+      working: "Deleting…",
+      danger: true,
+      submit: async (values) => {
+        if (!values.understood) return "Tick the box to say you understand.";
+        try {
+          await client.resetKeychain(await sumOfKey(serverWrapped));
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 404) {
+            done = true; // (there was none any more: that is what was asked)
+            return;
+          }
+          if (error instanceof ApiError && error.status === 409) return "Another device changed the account's key while you were deciding. Close this, and try again from the start.";
+          return this.explain(error);
+        }
+        done = true;
+      },
+    });
+    if (done) this.host.say("The key for sealed copies, and the sealed notebooks on the server, were deleted.");
+    return done;
   }
 
   /** The vault's passphrase was changed: the key that the account keeps is wrapped again by the new one (what it is wrapped by is the vault's passphrase, so a new device takes it with that). */
@@ -839,8 +930,7 @@ export class SyncUi {
       if (!server.wrapped) return explainNothing ? "Your account keeps no key for sealed copies yet, so there is nothing to update." : undefined;
       if (server.check !== local.check) return "The key that this account keeps is not this browser's, so it was not changed.";
       const wrapped = await seal.wrapKey(passphrase);
-      const sum = new Uint8Array(await crypto.subtle.digest("SHA-256", base64ToBytes(server.wrapped) as BufferSource));
-      await client.putKeychain({ wrapped: bytesToBase64(wrapped.wrapped), check: wrapped.check, expect: [...sum].map((b) => b.toString(16).padStart(2, "0")).join("") });
+      await client.putKeychain({ wrapped: bytesToBase64(wrapped.wrapped), check: wrapped.check, expect: await sumOfKey(server.wrapped) });
       this.host.say("The key that the account keeps for sealed copies is wrapped by the new passphrase now.");
     } catch (error) {
       return this.passphraseProblem(error, false);

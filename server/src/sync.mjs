@@ -160,6 +160,23 @@ export class Sync {
     });
   }
 
+  /**
+   * Start the account's sealed copies over: the key, and the sealed notebooks kept in this account's own space (the ids that begin `zsl-`), are deleted, if the key is the one that the sender saw
+   * (`expect`: the SHA-256 of the wrapped key; a key made by another device since is a 409 that says which). What a connected service holds is not touched here: it is the person's.
+   * For a passphrase that is forgotten, or a key that is not the one the person's devices have: with no key, a first one can be made again.
+   */
+  resetSealed(userId, { expect } = {}) {
+    if (typeof expect !== "string" || !/^[0-9a-f]{64}$/.test(expect)) throw new AccountError("Say which key this deletes.", 400, { code: "bad-expect" });
+    return transaction(this.db, () => {
+      const current = this.db.prepare("select wrapped from cloud_keys where user_id = ?").get(userId);
+      if (!current) throw new AccountError("There is no key for sealed copies to delete.", 404, { code: "not-found" });
+      if (createHash("sha256").update(current.wrapped).digest("hex") !== expect) throw new AccountError("This account's key for sealed copies is not the one that was seen.", 409, { code: "conflict", ...this.keychain(userId) });
+      const removed = this.db.prepare("delete from notebooks where user_id = ? and substr(id, 1, 4) = 'zsl-'").run(userId).changes;
+      this.db.prepare("delete from cloud_keys where user_id = ?").run(userId);
+      return { ok: true, removed: Number(removed) };
+    });
+  }
+
   remove(userId, id) {
     const done = this.db.prepare("delete from notebooks where user_id = ? and id = ?").run(userId, id).changes;
     if (!done) throw new AccountError("No such notebook.", 404, { code: "not-found" });

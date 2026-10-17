@@ -140,6 +140,13 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
         checkSameSite(req);
         return void send(res, 200, sync.putKeychain(found.user.id, await readJson(req)));
       }
+      if (route === "/api/sync/keychain/reset" && method === "POST") {
+        const found = sessionOf(req);
+        if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
+        checkSameSite(req);
+        accounts.limit(`keychain:${found.user.id}`, 60, 600);
+        return void send(res, 200, sync.resetSealed(found.user.id, await readJson(req)));
+      }
       const notebookRoute = /^\/api\/sync\/notebooks(?:\/([^/]+)(?:\/(manifest|read))?)?$/.exec(route);
       if (notebookRoute) {
         const found = sessionOf(req);

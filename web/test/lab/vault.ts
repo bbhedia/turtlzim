@@ -76,6 +76,7 @@ const lab = {
       return bytesToBase64(made.wrapped);
     }),
   sealMake: (passphrase: string) => attempt(async () => ({ ...(await sealer.makeKey(passphrase)), wrapped: "" })),
+  sealForget: (passphrase: string) => attempt(() => sealer.forgetKey(passphrase)),
   sealWrap: (passphrase: string) => attempt(async () => bytesToBase64((await sealer.wrapKey(passphrase)).wrapped)),
   sealTake: (wrapped: string, passphrase: string) => attempt(async () => (await sealer.takeKey(base64ToBytes(wrapped), passphrase)).kept),
   sealFiles: (notebook: string, files: Array<{ path: string; text: string }>) =>

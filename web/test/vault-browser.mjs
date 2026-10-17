@@ -453,6 +453,21 @@ try {
         oldFails = true;
       }
       assert(oldFails, "and the old passphrase does not open the new wrapping");
+
+      // a vault can forget its key, with its own passphrase and no other (the old one is refused too), and then it opens nothing of what the key sealed, and can take a key again
+      assert(!(await lab(page, "sealForget", PASSPHRASE)).ok, "the passphrase that the vault had is not the vault's now");
+      assert(!(await lab(page, "sealForget", "something that is not the passphrase")).ok, "nor is any other");
+      assertEqual((await mustWork(await lab(page, "sealStatus"), "asking")).has, true, "a refusal forgets nothing");
+      assertEqual(await mustWork(await lab(page, "sealForget", NEXT), "forgetting"), true, "the vault's own passphrase makes it forget the key");
+      assertEqual((await mustWork(await lab(page, "sealStatus"), "asking after forgetting")).has, false, "it has none now");
+      assert(!(await lab(page, "openObjects", NB, [{ name: sealed[0].name, sealed: sealed[0].sealed }])).ok, "and opens nothing of what the key sealed");
+      assertEqual(await mustWork(await lab(page, "sealForget", NEXT), "forgetting again"), false, "there is nothing to forget a second time");
+      await page.reload();
+      await page.waitForFunction(() => window.lab !== undefined);
+      await mustWork(await lab(page, "unlock", NEXT), "unlocking after forgetting");
+      assertEqual((await mustWork(await lab(page, "sealStatus"), "asking after the reload")).has, false, "it is still forgotten after a reload (it was deleted from the files, not only from memory)");
+      assertEqual(await mustWork(await lab(page, "sealTake", rewrapped, NEXT), "taking the key again"), true, "the account's wrapped key is taken in its place");
+      assertEqual((await mustWork(await lab(page, "openObjects", NB, [{ name: sealed[0].name, sealed: sealed[0].sealed }]), "opening again"))[0].text, SECRET, "and what was sealed opens again");
     } finally {
       await first.close();
       await other.close();

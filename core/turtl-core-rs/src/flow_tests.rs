@@ -2464,7 +2464,7 @@ async fn sealed_copies() {
 
     // a core with a server has no vault, and none of this is for it; a vault that is locked has no key
     let with_a_server = test_turtl(&server);
-    for (i, command) in ["seal:master:status", "seal:master:make", "seal:objects:seal", "seal:index:open"].iter().enumerate() {
+    for (i, command) in ["seal:master:status", "seal:master:make", "seal:master:forget", "seal:objects:seal", "seal:index:open"].iter().enumerate() {
         let refused = ask(&with_a_server, json!([format!("s{}", i), command])).await;
         assert_eq!((&refused["e"], &refused["d"]["type"]), (&json!(1), &json!("permission_denied")), "{}: {}", command, refused);
     }
@@ -2614,9 +2614,35 @@ async fn sealed_copies() {
     let different = ask(&turtl, json!(["s43", "seal:master:unwrap", wrapped, "a passphrase to keep"])).await;
     assert_eq!((&different["e"], &different["d"]["type"]), (&json!(1), &json!("bad_value")), "{}", different);
 
+    // a vault forgets its key (with the vault's own passphrase and no other), which is the way out of a key that is not the account's: what it sealed no longer opens here, and another key can be taken
+    let own_sealed = ask(&turtl, json!(["s44", "seal:objects:seal", nb, [{"path": "Own.txt", "data": b64(b"sealed by the fourth vault's own key")}]])).await;
+    assert_eq!(own_sealed["e"], json!(0), "{}", own_sealed);
+    let own_objects = own_sealed["d"].as_array().unwrap().clone();
+    assert_eq!(ask(&turtl, open_args("s45", own_objects.iter().map(|o| item(o)).collect())).await["e"], json!(0), "it opens while the key is there");
+    for (i, passphrase) in ["a passphrase to keep", "something else altogether"].iter().enumerate() {
+        let refused = ask(&turtl, json!([format!("s46{}", i), "seal:master:forget", passphrase])).await;
+        assert_eq!((&refused["e"], &refused["d"]["subtype"]), (&json!(1), &json!("Unauthorized")), "{}: {}", passphrase, refused);
+    }
+    assert_eq!(ask(&turtl, status("s47")).await["d"]["has"], json!(true), "a refusal forgets nothing");
+    let forgot = ask(&turtl, json!(["s48", "seal:master:forget", "a fourth passphrase altogether"])).await;
+    assert_eq!((&forgot["e"], &forgot["d"]), (&json!(0), &json!({"forgot": true})), "{}", forgot);
+    assert_eq!(ask(&turtl, status("s49")).await["d"], json!({"has": false}), "the key is gone");
+    assert_eq!(ask(&turtl, open_args("s50", own_objects.iter().map(|o| item(o)).collect())).await["e"], json!(1), "what it sealed no longer opens");
+    let nothing = ask(&turtl, json!(["s51", "seal:master:forget", "a fourth passphrase altogether"])).await;
+    assert_eq!((&nothing["e"], &nothing["d"]), (&json!(0), &json!({"forgot": false})), "a vault that has none has nothing to forget: {}", nothing);
+    let adopted = ask(&turtl, json!(["s52", "seal:master:unwrap", wrapped, "a passphrase to keep"])).await;
+    assert_eq!((&adopted["e"], &adopted["d"]), (&json!(0), &json!({"kept": true, "check": check})), "the account's key is taken in its place: {}", adopted);
+    assert_eq!(ask(&turtl, open_args("s53", objects.iter().map(|o| item(o)).collect())).await["e"], json!(0), "and opens what the first vault sealed");
+    assert_eq!(ask(&turtl, open_args("s54", own_objects.iter().map(|o| item(o)).collect())).await["e"], json!(1), "but not what the forgotten key sealed");
+
     // none of this asked a server for anything, or queued anything for one
     assert_eq!(requests(&server).await, Vec::<String>::new());
     assert!(sync_records(&turtl.db).is_empty(), "nothing is queued for a server");
+
+    // a locked vault forgets nothing, and neither does a core with a server
+    turtl.logout().unwrap();
+    assert_eq!(ask(&turtl, json!(["s55", "seal:master:forget", "a fourth passphrase altogether"])).await["e"], json!(1));
+    assert_eq!(ask(&with_a_server, json!(["s56", "seal:master:forget", "x"])).await["d"]["type"], json!("permission_denied"));
 }
 async_test!(sealed_copies_flow, sealed_copies());
 
@@ -2654,6 +2680,35 @@ async fn sealed_key_is_kept_in_the_vault() {
         a.logout().unwrap();
         (objects, bytes)
     };
+
+    // forgotten on disk: the key's entry is written over (its sealed body, which is in the files while the key is there, is in none of them afterwards), and it is still gone when the vault is
+    // locked and unlocked, and a key can be taken again
+    let body = {
+        let a = started();
+        let back = ask(&a, json!(["f1", "user:login", name, passphrase])).await;
+        assert_eq!(back["e"], json!(0), "{}", back);
+        let entries: Vec<crate::models::keychain::KeychainEntry> = lock!(a.db).as_ref().unwrap().all("keychain").unwrap();
+        let entry = entries.iter().find(|e| e.item_id == crate::seal::MASTER_ID).expect("the key's entry is in the vault's database");
+        let body = crate::models::protected::Protected::get_body(entry).cloned().expect("it has a sealed body");
+        a.logout().unwrap();
+        assert!(first_computer.files().iter().any(|(_, bytes)| bytes_contain(bytes, body.as_bytes())), "(the sealed body is in the files while the key is there)");
+        let a = started();
+        assert_eq!(ask(&a, json!(["f2", "user:login", name, passphrase])).await["e"], json!(0));
+        let forgot = ask(&a, json!(["f3", "seal:master:forget", passphrase])).await;
+        assert_eq!(forgot["d"], json!({"forgot": true}), "{}", forgot);
+        a.logout().unwrap();
+        body
+    };
+    assert!(!first_computer.files().iter().any(|(file, bytes)| bytes_contain(bytes, body.as_bytes()) && { eprintln!("the forgotten key's body is still in {}", file); true }), "the forgotten key's sealed body is written over");
+    {
+        let a = started();
+        assert_eq!(ask(&a, json!(["f4", "user:login", name, passphrase])).await["e"], json!(0));
+        assert_eq!(ask(&a, json!(["f5", "seal:master:status"])).await["d"], json!({"has": false}), "still forgotten after a lock and an unlock");
+        assert_eq!(ask(&a, open_args("f6", &objects)).await["e"], json!(1), "and what it sealed does not open");
+        let made = ask(&a, json!(["f7", "seal:master:make", passphrase])).await;
+        assert_eq!(ask(&a, json!(["f8", "seal:master:unwrap", made["d"]["wrapped"], passphrase])).await["d"]["kept"], json!(true), "another key can be taken");
+        a.logout().unwrap();
+    }
     drop(first_computer);
 
     // another computer, where the vault is restored from the backup: the key is there, and the object opens

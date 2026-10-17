@@ -193,6 +193,13 @@ export class AccountClient {
   putKeychain(body: { wrapped: string; check: string; expect: string }): Promise<{ ok: boolean }> {
     return this.call("/api/sync/keychain", body, "PUT");
   }
+  /**
+   * Start the account's sealed copies over: the key (whose SHA-256 is `expect`: the one that was seen), and the sealed notebooks kept in the account's own space, are deleted, so that a first
+   * key can be made again. A 409 says (in its data) which key is there now.
+   */
+  resetKeychain(expect: string): Promise<{ ok: boolean; removed: number }> {
+    return this.call("/api/sync/keychain/reset", { expect });
+  }
   /** Everything the server keeps about the person, as the text of a JSON file. */
   async exportData(): Promise<string> {
     return JSON.stringify(await this.call("/api/account/export"), null, 2);

@@ -3023,7 +3023,7 @@ try {
   };
 
   /** New notebook… of the encrypted kind. The first time that makes the vault, which asks for a passphrase. */
-  async function newEncryptedNotebook(ui, title, { first = true, passphrase = PASSPHRASE, start = "empty" } = {}) {
+  async function newEncryptedNotebook(ui, title, { first = true, passphrase = PASSPHRASE, start = "empty", notice = first } = {}) {
     const { page } = ui;
     await ui.openMenu();
     await ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
@@ -3041,7 +3041,8 @@ try {
       await making.getByRole("button", { name: "Create encrypted notebooks" }).click();
     }
     await isEncryptedOpen(page);
-    if (first) await dismissKeepNotice(page);
+    // (the notice about keeping a copy of the encrypted notebooks comes with the first one this browser makes, whoever made its vault)
+    if (notice) await dismissKeepNotice(page);
     await noDialogs(page);
   }
 
@@ -6377,8 +6378,8 @@ try {
   });
 
   /** Make an encrypted notebook on `device` and keep it sealed on the server, or in the connected service (its place in the list of places, 1 being the first service). Tells whether the passphrase was asked for. */
-  async function keepSealed(device, title, { where = 0, secret = null, first = true, passphrase = PASSPHRASE } = {}) {
-    await newEncryptedNotebook(device.ui, title, { first, passphrase });
+  async function keepSealed(device, title, { where = 0, secret = null, first = true, passphrase = PASSPHRASE, notice = first } = {}) {
+    await newEncryptedNotebook(device.ui, title, { first, passphrase, notice });
     if (secret) {
       await device.ui.typeAtEnd(`${secret}\n`);
       await device.ui.flush();
@@ -6860,6 +6861,11 @@ try {
       await newEncryptedNotebook(D.ui, "Okapi", { first: false });
       await D.choose("Keep this notebook on the server…");
       await D.dialog().getByRole("button", { name: "Keep it there" }).click();
+      const mismatch = D.dialog().filter({ has: D.page.getByRole("heading", { name: "This browser's key is not the account's" }) });
+      await mismatch.waitFor();
+      assert((await mismatch.innerText()).includes("Two ways out"), "the dialog says what can be done");
+      await D.shot("sealed-mismatch-dialog");
+      await mismatch.getByRole("button", { name: "Cancel" }).click();
       const refused = D.dialog().filter({ has: D.page.getByRole("heading", { name: "Keep this notebook on the server" }) });
       await refused.locator(".dialog-error").filter({ hasText: "is not the one of this account" }).waitFor();
       await refused.getByRole("button", { name: "Cancel" }).click();
@@ -6868,9 +6874,36 @@ try {
       await D.choose("Open a notebook from the server…");
       await D.dialog().waitFor();
       await D.dialog().getByRole("button", { name: "Open" }).click();
+      const again = D.dialog().filter({ has: D.page.getByRole("heading", { name: "This browser's key is not the account's" }) });
+      await again.waitFor();
+      await again.getByRole("button", { name: "Cancel" }).click();
       await D.dialog().locator(".dialog-error").filter({ hasText: "is not the one of this account" }).waitFor();
       await D.dialog().getByRole("button", { name: "Cancel" }).click();
       await noDialogs(D.page);
+
+      // the way out by starting the account's sealed copies over: the account's key and its sealed notebook are deleted (this browser's vault is asked for its passphrase afterwards, to give its own key to the account)
+      await D.choose("Keep this notebook on the server…");
+      await D.dialog().getByRole("button", { name: "Keep it there" }).click();
+      await mismatch.waitFor();
+      await mismatch.getByRole("button", { name: "Start the account's copies over…" }).click();
+      const over = D.dialog().filter({ has: D.page.getByRole("heading", { name: "Start the sealed copies over" }) });
+      await over.waitFor();
+      const warning = await over.innerText();
+      assert(warning.includes("the sealed notebook") && warning.includes("can't be undone") && warning.includes("connected service"), `the warning says what is deleted, what is not, and that it can't be undone: ${warning}`);
+      await over.getByRole("button", { name: "Delete the key and the sealed copies" }).click();
+      await over.locator(".dialog-error").filter({ hasText: "Tick the box" }).waitFor();
+      assertEqual(checks().length, 2, "nothing is deleted until the box is ticked");
+      await over.getByLabel("I understand").check();
+      await over.getByRole("button", { name: "Delete the key and the sealed copies" }).click();
+      const wrapping = D.dialog().filter({ has: D.page.getByRole("heading", { name: "Seal your encrypted notebooks for the server" }) });
+      await wrapping.waitFor();
+      assertEqual(checks().filter((c) => c.startsWith("ada@example.org:")).length, 0, "ada's key is gone");
+      assertEqual(rig.db.prepare("select count(*) as n from notebooks").get().n, 1, "and so is her sealed notebook (the other account's stays)");
+      await wrapping.getByLabel("Passphrase of the encrypted notebooks").fill(PASSPHRASE);
+      await wrapping.getByRole("button", { name: "Seal and continue" }).click();
+      await D.says(", sealed");
+      assertEqual(checks().find((c) => c.startsWith("ada@example.org:")).split(":")[1], graces.split(":")[1], "this browser's own key is what the account keeps now");
+      assertEqual(rig.db.prepare("select count(*) as n from notebooks").get().n, 2, "with its notebook sealed under it");
 
       // a third account has no key: the vault's own is wrapped by the passphrase and kept there, so that it is the same key everywhere
       await D.signOut("ada@example.org");
@@ -6879,6 +6912,22 @@ try {
       const all = checks();
       assertEqual(all.length, 3, "the third account has a key now");
       assertEqual(all.find((c) => c.startsWith("heidi@example.org:")).split(":")[1], graces.split(":")[1], "which is the vault's own key (the same check value), wrapped for that account");
+
+      // the first browser still has the key it made for the first account, which that account has given up: opening a notebook meets the mismatch, and starting over from there leaves nothing to open
+      await A.choose("Open a notebook from the server…");
+      await A.dialog().waitFor();
+      await A.dialog().getByRole("button", { name: "Open" }).click();
+      const mismatchA = A.dialog().filter({ has: A.page.getByRole("heading", { name: "This browser's key is not the account's" }) });
+      await mismatchA.waitFor();
+      await mismatchA.getByRole("button", { name: "Start the account's copies over…" }).click();
+      const overA = A.dialog().filter({ has: A.page.getByRole("heading", { name: "Start the sealed copies over" }) });
+      await overA.waitFor();
+      await overA.getByLabel("I understand").check();
+      await overA.getByRole("button", { name: "Delete the key and the sealed copies" }).click();
+      await A.dialog().locator(".dialog-error").filter({ hasText: "nothing to open" }).waitFor();
+      await A.dialog().getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(A.page);
+      assertEqual(checks().filter((c) => c.startsWith("ada@example.org:")).length, 0, "the first account has no key again");
     } finally {
       await rig.close();
     }
@@ -6969,6 +7018,124 @@ try {
       await C.signIn();
       await takeSealed(C, { vaultPassphrase: "yet another long passphrase here", passphrase: NEXT_PASSPHRASE });
       assert((await C.pageText("Home")).includes(SEALED_SECRETS.text), "a new browser opens the notebook with the new passphrase");
+    } finally {
+      await rig.close();
+    }
+  });
+
+  await scenario("a forgotten passphrase can be given up: the key and the sealed copies of the account are deleted after a warning, a new key is made, and a browser that kept the old key is led out of the mismatch to the new one", async () => {
+    const rig = await sealedRig();
+    try {
+      const A = await rig.device();
+      await A.signIn();
+      await keepSealed(A, SEALED_SECRETS.notebook, { secret: SEALED_SECRETS.text });
+      const keyCheck = () => rig.db.prepare("select check_value as c from cloud_keys").get()?.c ?? null;
+      const first = keyCheck();
+      assert(first, "the account keeps a key");
+
+      // a new browser, with a vault of its own: the server's notebook is offered, and the passphrase that sealed it is forgotten
+      const B = await rig.device();
+      await B.signIn();
+      await B.choose("Open a notebook from the server…");
+      await B.dialog().waitFor();
+      await B.dialog().getByRole("button", { name: "Open" }).click();
+      const making = vaultDialog(B.page, "Encrypted notebooks");
+      await making.waitFor();
+      await making.getByLabel("Passphrase", { exact: true }).fill(NEXT_PASSPHRASE);
+      await making.getByLabel("Passphrase again").fill(NEXT_PASSPHRASE);
+      await making.getByLabel("I understand").check();
+      await making.getByRole("button", { name: "Create encrypted notebooks" }).click();
+      const taking = B.dialog().filter({ has: B.page.getByRole("heading", { name: "Open the key for sealed copies" }) });
+      await taking.waitFor();
+      assert((await taking.innerText()).includes("I forgot it"), "the question says what can be done if the passphrase is forgotten");
+      await B.shot("sealed-forgot-dialog");
+      await taking.getByRole("button", { name: "I forgot it…" }).click();
+      const over = B.dialog().filter({ has: B.page.getByRole("heading", { name: "Start the sealed copies over" }) });
+      await over.waitFor();
+      const warning = await over.innerText();
+      assert(warning.includes("the sealed notebook") && warning.includes("can't be undone") && warning.includes("connected service") && warning.includes("Nothing on your devices is touched"), `the warning says what goes and what stays: ${warning}`);
+      await B.shot("sealed-start-over-dialog");
+      await over.getByRole("button", { name: "Delete the key and the sealed copies" }).click();
+      await over.locator(".dialog-error").filter({ hasText: "Tick the box" }).waitFor();
+      assertEqual(keyCheck(), first, "nothing is deleted until the box is ticked");
+      await over.getByLabel("I understand").check();
+      await over.getByRole("button", { name: "Delete the key and the sealed copies" }).click();
+      // (the question was about opening what is there, and nothing is: the dialog behind says so)
+      await B.dialog().locator(".dialog-error").filter({ hasText: "nothing to open" }).waitFor();
+      await B.dialog().getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(B.page);
+      assertEqual(keyCheck(), null, "the account has no key now");
+      assertEqual(rig.db.prepare("select count(*) as n from notebooks").get().n, 0, "and no sealed notebook");
+
+      // A's notebook has no copy any more: A says so, and keeps it again, with its own key (the account has none now, so this browser's key is what it keeps, wrapped)
+      await A.choose("Sync this notebook now");
+      await A.says("is no longer on the server");
+      await A.choose("Keep this notebook on the server…");
+      await A.dialog().getByRole("button", { name: "Keep it there" }).click();
+      const wrapping = A.dialog().filter({ has: A.page.getByRole("heading", { name: "Seal your encrypted notebooks for the server" }) });
+      await wrapping.waitFor();
+      await wrapping.getByLabel("Passphrase of the encrypted notebooks").fill(PASSPHRASE);
+      await wrapping.getByRole("button", { name: "Seal and continue" }).click();
+      await A.says("is kept on the server, sealed");
+      assertEqual(keyCheck(), first, "A's key is the account's again");
+
+      // B makes a notebook of its own and keeps it: the account has a key that B cannot open, and the passphrase is still forgotten; this time the question is about keeping, so after the sealed copies
+      // are given up B goes on to make a key of its own, wrapped by its passphrase
+      await newEncryptedNotebook(B.ui, "Quagga Plans", { first: false, notice: true, passphrase: NEXT_PASSPHRASE });
+      await B.ui.typeAtEnd(`${SEALED_SECRETS.more}\n`);
+      await B.ui.flush();
+      await B.choose("Keep this notebook on the server…");
+      await B.dialog().getByRole("button", { name: "Keep it there" }).click();
+      const forgotten = B.dialog().filter({ has: B.page.getByRole("heading", { name: "Open the key for sealed copies" }) });
+      await forgotten.waitFor();
+      await forgotten.getByRole("button", { name: "I forgot it…" }).click();
+      const overAgain = B.dialog().filter({ has: B.page.getByRole("heading", { name: "Start the sealed copies over" }) });
+      await overAgain.waitFor();
+      await overAgain.getByLabel("I understand").check();
+      await overAgain.getByRole("button", { name: "Delete the key and the sealed copies" }).click();
+      const making2 = B.dialog().filter({ has: B.page.getByRole("heading", { name: "Seal your encrypted notebooks for the server" }) });
+      await making2.waitFor();
+      assertEqual(keyCheck(), null, "the account's key is gone again, and A's copy with it");
+      await making2.getByLabel("Passphrase of the encrypted notebooks").fill(NEXT_PASSPHRASE);
+      await making2.getByRole("button", { name: "Seal and continue" }).click();
+      await B.says("is kept on the server, sealed");
+      const second = keyCheck();
+      assert(second && second !== first, "the account has another key");
+
+      // A's notebook has no copy any more, and A's key is not the account's: keeping another notebook meets the mismatch, and A is led out of it by forgetting its key and taking the account's
+      await A.choose("Sync this notebook now");
+      await A.says("is no longer on the server");
+      await newEncryptedNotebook(A.ui, "Okapi", { first: false });
+      await A.choose("Keep this notebook on the server…");
+      await A.dialog().getByRole("button", { name: "Keep it there" }).click();
+      const mismatch = A.dialog().filter({ has: A.page.getByRole("heading", { name: "This browser's key is not the account's" }) });
+      await mismatch.waitFor();
+      const field = mismatch.getByLabel("Passphrase of the encrypted notebooks (to forget this browser's key)");
+      await field.fill("not the passphrase of this vault");
+      await mismatch.getByRole("button", { name: "Forget this browser's key" }).click();
+      await mismatch.locator(".dialog-error").filter({ hasText: "not the passphrase of the encrypted notebooks" }).waitFor();
+      assertEqual((await A.page.evaluate(() => window.__zim.app.sealer.status())).has, true, "a wrong passphrase forgets nothing");
+      await field.fill(PASSPHRASE);
+      await mismatch.getByRole("button", { name: "Forget this browser's key" }).click();
+      const takes = A.dialog().filter({ has: A.page.getByRole("heading", { name: "Open the key for sealed copies" }) });
+      await takes.waitFor();
+      await takes.getByLabel("Passphrase of the encrypted notebooks").fill(NEXT_PASSPHRASE);
+      await takes.getByRole("button", { name: "Open the key" }).click();
+      await A.says("is kept on the server, sealed");
+      assertEqual((await A.page.evaluate(() => window.__zim.app.sealer.status())).check, second, "A has the account's key now");
+
+      // and what A sealed with it opens on B
+      await B.choose("Open a notebook from the server…");
+      await B.dialog().waitFor();
+      assertEqual((await B.dialog().locator("option").allTextContents()).length, 1, "B is offered the one notebook it has not got");
+      await B.dialog().getByRole("button", { name: "Open" }).click();
+      await B.says("was copied from the server, sealed");
+      assertEqual(await B.ui.notebookTitle(), "Okapi", "A's notebook, kept under the account's key, opens on B");
+      assertDeepEqual(leaks(rig, [A, B], [...SEALED_NEEDLES, "Okapi"]), [], "nothing readable anywhere, through all of it");
+      // (a notebook that is gone from the server is asked about, and the server says so with a 404 that the browser logs)
+      const gone = problems.filter((p) => /status of 404/.test(p));
+      assert(gone.length >= 1, "the browser logged the 404 of the copy that was gone");
+      problems = problems.filter((p) => !gone.includes(p));
     } finally {
       await rig.close();
     }

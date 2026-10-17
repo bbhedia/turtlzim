@@ -291,6 +291,21 @@ pub fn master_wrap(turtl: &Turtl, data: &Value) -> TResult<Value> {
     Ok(json!({"wrapped": crypto::to_base64(&wrap_master(master.data(), &passphrase, &user::local_kdf())?)?, "check": key_check(master.data())?}))
 }
 
+/// Forget this vault's key for sealed copies, so that the vault can take another (`seal:master:unwrap`): the keychain's entry is deleted (written over in the files, as everything the core
+/// deletes). It takes the vault's own passphrase, as wrapping does: what is sealed with the key and kept where only it opens (a copy on a connected service) can't be opened by this vault
+/// afterwards, and the key is not recoverable from here. A vault that has none has nothing to forget.
+pub fn master_forget(turtl: &Turtl, data: &Value) -> TResult<Value> {
+    let passphrase = string_arg(data, 2, "the passphrase")?;
+    let had = master_key(turtl)?.is_some(); // (the vault has to be unlocked)
+    user::verify_local_passphrase(turtl, &passphrase)?;
+    if had {
+        keychain::remove_key(turtl, &String::from(MASTER_ID), true)?;
+        // (deleting the entry from the files does not take it out of the keychain that is in memory: it is taken out here, or the key would go on being used until the next unlock)
+        lockw!(turtl.profile).keychain.remove_entry(&String::from(MASTER_ID), None)?;
+    }
+    Ok(json!({"forgot": had}))
+}
+
 /// Take the master key out of a wrapped one with its passphrase and keep it in the vault. A vault that has another master key is not given a second.
 pub fn master_unwrap(turtl: &Turtl, data: &Value) -> TResult<Value> {
     let wrapped = crypto::from_base64(&string_arg(data, 2, "the wrapped key")?)?;

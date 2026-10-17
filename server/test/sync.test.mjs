@@ -259,6 +259,72 @@ describe("notebooks kept on the server", () => {
     });
   });
 
+  describe("starting the sealed copies over", () => {
+    const wrappedOf = (fill) => Buffer.concat([Buffer.from("ZSW1"), Buffer.alloc(100, fill)]);
+    const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+    const CHECK = "0123456789abcdef0123456789abcdef";
+    const SEALED = "zsl-aaaaaaaaaaaaaaaa";
+    const put = (who, body, headers) => call(who, "/api/sync/keychain", body, "PUT", headers);
+    const reset = (who, body, headers) => call(who, "/api/sync/keychain/reset", body, "POST", headers);
+    const keepNotebook = (who, id, title) => call(who, `/api/sync/notebooks/${id}`, { title, baseRevision: 0, files: [{ path: "index.zseal", base64: b64("sealed") }] }, "PUT");
+    before(async () => {
+      for (const who of ["erin", "finn"]) {
+        await call(who, "/api/register", { email: `${who}@example.org`, password: PASSWORD });
+        await call(who, "/api/verify", { email: `${who}@example.org`, code: lastCode(parts.mailer, `${who}@example.org`) });
+      }
+    });
+
+    it("is for the account that signed in, and needs the site's header", async () => {
+      assert.equal((await reset("nobody", { expect: sha(wrappedOf(1)) })).status, 401);
+      assert.equal((await reset("erin", { expect: sha(wrappedOf(1)) }, { "content-type": "application/json" })).status, 403);
+    });
+
+    it("has nothing to delete where there is no key, and must be told which key it deletes", async () => {
+      assert.equal((await reset("erin", { expect: sha(wrappedOf(1)) })).status, 404);
+      assert.equal((await put("erin", { wrapped: wrappedOf(1).toString("base64"), check: CHECK, expect: "none" })).status, 200);
+      for (const [why, body] of [["nothing", undefined], ["no sum", {}], ["none", { expect: "none" }], ["a sum that is not one", { expect: "yes" }], ["a short sum", { expect: "ab12" }], ["a number", { expect: 5 }]]) {
+        assert.equal((await reset("erin", body ?? {})).status, 400, why);
+      }
+      assert.equal((await call("erin", "/api/sync/keychain")).json.wrapped, wrappedOf(1).toString("base64"), "nothing was deleted by the refusals");
+    });
+
+    it("refuses a key that is not the one that was seen, and says which one is there", async () => {
+      const stale = await reset("erin", { expect: sha(wrappedOf(9)) });
+      assert.equal(stale.status, 409);
+      assert.equal(stale.json.wrapped, wrappedOf(1).toString("base64"));
+      assert.equal(stale.json.check, CHECK);
+      assert.equal((await call("erin", "/api/sync/keychain")).json.wrapped, wrappedOf(1).toString("base64"), "and nothing was deleted");
+    });
+
+    it("deletes the key and the sealed notebooks of the account's own space, and nothing else: its other notebooks, and every other account's, stay", async () => {
+      assert.equal((await keepNotebook("erin", SEALED, "Encrypted notebook")).status, 200);
+      assert.equal((await keepNotebook("erin", "zsl-bbbbbbbbbbbbbbbb", "Encrypted notebook")).status, 200);
+      assert.equal((await keepNotebook("erin", "garden-in-clear-1", "Garden")).status, 200);
+      assert.equal((await keepNotebook("erin", "zslx-not-a-sealed-one", "Looks like one")).status, 200);
+      assert.equal((await put("finn", { wrapped: wrappedOf(7).toString("base64"), check: CHECK, expect: "none" })).status, 200);
+      assert.equal((await keepNotebook("finn", SEALED, "Encrypted notebook")).status, 200);
+      const done = await reset("erin", { expect: sha(wrappedOf(1)) });
+      assert.equal(done.status, 200);
+      assert.deepEqual({ ok: done.json.ok, removed: done.json.removed }, { ok: true, removed: 2 });
+      assert.deepEqual((await call("erin", "/api/sync/keychain")).json, { wrapped: null }, "the key is gone");
+      assert.deepEqual((await call("erin", "/api/sync/notebooks")).json.notebooks.map((n) => n.id).sort(), ["garden-in-clear-1", "zslx-not-a-sealed-one"], "the sealed notebooks are gone, the others are not");
+      assert.equal(parts.db.prepare("select count(*) as n from notebook_files where user_id = (select id from users where email = 'erin@example.org') and notebook_id like 'zsl-%'").get().n, 0, "with their files");
+      assert.equal((await call("finn", "/api/sync/keychain")).json.wrapped, wrappedOf(7).toString("base64"), "another account's key stays");
+      assert.deepEqual((await call("finn", "/api/sync/notebooks")).json.notebooks.map((n) => n.id), [SEALED], "and so does its sealed notebook");
+      assert.equal((await reset("erin", { expect: sha(wrappedOf(1)) })).status, 404, "there is nothing to delete a second time");
+    });
+
+    it("lets a first key be made again afterwards", async () => {
+      assert.equal((await put("erin", { wrapped: wrappedOf(3).toString("base64"), check: "f".repeat(32), expect: "none" })).status, 200);
+      assert.equal((await call("erin", "/api/sync/keychain")).json.check, "f".repeat(32));
+      assert.equal((await keepNotebook("erin", SEALED, "Encrypted notebook")).status, 200, "and the id is free again");
+    });
+
+    after(async () => {
+      for (const who of ["erin", "finn"]) await call(who, "/api/account/delete", { password: PASSWORD });
+    });
+  });
+
   it("deletes a notebook, and the account's notebooks go with the account", async () => {
     assert.equal((await call("bob", `/api/sync/notebooks/${ID}`, undefined, "DELETE")).status, 200);
     assert.equal((await call("bob", "/api/sync/notebooks")).json.notebooks.length, 0);

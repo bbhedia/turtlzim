@@ -57,6 +57,20 @@ describe("the account client", () => {
     expect(JSON.parse(String(put.init?.body))).toEqual({ wrapped: "x", check: "c", expect: "none" });
   });
 
+  it("asks to start the sealed copies over by naming the key it saw, and is told which key is there when it was another", async () => {
+    const sum = "ab".repeat(32);
+    const { api, seen } = client((_path, init) => (JSON.parse(String(init?.body)).expect === sum ? json(200, { ok: true, removed: 2 }) : json(409, { error: "Not the key that was seen.", code: "conflict", wrapped: "QUJD", check: "ab" })));
+    expect(await api.resetKeychain(sum)).toEqual({ ok: true, removed: 2 });
+    expect(seen[0]!.path).toBe("/api/sync/keychain/reset");
+    expect(seen[0]!.init?.method).toBe("POST");
+    expect(seen[0]!.init?.headers).toEqual({ "content-type": "application/json", "x-requested-with": "zim" });
+    expect(JSON.parse(String(seen[0]!.init?.body))).toEqual({ expect: sum });
+    const error = await api.resetKeychain("cd".repeat(32)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(409);
+    expect((error as ApiError).data).toMatchObject({ wrapped: "QUJD", check: "ab" });
+  });
+
   it("knows who is signed in, and that nobody is", async () => {
     expect(await client(() => json(200, { user: null, signIns: [] })).api.me()).toBeNull();
     const me = await client(() => json(200, { user: { email: "a@b.org", quotaBytes: 1048576, hasPassword: false }, signIns: ["github", 5] })).api.me();
