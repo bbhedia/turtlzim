@@ -198,6 +198,21 @@ refused) and, when the connection is removed, **tells the service that the acces
 
 - Not done: a connected service for the encrypted notebooks' sealed copy, a sync of connected services from the native apps, and other services (the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what a new one plugs into).
 
+## Apps signed in (E17: `server/src/apps.mjs`; the program and the phone's app are E17b and E17c)
+
+The program on a computer and the app on a phone are signed in the way RFC 8252 asks of an app that sends the person to **their own browser**, with PKCE (RFC 7636). The app never sees the password, nor the browser's session:
+
+1. The app makes a secret (the *verifier*, 32 random bytes) and a random *state*, and opens the system browser at `<server>/?app=authorize&redirect_uri=…&code_challenge=…&code_challenge_method=S256&state=…` (the challenge is the SHA-256 of the verifier).
+2. In the browser the person signs in as always (password, Google, GitHub) and is asked *Allow the app?* The page then asks `POST /api/app/authorize` (cookie session, the site's header) and goes to the address that comes back.
+3. That is the app's **return address**, with a code that is good once and for two minutes: `http://127.0.0.1:<port>/callback` (the program listens on that port for that one request) or `org.zimnotebook.app:/callback` (the Android app's own scheme). Nothing else is accepted: no other host, no query, no fragment, no port below 1024, no `plain` challenge.
+4. The app checks the `state` it gave, then trades the code and the verifier: `POST /api/app/token { code, code_verifier, redirect_uri }` → `{ token }`. A code is used up by the first try, right or wrong, and only works with the return address it was made for.
+
+What the app then has is a **bearer token** (`Authorization: Bearer …`; 32 random bytes, only the SHA-256 is stored, a session of the kind `app`, six months without use, 30 days for a browser). It works for what keeps notebooks: `/api/me`, `/api/sync/…` (the account's space and the key kept for sealed copies), `/api/connectors…`. Changes still need the site's header, and an `Origin` that is the site's if the request has one, like a browser's. It **can't** make another token, list or end the apps, change the password, delete the account or take the data away (`403` `browser-only`): that is for a browser. A token and a cookie are not interchangeable (an app's token in a cookie, or a browser's session as a bearer token, is no one), and a request that carries a bearer token is judged by it alone. Another kind of `Authorization` header (a proxy's own) is ignored.
+
+The web app lists what is connected and ends one (`GET /api/app/sessions`, `POST /api/app/revoke`; a lost phone). An app signs itself out with `POST /api/logout`. A new password (changed or reset) ends every app's token with the other sessions. Limits (kept in the database): 20 authorizations per account and 30 trades per address, per ten minutes. Not decided by a link: the name in the list is fixed (*Zim Notebook for computers*, *… for Android*), never text taken from the address.
+
+Known limit, as with every app that uses a loopback or scheme return address: a person who is made to press *Allow* for a request that someone else made (their challenge, a return address on this same computer or phone) gives that someone a token. The page says what it is asking, and the list in the account shows every app with the date of its last use.
+
 ## Run it
 
 ```bash
@@ -205,7 +220,7 @@ cd web && npm run build                      # the files of the app (server/ ser
 cd ../server && npm install                  # nodemailer
 ZIM_BASE_URL=https://localhost:8443 scripts/run.sh start --host :: --port 8443 --tls --name ADDRESS [--download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk]
 scripts/run.sh status | log | stop | restart
-npm test                                     # 108 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage
+npm test                                     # 133 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage, apps signed in
 ```
 
 `ZIM_BASE_URL` is the address people **type**: the services send the browser back to it, and it decides `Secure` cookies. From your own computer to this
@@ -235,10 +250,10 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## What verifies it, and what does not
 
-- `server/test`: 108 tests with a real HTTP server, cookies, a clock the test moves, and stand-ins for Google and GitHub; mutants of the HTTP layer (a check removed, `HttpOnly` dropped, the body limit off, a session not replaced, …) are caught.
+- `server/test`: 133 tests with a real HTTP server, cookies, a clock the test moves, and stand-ins for Google and GitHub; mutants of the HTTP layer (a check removed, `HttpOnly` dropped, the body limit off, a session not replaced, …) are caught.
 - The browser scenario "with an account server…" (`npm run test:browser`): the real server serves the real app; an account is made with the code read from the mailer, a wrong code and a wrong password are refused, the session survives a reload and is not readable by script, sign out and in, a GitHub round trip (stand-in service) and a failed one that echoes nothing of the address.
 - **Not verified**: a real Google or GitHub sign-in (needs your apps), real SMTP delivery, more than one process, any load. The server has had no outside review.
 
 ## Not yet
 
-A recovery that does not need the passphrase (decided against), login from the native apps, Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).
+A recovery that does not need the passphrase (decided against), the apps' side of signing in (the server's side is done, above), Facebook / LinkedIn / Microsoft / GitLab sign-in, an admin view, a "sign out everywhere" button, changing the password from the account dialog (the server has it).

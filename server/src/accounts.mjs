@@ -21,6 +21,8 @@ const RESEND_SECONDS = 60;
 const SESSION_TOUCH_SECONDS = 24 * 3600;
 const UNCONFIRMED_DAYS = 2;
 const DAY = 24 * 3600;
+/** How long an app that was signed in (a program or a phone's app, not a browser) stays so when it is not used: months, since nobody types a password into it every day. */
+export const APP_SESSION_DAYS = 180;
 
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 
@@ -163,23 +165,32 @@ export class Accounts {
   // -------------------------------------------------------------------------------------------------------------------------------------------
   // sessions
 
-  /** A new session for the user: the token that is given to the browser, of which only a hash is kept. */
-  createSession(userId) {
+  /** How long a session of this kind lasts without being used. */
+  sessionDays(kind) {
+    return kind === "app" ? (this.config.appSessionDays ?? APP_SESSION_DAYS) : this.config.sessionDays;
+  }
+
+  /**
+   * A new session for the user: the token that is given to the browser (`kind` "browser", in a cookie) or to an app that was signed in (`kind` "app", sent as a bearer
+   * token), of which only a hash is kept. An app's session has a name for the list of what is connected, and an id that can be shown (the token's hash can't be).
+   */
+  createSession(userId, { kind = "browser", label = null } = {}) {
     const token = randomBytes(32).toString("base64url");
     const now = this.now();
-    this.db.prepare("insert into sessions (id, user_id, created_at, expires_at, last_used) values (?, ?, ?, ?, ?)").run(sha256(token), userId, now, now + this.config.sessionDays * DAY, now);
+    this.db.prepare("insert into sessions (id, user_id, created_at, expires_at, last_used, kind, label, public_id) values (?, ?, ?, ?, ?, ?, ?, ?)").run(sha256(token), userId, now, now + this.sessionDays(kind) * DAY, now, kind, label, kind === "app" ? randomBytes(8).toString("hex") : null);
     return token;
   }
 
-  /** The user a token belongs to, or null. A session in use is made to last (but not more than once a day, to keep the database quiet). */
+  /** The user a token belongs to, with the kind of session it is and when it began, or null. A session in use is made to last (but not more than once a day, to keep the database quiet). */
   session(token) {
     if (typeof token !== "string" || token.length < 20 || token.length > 100) return null;
     const id = sha256(token);
     const now = this.now();
-    const row = this.db.prepare("select s.created_at, s.expires_at, s.last_used, u.* from sessions s join users u on u.id = s.user_id where s.id = ?").get(id);
+    // (the session's own dates are named: `u.*` has a `created_at` of its own, which would take the place of the session's)
+    const row = this.db.prepare("select s.created_at as session_created_at, s.expires_at, s.last_used, s.kind, s.label, s.public_id, u.* from sessions s join users u on u.id = s.user_id where s.id = ?").get(id);
     if (!row || row.expires_at < now || row.disabled) return null;
-    if (now - row.last_used > SESSION_TOUCH_SECONDS) this.db.prepare("update sessions set last_used = ?, expires_at = ? where id = ?").run(now, now + this.config.sessionDays * DAY, id);
-    return { user: this.publicUser(row), createdAt: row.created_at };
+    if (now - row.last_used > SESSION_TOUCH_SECONDS) this.db.prepare("update sessions set last_used = ?, expires_at = ? where id = ?").run(now, now + this.sessionDays(row.kind) * DAY, id);
+    return { user: this.publicUser(row), createdAt: row.session_created_at, kind: row.kind, label: row.label, publicId: row.public_id };
   }
 
   destroySession(token) {
@@ -276,7 +287,7 @@ export class Accounts {
   exportData(userId) {
     const user = this.db.prepare("select * from users where id = ?").get(userId);
     if (!user) throw new AccountError("No such account.", 404);
-    return { email: user.email, createdAt: user.created_at, confirmedAt: user.verified_at, quotaBytes: user.quota_bytes, hasPassword: !!user.password_hash, signIns: this.identities(userId), sessions: this.db.prepare("select count(*) as n from sessions where user_id = ?").get(userId).n, sealedKey: !!this.db.prepare("select 1 from cloud_keys where user_id = ?").get(userId) };
+    return { email: user.email, createdAt: user.created_at, confirmedAt: user.verified_at, quotaBytes: user.quota_bytes, hasPassword: !!user.password_hash, signIns: this.identities(userId), sessions: this.db.prepare("select count(*) as n from sessions where user_id = ?").get(userId).n, apps: this.db.prepare("select count(*) as n from sessions where user_id = ? and kind = 'app'").get(userId).n, sealedKey: !!this.db.prepare("select 1 from cloud_keys where user_id = ?").get(userId) };
   }
 
   /** Delete the account and everything of it. A password account asks for the password; one that has none asks for a session of the last ten minutes. */
@@ -302,6 +313,7 @@ export class Accounts {
     return {
       codes: this.db.prepare("delete from codes where expires_at < ?").run(now).changes,
       sessions: this.db.prepare("delete from sessions where expires_at < ?").run(now).changes,
+      appCodes: this.db.prepare("delete from app_codes where expires_at < ?").run(now).changes,
       unconfirmed: this.db.prepare("delete from users where verified_at is null and created_at < ?").run(now - UNCONFIRMED_DAYS * DAY).changes,
       states: this.db.prepare("delete from oauth_states where created_at < ?").run(now - 3600).changes,
       limits: this.db.prepare("delete from limits where window_start < ?").run(now - DAY).changes,

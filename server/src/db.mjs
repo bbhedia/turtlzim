@@ -92,6 +92,22 @@ const STEPS = [
     updated_at integer not null
   );
   `,
+  `
+  alter table sessions add column kind text not null default 'browser';
+  alter table sessions add column label text;
+  alter table sessions add column public_id text;
+  create unique index sessions_by_public_id on sessions (public_id) where public_id is not null;
+  create table app_codes (
+    hash text primary key,
+    user_id integer not null references users(id) on delete cascade,
+    challenge text not null,
+    redirect_uri text not null,
+    client text not null,
+    created_at integer not null,
+    expires_at integer not null
+  );
+  create index app_codes_by_user on app_codes (user_id);
+  `,
 ];
 
 /** Open (and make or bring up to date) the database at `path` (`:memory:` for a test). */

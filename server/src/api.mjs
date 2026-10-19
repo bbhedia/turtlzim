@@ -1,10 +1,12 @@
-// The HTTP side: `/api/...`, JSON in and out, the session in a cookie. It does nothing of its own that the account logic does not: it reads the request, checks that it comes
-// from this site's own page, calls `Accounts` or `OAuth`, and writes the answer.
+// The HTTP side: `/api/...`, JSON in and out, the session in a cookie (or, for a native app that was signed in, in a bearer token: `apps.mjs`). It does nothing of its own that the
+// account logic does not: it reads the request, checks that it comes from this site's own page (or from an app, which says it with the same header), calls `Accounts` or `OAuth`, and
+// writes the answer.
 //
 // What it guards against, besides what `Accounts` does: another site making the browser send a request (every request that changes something must carry a header that only this
 // site's own scripts can add, and an `Origin` that is this site's); a cookie that a script can read (it is HttpOnly); one that is sent along to other sites (SameSite) or over plain
 // http (Secure, and the `__Host-` name that a browser only accepts with Secure, Path=/ and no Domain); a body that is huge; and answers that are kept by a cache.
 import { AccountError } from "./accounts.mjs";
+import { Apps } from "./apps.mjs";
 import { Connectors, validDir } from "./connectors/index.mjs";
 import { ConnectorOAuth } from "./connectors/oauth.mjs";
 import { Sync, validPath } from "./sync.mjs";
@@ -16,7 +18,7 @@ const MAX_SYNC_BODY = 2 * 1024 * 1024;
 const MAX_CONNECTOR_BODY = 12 * 1024 * 1024;
 const NONCE_SECONDS = 600;
 
-export function createApi({ accounts, oauth, config, log = () => {}, sync = new Sync({ db: accounts.db }), connectors = new Connectors({ db: accounts.db, config }), connectOAuth = new ConnectorOAuth({ db: accounts.db, connectors, config }) }) {
+export function createApi({ accounts, oauth, config, log = () => {}, apps = new Apps({ accounts }), sync = new Sync({ db: accounts.db }), connectors = new Connectors({ db: accounts.db, config }), connectOAuth = new ConnectorOAuth({ db: accounts.db, connectors, config }) }) {
   const prefix = config.secure ? "__Host-" : "";
   const SESSION = `${prefix}zim`;
   const NONCE = `${prefix}zim-oauth`;
@@ -89,10 +91,29 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
     if (req.headers["x-requested-with"] !== "zim") throw new AccountError("That request does not come from this site.", 403, { code: "cross-site" });
   }
 
+  /** The token of an `Authorization: Bearer` header, or null if there is none (another kind of authorization is not ours: a proxy may ask for its own, on every request). */
+  const bearerOf = (req) => /^Bearer +(\S+)$/i.exec(String(req.headers.authorization ?? ""))?.[1] ?? null;
+
+  /**
+   * Who is asking: a browser, by its cookie, or an app, by its bearer token. Each kind of token is good for its own way only (a browser's session sent as a bearer token, or an
+   * app's token put in a cookie, is no one), and a request that has a bearer token is judged by it alone, whatever cookie comes with it.
+   */
   const sessionOf = (req) => {
+    const bearer = bearerOf(req);
+    if (bearer !== null) {
+      const found = accounts.session(bearer);
+      return found && found.kind === "app" ? { ...found, token: bearer } : null;
+    }
     const token = cookieOf(req)[SESSION];
     const found = accounts.session(token);
-    return found ? { ...found, token } : null;
+    return found && found.kind === "browser" ? { ...found, token } : null;
+  };
+
+  /** What an app that was signed in can't do (make another token, change the password, delete the account, take the data away): it is done in a browser. */
+  const needBrowser = (found) => {
+    if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
+    if (found.kind !== "browser") throw new AccountError("That is done in the web app, in a browser: an app that is connected can only keep notebooks.", 403, { code: "browser-only" });
+    return found;
   };
 
   const signedIn = (res, user, previous) => {
@@ -128,9 +149,13 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
         return void send(res, 200, found ? publicMe(found) : { user: null, signIns: [] });
       }
       if (route === "/api/account/export" && get) {
-        const found = sessionOf(req);
-        if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
+        const found = needBrowser(sessionOf(req));
         return void send(res, 200, accounts.exportData(found.user.id), { "content-disposition": 'attachment; filename="zim-notebook-account.json"' });
+      }
+      // the apps that are connected, to be ended from a browser
+      if (route === "/api/app/sessions" && get) {
+        const found = needBrowser(sessionOf(req));
+        return void send(res, 200, { apps: apps.list(found.user.id) });
       }
       if (route === "/api/sync/keychain" && (get || method === "PUT")) {
         const found = sessionOf(req);
@@ -272,21 +297,37 @@ export function createApi({ accounts, oauth, config, log = () => {}, sync = new 
           const session = signedIn(res, user, cookieOf(req)[SESSION]);
           return void send(res, 200, { user: { email: user.email, quotaBytes: user.quotaBytes, usedBytes: 0, hasPassword: user.hasPassword }, signIns: accounts.identities(user.id).map((i) => i.provider) }, { "set-cookie": session.cookie });
         }
-        case "/api/logout":
+        case "/api/logout": {
+          // (an app ends its own session; it has no cookie to clear)
+          const bearer = bearerOf(req);
+          if (bearer !== null) {
+            if (sessionOf(req)) accounts.destroySession(bearer);
+            return void send(res, 200, { ok: true });
+          }
           accounts.destroySession(cookieOf(req)[SESSION]);
           return void send(res, 200, { ok: true }, { "set-cookie": setCookie(SESSION, "", 0) });
+        }
+        // an app that is being signed in: the person, in a browser, allows it (and is sent back to it with a code), and the app trades the code for a token
+        case "/api/app/authorize": {
+          const found = needBrowser(sessionOf(req));
+          return void send(res, 200, apps.authorize(found.user.id, body));
+        }
+        case "/api/app/token":
+          return void send(res, 200, apps.redeem(body, { ip }));
+        case "/api/app/revoke": {
+          const found = needBrowser(sessionOf(req));
+          return void send(res, 200, apps.revoke(found.user.id, body.id));
+        }
         case "/api/password/forgot":
           return void send(res, 200, await accounts.requestReset(body.email, { ip }));
         case "/api/password/reset":
           return void send(res, 200, await accounts.reset(body.email, body.code, body.password, { ip }));
         case "/api/password/change": {
-          const found = sessionOf(req);
-          if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
+          const found = needBrowser(sessionOf(req));
           return void send(res, 200, await accounts.changePassword(found.user.id, body.current, body.next, found.token));
         }
         case "/api/account/delete": {
-          const found = sessionOf(req);
-          if (!found) throw new AccountError("Not signed in.", 401, { code: "signed-out" });
+          const found = needBrowser(sessionOf(req));
           await accounts.deleteAccount(found.user.id, body.password, found.createdAt);
           return void send(res, 200, { ok: true }, { "set-cookie": setCookie(SESSION, "", 0) });
         }

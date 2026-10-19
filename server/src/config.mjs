@@ -59,6 +59,8 @@ export function loadConfig(env = process.env, given = {}) {
     /** Whether the address of the client can be taken from X-Forwarded-For (only behind a proxy that sets it). */
     trustProxy: given.trustProxy ?? (env.ZIM_TRUST_PROXY === "1" || file.trustProxy === true),
     sessionDays: given.sessionDays ?? 30,
+    /** How long a program or an app that was signed in stays so without being used. */
+    appSessionDays: given.appSessionDays ?? 180,
     quotaBytes: given.quotaBytes ?? 1024 * 1024,
     providers: given.providers ?? providers,
     connectorApps: given.connectorApps ?? connectorApps,
