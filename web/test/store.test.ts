@@ -143,6 +143,19 @@ function contract(label: string, make: () => Promise<NotebookStore>, timeout = 5
       expect((await store.listNotebooks()).map((n) => n.title)).toEqual(["B"]);
     });
 
+    // (a fast machine makes two notebooks within one millisecond: they were listed in the order of their random ids, so the order that they were made in was only usually kept)
+    it("lists notebooks that were made within the same millisecond in the order they were made", async () => {
+      const store = await make();
+      const clock = vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_000);
+      try {
+        const made: string[] = [];
+        for (let i = 0; i < 24; i++) made.push((await store.createNotebook({ title: `Notebook ${String(i).padStart(2, "0")}`, home: "Home", kind: "open" })).title);
+        expect((await store.listNotebooks()).map((n) => n.title)).toEqual(made);
+      } finally {
+        clock.mockRestore();
+      }
+    });
+
     it("keeps each notebook's pages to itself, and deleting a notebook deletes its pages", async () => {
       const store = await make();
       const a = await store.createNotebook({ title: "A", home: "Home", kind: "open" }, [page("Home", "in A"), page("Shared", "a")]);

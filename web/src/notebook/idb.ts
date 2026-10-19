@@ -63,6 +63,9 @@ export function newId(): string {
 }
 
 export class IndexedDbStore implements NotebookStore {
+  /** The creation time of the notebook that was made last in this run: two made within the same millisecond (a fast machine) would be listed in the order of their random ids, not the order they were made in. */
+  private lastCreated = 0;
+
   private constructor(
     private readonly db: IDBDatabase,
     private readonly keyOf: (name: string) => string,
@@ -133,7 +136,8 @@ export class IndexedDbStore implements NotebookStore {
   }
 
   async createNotebook(info: Omit<NotebookInfo, "id" | "created">, pages: StoredPage[] = [], files: StoredFile[] = []): Promise<NotebookInfo> {
-    const created: NotebookInfo = { ...info, id: newId(), created: Date.now() };
+    this.lastCreated = Math.max(Date.now(), this.lastCreated + 1);
+    const created: NotebookInfo = { ...info, id: newId(), created: this.lastCreated };
     await this.write(["notebooks", "pages", "files"], (tx) => {
       tx.objectStore("notebooks").put(created);
       for (const page of pages) tx.objectStore("pages").put(this.row(created.id, page));
