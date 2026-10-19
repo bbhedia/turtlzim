@@ -26,6 +26,8 @@ import { SealedUi } from "../account/sealed";
 import { VaultSeal } from "../vault/seal";
 import { SyncUi } from "../account/sync-ui";
 import type { SyncState } from "../account/sync-ui";
+import { NativeAccount } from "../account/native";
+import { NativeAccountUi } from "../account/native-ui";
 import { AccountUi } from "../account/ui";
 import { closeAllDialogs, showDialog, showMessage } from "./dialogs";
 import type { Phase, Pwa } from "../pwa/register";
@@ -279,7 +281,9 @@ export class App {
     for (const [name, panel] of [["contents", this.contents.element], ["calendar", this.calendar.element], ["tags", this.tagList.element]] as const) {
       panel.addEventListener("toggle", () => prefs.set(`panel:${name}`, panel.open ? "open" : "closed"));
     }
-    this.account = new AccountUi((text) => this.say(text), (name, blob) => this.saveFile(name, blob));
+    // (in a native shell the account is reached, and signed in to, the way the shell makes possible: `account/native.ts`)
+    const accountHooks = shellHooks().account;
+    this.account = accountHooks ? new NativeAccountUi((text) => this.say(text), (name, blob) => this.saveFile(name, blob), new NativeAccount(accountHooks, prefs)) : new AccountUi((text) => this.say(text), (name, blob) => this.saveFile(name, blob));
     // (who is signed in changed: what the title says of where the notebook is kept follows, and a notebook that is kept for the account that has just signed in is brought up to date)
     this.account.onChange = () => {
       if (this.session) this.renderNotebookButton();
@@ -360,7 +364,7 @@ export class App {
     app = new App(root, store, keptInMemory, vault);
     await app.openInitialNotebook();
     // (after the first notebook is open, so that what it says of the sign-in that was just made is not overwritten by the app starting)
-    if (shellPlatform() === null) {
+    if (app.accountsPossible()) {
       void app.account.start().then(async () => {
         // (a notebook that is kept on the server is brought up to date at the start: that is the one reason to ask the server before the menu is opened)
         const open = app.session?.info;
@@ -799,11 +803,16 @@ export class App {
     }
   }
 
+  /** Whether this app can have an account: in a browser (the page's own server, if there is one), or in a shell that gives the means to reach one (`account/native.ts`); a shell that does not shows none. */
+  private accountsPossible(): boolean {
+    return shellPlatform() === null || shellHooks().account !== undefined;
+  }
+
   private toggleNotebookMenu(): void {
     const open = this.els.notebookMenu.hidden;
     if (!open) return this.closeNotebookMenu();
     // (what the account server says is asked when the menu opens, not before; a server that is slow does not hold the menu back for long)
-    const accounts = shellPlatform() === null ? Promise.race([this.account.refresh(), new Promise<void>((resolve) => setTimeout(resolve, 1500))]) : Promise.resolve();
+    const accounts = this.accountsPossible() ? Promise.race([this.account.refresh(), new Promise<void>((resolve) => setTimeout(resolve, 1500))]) : Promise.resolve();
     Promise.all([this.store.listNotebooks(), accounts]).then(([notebooks]) => {
       const item = (text: string, onClick: () => void, extra: Record<string, unknown> = {}, badges: Array<{ kind: string; text: string; state?: SyncState }> = []) =>
         h("button", { type: "button", role: "menuitem", class: "menu-item", on: { click: () => { this.closeNotebookMenu(); onClick(); } }, ...extra }, h("span", { text }), badges.length ? h("span", { class: "badges" }, ...badges.map((b) => h("span", { class: `badge ${b.kind === "enc" ? "enc" : "sync"}`, ...(b.state ? { "data-state": b.state } : {}), text: b.text }))) : null);
@@ -867,7 +876,7 @@ export class App {
   private async newNotebook(): Promise<void> {
     const folders = shellHooks().folders;
     // where a notebook can live: here (the browser, or the program), a folder of this computer (the program only), or, for someone who is signed in, the server or a connected service
-    const remote = shellPlatform() === null && this.account.account ? await this.sync.whereOptions() : [];
+    const remote = this.accountsPossible() && this.account.account ? await this.sync.whereOptions() : [];
     const places = [
       ...(folders ? [{ value: "folder", label: "In a folder of this computer: Zim files that Zim opens too (only here)" }] : []),
       { value: "device", label: folders ? "On this device only: kept in this program" : "On this device only: kept in this browser" },
@@ -1063,7 +1072,7 @@ export class App {
 
   /** Once the vault's links are read: if some notebook is kept elsewhere, the account (who is signed in) has to be known for them to say anything, and the open one is brought up to date. */
   private async syncAfterUnlock(): Promise<void> {
-    if (shellPlatform() !== null || !this.sync.hasVaultLinks()) return;
+    if (!this.accountsPossible() || !this.sync.hasVaultLinks()) return;
     if (!this.account.account) await this.account.refresh();
     this.renderNotebookButton();
     await this.sync.catchUp();

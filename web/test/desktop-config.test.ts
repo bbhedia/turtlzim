@@ -32,7 +32,11 @@ describe("the desktop program", () => {
     expect(script).toContain('invoke("save_file", bytes, { headers: { "x-file-name"');
     expect(program).toContain("async fn save_file(");
     expect(program).toContain('.get("x-file-name")');
-    expect(program).toContain("generate_handler![save_file, debug_log, fs_roots, fs_pick, fs_forget, fs_list, fs_read, fs_stage, fs_commit]");
+    // every command that the program has is one it answers to (a command that is written and not listed is a call that fails only when a person makes it)
+    const listed = [...(/generate_handler!\[([^\]]*)\]/s.exec(program)?.[1] ?? "").split(",")].map((name) => name.trim()).filter(Boolean);
+    const written = [...program.matchAll(/#\[tauri::command\]\s*(?:async )?fn (\w+)/g)].map((m) => m[1]);
+    expect([...listed].sort()).toEqual([...written].sort());
+    for (const command of ["save_file", "debug_log", "fs_roots", "fs_pick", "fs_forget", "fs_list", "fs_read", "fs_stage", "fs_commit"]) expect(listed, command).toContain(command);
     // and the program puts the script in the page before the app's own
     expect(program).toContain(".initialization_script(shell_script())");
   });
@@ -55,6 +59,30 @@ describe("the desktop program", () => {
     expect(program).toContain("async fn fs_commit(");
     // and the page names a folder by an id: no command takes a path from the page but a path inside a folder
     expect(program).not.toMatch(/async fn fs_\w+\([^)]*root_path|PathBuf>?,? path/);
+  });
+
+  it("gives the app the account hooks (the program makes the requests, opens the person's browser, keeps the token), each over the command of the program that does it", () => {
+    const script = read("../../desktop/src-tauri/shell.js");
+    const program = read("../../desktop/src-tauri/src/main.rs");
+    expect(script).toMatch(/window\.__zimShell = \{[^}]*account,/s);
+    for (const [hook, command] of [["request", "account_request"], ["begin", "account_sign_in_begin"], ["wait", "account_sign_in_wait"], ["cancel", "account_sign_in_cancel"], ["get", "account_secret_get"], ["set", "account_secret_set"], ["remove", "account_secret_remove"]]) {
+      expect(script, hook).toMatch(new RegExp(`${hook}:.*invoke\\("${command}"`));
+      expect(program, command).toMatch(new RegExp(`fn ${command}\\(`));
+    }
+    // the page asks for nothing by name that the program has not got: the address that a sign-in opens is checked by the program, and the token is kept by the program only
+    expect(program).toContain("account::check_browser_url(&url)?");
+    expect(program).toContain("secrets::SystemKeychain");
+    // and the page's own policy still allows no network at all: what it asks of the server goes by the program's channel
+    const connect: string = config.app.security.csp.split("; ").find((directive: string) => directive.startsWith("connect-src"));
+    expect(connect).toBe("connect-src 'self' ipc: http://ipc.localhost");
+  });
+
+  it("fills in every placeholder of the script before it goes to the page (a placeholder left in it is a script that fails to run)", () => {
+    const script = read("../../desktop/src-tauri/shell.js");
+    const program = read("../../desktop/src-tauri/src/main.rs");
+    const placeholders = [...new Set(script.match(/__ZIM_[A-Z_]+__/g))];
+    expect(placeholders.length).toBeGreaterThanOrEqual(3);
+    for (const placeholder of placeholders) expect(program, placeholder).toContain(`.replace("${placeholder}"`);
   });
 
   it("switches on, in WebKitGTK, the web storage features that it is built without (OPFS, which the vault needs)", () => {

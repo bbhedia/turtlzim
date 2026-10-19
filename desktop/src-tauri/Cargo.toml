@@ -19,10 +19,23 @@ tauri-plugin-dialog = "2"
 percent-encoding = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The account (E17, account.rs, signin.rs, secrets.rs): the program makes the requests to the account server itself, with the system's own list of trusted certificate authorities
+# (OpenSSL on Linux, SChannel on Windows), listens for the browser's return on a port of this computer, opens that browser, and keeps the token in the system's keychain.
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "system-proxy"] }
+tokio = { version = "1", features = ["net", "time", "sync", "io-util", "rt", "macros"] }
+url = "2"
+open = "5"
 
 # (to reach the settings of the WebKitGTK view: see `linux_web_features` in main.rs; the version is the one Tauri itself uses)
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0.2"
+keyring = { version = "3.6", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
 
 [profile.release]
 opt-level = "s"

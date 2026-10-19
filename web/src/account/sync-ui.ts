@@ -986,6 +986,7 @@ export class SyncUi {
       body: [
         has ? "Services that this account keeps notebooks on. The server holds the password you gave (sealed) so that it can reach the service for you." : "No service is connected. A notebook can be kept on this server, or on a service of yours: connect it here, then choose it in “Keep this notebook on the server…”.",
         "Connecting a service lets this server read and write the folder you give it. Use an app password, not your main one, and a folder that holds only notebooks. Dropbox and Google Drive are allowed in their own window (this server never sees your password), and see only a folder made for this app.",
+        ...(!this.account.inBrowser && kinds.some((k) => k.oauth && k.available) ? ["Dropbox and Google Drive are allowed in the web app, in a browser (they use their own window): once connected there, they are listed here."] : []),
         ...(kinds.some((k) => k.oauth && !k.available) ? [`Not set up on this server yet: ${kinds.filter((k) => k.oauth && !k.available).map((k) => k.label).join(", ")} (the person who runs the server has to register an app for it: see its documentation).`] : []),
       ],
       ...(has ? { choices: [{ name: "which", label: "Connection", value: String(services.connectors[0]!.id), options: services.connectors.map((c) => ({ value: String(c.id), label: nameOf(c) })) }] } : {}),
@@ -993,7 +994,7 @@ export class SyncUi {
       noCancel: !has,
       danger: has,
       // (a service that is reached through its own window is offered only where the server has an app for it)
-      actions: kinds.filter((k) => !k.oauth || k.available).map((k) => ({ label: `Connect ${k.label}…`, run: (close: () => void) => ((next = k.kind), close()) })),
+      actions: kinds.filter((k) => !k.oauth || (k.available && this.account.inBrowser)).map((k) => ({ label: `Connect ${k.label}…`, run: (close: () => void) => ((next = k.kind), close()) })),
       working: "Disconnecting…",
       submit: async (values) => {
         if (!has) return;

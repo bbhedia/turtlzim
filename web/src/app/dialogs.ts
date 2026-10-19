@@ -14,6 +14,8 @@ export interface Field {
   type?: "text" | "password";
   /** What a password manager should make of the field, for a `password`: a new one, or the current one. */
   autocomplete?: "new-password" | "current-password";
+  /** What is selected when the dialog opens with this field first: by default the part of a name after its last colon (the part of a page's name that is most likely to change); `all` for what is typed over as a whole (an address). */
+  select?: "all";
   /** A problem with the current value, as a message to show, or null if it's fine. `values` is what every field holds now. */
   validate?: (value: string, values: Record<string, string>) => string | null;
 }
@@ -43,10 +45,17 @@ export interface DialogOptions {
   danger?: boolean;
   /** Without a cancel button (a message): the only button is `confirm`. */
   noCancel?: boolean;
+  /** Which button has the focus when a dialog has no field: a dialog that asks to allow something starts on Cancel, so that a stray Enter does not allow it. */
+  focus?: "cancel";
   /** Further buttons, next to Cancel; `close` ends the dialog as a cancel does. */
   actions?: Array<{ label: string; run: (close: () => void) => void }>;
   /** What the confirm button says while `submit` is working (it can take a moment). */
   working?: string;
+  /**
+   * For a `submit` that waits for something outside the dialog (the person's browser): what to do if the person gives up while it is working (Cancel, Escape). Without it a dialog
+   * that is working can't be walked away from; with it, Cancel stays pressable, calls this, and closes the dialog at once, as a cancel does (`submit` should then end).
+   */
+  abort?: () => void;
   /**
    * Called when the dialog is confirmed with what was entered. Return (or throw) a message to keep
    * the dialog open and show it; return nothing to close it.
@@ -120,10 +129,22 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
       form.append(h("label", { class: "check-row", for: box.id }, box, " ", check.label));
     }
     const extra = (options.actions ?? []).map((action) => h("button", { type: "button", class: "secondary", text: action.label, on: { click: () => action.run(() => dialog.close("cancel")) } }));
-    const cancelButton = options.noCancel ? null : h("button", { type: "button", class: "secondary", text: "Cancel", on: { click: () => dialog.close("cancel") } });
+    const cancelButton = options.noCancel
+      ? null
+      : h("button", {
+          type: "button",
+          class: "secondary",
+          text: "Cancel",
+          on: {
+            click: () => {
+              if (working) options.abort?.();
+              dialog.close("cancel");
+            },
+          },
+        });
     form.append(errorLine, h("div", { class: "dialog-buttons" }, ...extra, cancelButton, confirmButton));
     // (what is being done is not to be walked away from: a person who cancels expects it not to happen)
-    const walkAways = [...extra, ...(cancelButton ? [cancelButton] : [])];
+    const walkAways = [...extra, ...(cancelButton && !options.abort ? [cancelButton] : [])];
 
     let working = false;
     form.addEventListener("submit", async (event) => {
@@ -157,7 +178,9 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
     dialog.append(form);
     // Escape asks to close the dialog; while something is being done, it doesn't (closing it in code, for a lock, still does)
     dialog.addEventListener("cancel", (event) => {
-      if (working) event.preventDefault();
+      if (!working) return;
+      if (options.abort) options.abort();
+      else event.preventDefault();
     });
     dialog.addEventListener("close", () => {
       shown.delete(dialog);
@@ -171,10 +194,13 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
     const first = [...inputs.values()].find((i) => i instanceof HTMLInputElement && (i.type === "text" || i.type === "password")) as HTMLInputElement | undefined;
     if (first) {
       first.focus();
-      // select the part of a name a person is most likely to change: everything after the last colon
-      const colon = first.value.lastIndexOf(":");
-      first.setSelectionRange(colon + 1, first.value.length);
-    } else confirmButton.focus();
+      if (options.fields?.find((f) => inputs.get(f.name) === first)?.select === "all") first.select();
+      else {
+        // select the part of a name a person is most likely to change: everything after the last colon
+        const colon = first.value.lastIndexOf(":");
+        first.setSelectionRange(colon + 1, first.value.length);
+      }
+    } else (options.focus === "cancel" && cancelButton ? cancelButton : confirmButton).focus();
   });
 }
 

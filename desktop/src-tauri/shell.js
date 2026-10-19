@@ -71,9 +71,29 @@
     },
   };
 
+  // An account on a server (web/src/account/native.ts is the page's side of it): the program makes the requests itself (the page's content policy lets it ask nowhere but its own address),
+  // the person signs in in their own browser (the program opens it, and waits for it to come back to a port of this computer), and the token is kept where the system keeps secrets.
+  // What an answer or a failure is, is the program's to say: a failure comes back as the words for a person.
+  const account = {
+    // the address that the program suggests when the person connects (ZIM_ACCOUNT_SERVER, or none)
+    defaultServer: __ZIM_ACCOUNT_SERVER__,
+    request: (request) => invoke("account_request", { request }),
+    signIn: {
+      begin: (state) => invoke("account_sign_in_begin", { state }),
+      wait: (url) => invoke("account_sign_in_wait", { url }),
+      cancel: () => void invoke("account_sign_in_cancel").catch(() => {}),
+    },
+    secrets: {
+      get: (name) => invoke("account_secret_get", { name }),
+      set: (name, value) => invoke("account_secret_set", { name, value }),
+      remove: (name) => invoke("account_secret_remove", { name }),
+    },
+  };
+
   window.__zimShell = {
     version: "__ZIM_VERSION__",
     folders,
+    account,
     // A link to a Blob that has `download`, which is how a browser saves a file, does nothing in a WebView: the file goes to the
     // program, which asks where to save it (the system's own dialog) and writes it.
     async saveFile(fileName, blob) {

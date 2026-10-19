@@ -1,6 +1,6 @@
 // The account server, as the page sees it: JSON under `/api/` on the address the app came from (the page's content policy lets it ask nowhere else).
-// Where there is no such server (a static host, a native shell, a test) `available()` says so and the app shows nothing about accounts.
-// Notes never go through here: an account only exists, so far, and notebooks stay on the device.
+// In a native shell the page asks the shell to make the request instead (`native.ts` gives this client a `Fetcher` that does), with the app's token.
+// Where there is no such server (a static host, a test) `offer()` says so and the app shows nothing about accounts.
 
 export interface Account {
   email: string;
@@ -82,6 +82,22 @@ export interface WireFile {
 
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 
+/** A request that a shell could not make, with the reason in words for a person (the certificate is not one that this device trusts, there is no route to the server). */
+export class TransportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TransportError";
+  }
+}
+
+/** An app that was signed in to the account, as the server lists it (never its token). */
+export interface AppSession {
+  id: string;
+  label: string;
+  connectedAt: number;
+  lastUsed: number;
+}
+
 export class AccountClient {
   constructor(private readonly doFetch: Fetcher = (input, init) => fetch(input, init)) {}
 
@@ -89,8 +105,8 @@ export class AccountClient {
     let response: Response;
     try {
       response = await this.doFetch(path, { method, credentials: "same-origin", cache: "no-store", headers: method === "GET" ? undefined : { "content-type": "application/json", "x-requested-with": "zim" }, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
-    } catch {
-      throw new ApiError("The server can't be reached.", 0, "offline");
+    } catch (error) {
+      throw new ApiError(error instanceof TransportError ? error.message : "The server can't be reached.", 0, "offline");
     }
     const type = response.headers.get("content-type") ?? "";
     const data = type.includes("json") ? ((await response.json().catch(() => null)) as Record<string, unknown> | null) : null;
@@ -102,12 +118,17 @@ export class AccountClient {
     return data as T;
   }
 
+  /** What this server offers; throws, with the reason in words, if it is not an account server of this app (or can't be reached). */
+  async checkServer(): Promise<Offer> {
+    const data = await this.call<{ providers?: unknown; email?: unknown }>("/api/providers");
+    if (data.email !== true || !Array.isArray(data.providers)) throw new ApiError("it did not answer like an account server of this app.", 200, "not-a-server");
+    return { providers: data.providers.filter((p): p is string => p === "google" || p === "github") };
+  }
+
   /** What this server offers, or null if there is no account server here. */
   async offer(): Promise<Offer | null> {
     try {
-      const data = await this.call<{ providers?: unknown; email?: unknown }>("/api/providers");
-      if (data.email !== true || !Array.isArray(data.providers)) return null;
-      return { providers: data.providers.filter((p): p is string => p === "google" || p === "github") };
+      return await this.checkServer();
     } catch {
       return null;
     }
@@ -199,6 +220,27 @@ export class AccountClient {
    */
   resetKeychain(expect: string): Promise<{ ok: boolean; removed: number }> {
     return this.call("/api/sync/keychain/reset", { expect });
+  }
+  /**
+   * In a browser where the person is signed in: allow the app that is asking (`server/src/apps.mjs`). The answer is the address to send the browser to: the app's own return address, with a code.
+   */
+  authorizeApp(body: { redirect_uri: string; code_challenge: string; code_challenge_method: "S256"; state: string }): Promise<{ redirect: string; client: string; label: string }> {
+    return this.call("/api/app/authorize", body);
+  }
+  /** In an app: trade the code that the browser brought back, with the secret that the request's challenge was made from, for the app's token. */
+  async exchangeAppCode(body: { code: string; code_verifier: string; redirect_uri: string }): Promise<{ token: string; account: Account }> {
+    const data = await this.call<{ token?: unknown }>("/api/app/token", body);
+    if (typeof data.token !== "string") throw new ApiError("The server answered something unexpected.", 200);
+    return { token: data.token, account: toAccount(data) };
+  }
+  /** The apps that are signed in to the account (from a browser). */
+  async listApps(): Promise<AppSession[]> {
+    const data = await this.call<{ apps?: unknown }>("/api/app/sessions");
+    return Array.isArray(data.apps) ? (data.apps as AppSession[]) : [];
+  }
+  /** Sign one of them out. */
+  revokeApp(id: string): Promise<unknown> {
+    return this.call("/api/app/revoke", { id });
   }
   /** Everything the server keeps about the person, as the text of a JSON file. */
   async exportData(): Promise<string> {

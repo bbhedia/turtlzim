@@ -143,9 +143,10 @@ const hasFocus = (page) => page.evaluate(() => window.__zim.editor.view.hasFocus
  * A fresh browser profile (so a fresh IndexedDB: the sample notebook, nothing else) with the app
  * open. `beforeLoad`, if given, is a function that runs in the page before any of its own scripts.
  * `fixedTime` is the time that the page's clock shows (a scenario about days of a calendar says which
- * day it is: with the real clock it would only pass on the day it was written).
+ * day it is: with the real clock it would only pass on the day it was written). `prepare(context)`, if
+ * given, runs before the page is made (to expose functions of this side to it).
  */
-async function openApp({ beforeLoad, at = origin, fixedTime, ...options } = {}) {
+async function openApp({ beforeLoad, at = origin, fixedTime, prepare, ...options } = {}) {
   // (a service worker keeps the app in a cache of its own: the scenarios that are about that ask for it with `serviceWorkers: "allow"`)
   const context = await browser.newContext({ acceptDownloads: true, viewport: { width: 1100, height: 900 }, serviceWorkers: "block", ...options });
   // (WebKit with a profile folder of its own for each context is slower at putting a file in IndexedDB: a full run waited 10 s in vain now and then)
@@ -153,6 +154,8 @@ async function openApp({ beforeLoad, at = origin, fixedTime, ...options } = {}) 
   if (fixedTime) await context.clock.setFixedTime(fixedTime);
   await context.addInitScript(exposeApp);
   if (beforeLoad) await context.addInitScript(beforeLoad);
+  // (what a page is to be able to call that lives on this side, as a shell's program does: exposed before the page's own scripts run)
+  if (prepare) await prepare(context);
   const page = await context.newPage();
   page.on("pageerror", (error) => problems.push(`[page error] ${error.message}`));
   page.on("console", (message) => {
@@ -7403,6 +7406,577 @@ try {
     if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, "move-page-phone.png") });
     await dialog.getByRole("button", { name: "Cancel" }).tap();
     await noDialogs(page);
+  });
+
+  // ==========================================================================================
+  // An app in a native shell signed in to an account through the person's own browser (E17).
+  // The shell is made up here: a page that has what the desktop program's script gives it, and a side of the test that makes the
+  // requests, listens on a port for the browser's return, opens "the browser" and keeps the token. The server is the real one, and
+  // the person's browser is a second browser context that is driven as a person would drive it.
+  // ==========================================================================================
+  const standInProgram = () => {
+    window.__TAURI_INTERNALS__ = {};
+    window.__zimShell = {
+      version: "stand-in program",
+      account: {
+        // (what the program suggests, as its environment says: the test sets it once the page exists)
+        get defaultServer() {
+          return window.__PROGRAM_DEFAULT_SERVER ?? null;
+        },
+        request: (request) => window.__program_request(request),
+        signIn: { begin: (state) => window.__program_begin(state), wait: (url) => window.__program_wait(url), cancel: () => void window.__program_cancel() },
+        secrets: { get: (name) => window.__program_secret_get(name), set: (name, value) => window.__program_secret_set(name, value), remove: (name) => window.__program_secret_remove(name) },
+      },
+    };
+  };
+
+  async function programRig() {
+    const { Accounts } = await import("../../server/src/accounts.mjs");
+    const { createApi } = await import("../../server/src/api.mjs");
+    const { openDatabase } = await import("../../server/src/db.mjs");
+    const { OutboxMailer } = await import("../../server/src/mail.mjs");
+    const { OAuth } = await import("../../server/src/oauth.mjs");
+    const { randomBytes } = await import("node:crypto");
+    const { default: http } = await import("node:http");
+    // (a service that is allowed in its own window is set up on this server: a browser offers to connect it, an app is sent to the browser for that)
+    const config = { baseUrl: "http://127.0.0.1", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: {}, connectorApps: { dropbox: { clientId: "id", clientSecret: "secret" } } };
+    const db = openDatabase(":memory:");
+    const mailer = new OutboxMailer();
+    const accounts = new Accounts({ db, mailer, config });
+    const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+    const site = createStaticServer({ dir: dist, api });
+    await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));
+    const at = `http://127.0.0.1:${site.address().port}`;
+    config.baseUrl = at;
+    await accounts.register("ada@example.org", "correct horse battery");
+    accounts.verify("ada@example.org", /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1]);
+
+    /** What the program does and has: the requests it made (as the program makes them: three headers of the page's go on), what its keychain holds, the port it listens on, the pages that "the browser" opened. */
+    const program = { seen: [], secrets: new Map(), listener: null, state: null, wait: null, cancels: 0, browserPages: [], opened: [] };
+    const systemBrowser = await browser.newContext({ serviceWorkers: "block", viewport: { width: 1100, height: 900 } });
+    systemBrowser.setDefaultTimeout(process.env.ZIM_BROWSER === "webkit" ? 30_000 : 10_000);
+    await systemBrowser.addInitScript(exposeApp);
+    const watch = (page) => {
+      page.on("pageerror", (error) => problems.push(`[browser page error] ${error.message}`));
+      page.on("console", (message) => {
+        if (message.type() === "error") problems.push(`[browser console error] ${message.text()}`);
+      });
+    };
+    const closeListener = () => {
+      program.listener?.closeAllConnections?.();
+      program.listener?.close();
+    };
+    const prepare = async (context) => {
+      await context.addInitScript((value) => {
+        window.__PROGRAM_DEFAULT_SERVER = value;
+      }, at);
+      await context.exposeFunction("__program_request", async (request) => {
+        const forwarded = {};
+        for (const [name, value] of Object.entries(request.headers)) if (["authorization", "content-type", "x-requested-with", "accept"].includes(name.toLowerCase())) forwarded[name] = value;
+        program.seen.push({ url: request.url, method: request.method, headers: forwarded, body: request.body });
+        const response = await fetch(request.url, { method: request.method, headers: forwarded, body: request.body, redirect: "manual" });
+        return { status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() };
+      });
+      await context.exposeFunction("__program_begin", async (state) => {
+        closeListener();
+        program.state = state;
+        program.wait = {};
+        program.wait.promise = new Promise((resolve, reject) => Object.assign(program.wait, { resolve, reject }));
+        // (a cancel can come before the page's wait has got as far as returning the promise: that is not an unhandled failure)
+        program.wait.promise.catch(() => {});
+        // (as the program does: the answer is the one request to /callback that has the state, and the page that says so; anything else is answered and ignored)
+        const listener = http.createServer((req, res) => {
+          const url = new URL(req.url, "http://127.0.0.1");
+          // (a browser asks for the page's icon: it is told there is none, which is not logged as a failure)
+          if (url.pathname === "/favicon.ico") {
+            res.writeHead(204);
+            return res.end();
+          }
+          if (url.pathname !== "/callback" || url.searchParams.get("state") !== state) {
+            res.writeHead(400, { "content-type": "text/html" });
+            return res.end("<title>Not this sign-in</title>Not this sign-in.");
+          }
+          res.writeHead(200, { "content-type": "text/html" });
+          res.end("<title>Allowed</title><p>You can close this page and go back to the app: it is signed in.</p>");
+          program.wait.resolve({ code: url.searchParams.get("code"), state: url.searchParams.get("state"), error: url.searchParams.get("error") });
+        });
+        await new Promise((resolve) => listener.listen(0, "127.0.0.1", resolve));
+        program.listener = listener;
+        return { redirectUri: `http://127.0.0.1:${listener.address().port}/callback` };
+      });
+      await context.exposeFunction("__program_wait", async (url) => {
+        program.opened.push(url);
+        const page = await systemBrowser.newPage();
+        watch(page);
+        program.browserPages.push(page);
+        void page.goto(url).catch(() => {});
+        return program.wait.promise;
+      });
+      await context.exposeFunction("__program_cancel", async () => {
+        program.cancels += 1;
+        closeListener();
+        program.wait?.reject(new Error("cancelled"));
+      });
+      await context.exposeFunction("__program_secret_get", async (name) => program.secrets.get(name) ?? null);
+      await context.exposeFunction("__program_secret_set", async (name, value) => void program.secrets.set(name, value));
+      await context.exposeFunction("__program_secret_remove", async (name) => void program.secrets.delete(name));
+    };
+    /** A program: a page with the shell's hooks. */
+    const open = async () => {
+      const made = await openApp({ at, beforeLoad: standInProgram, prepare });
+      const { page } = made.ui;
+      const pageApi = [];
+      page.on("request", (request) => request.url().startsWith(`${at}/api/`) && pageApi.push(`${request.method()} ${request.url()}`));
+      const says = (text, timeout = 20_000) =>
+        page.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout }).catch(async () => {
+          throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await page.locator("#status").innerText())}`);
+        });
+      const choose = async (name) => {
+        await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+        await made.ui.openMenu();
+        await made.ui.menu().getByRole("menuitem", { name }).click();
+      };
+      const menuNames = async () => {
+        await made.ui.openMenu();
+        const names = await made.ui.menu().getByRole("menuitem").allInnerTexts();
+        await page.keyboard.press("Escape");
+        return names.map((n) => n.trim());
+      };
+      return { ...made, page, pageApi, says, choose, menuNames, dialog: () => topDialog(page) };
+    };
+    /** The person's browser, as far as the app asks for it: the page it was opened at, once it has loaded. */
+    const browserPage = async (index = 0) => {
+      for (let waited = 0; !program.browserPages[index]; waited += 50) {
+        if (waited > 10_000) throw new Error("the browser was never opened");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const page = program.browserPages[index];
+      await ready(page);
+      return page;
+    };
+    /** The sign-in in the person's browser: asks for the password when nobody is signed in there, then for the app to be allowed. */
+    const allowInBrowser = async (page, { signIn = true } = {}) => {
+      if (signIn) {
+        const dialog = topDialog(page);
+        await dialog.getByRole("heading", { name: "Sign in" }).waitFor();
+        await dialog.getByLabel("E-mail address", { exact: true }).fill("ada@example.org");
+        await dialog.getByLabel("Password", { exact: true }).fill("correct horse battery");
+        await dialog.getByRole("button", { name: "Sign in" }).click();
+      }
+      const consent = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Allow this app?" }) });
+      await consent.waitFor();
+      return consent;
+    };
+    const close = async () => {
+      closeListener();
+      for (const page of program.browserPages) await page.close().catch(() => {});
+      await systemBrowser.close().catch(() => {});
+      site.closeAllConnections?.();
+      site.close();
+      db.close();
+    };
+    return { at, db, accounts, mailer, program, open, browserPage, allowInBrowser, prepare, close, systemBrowser, watch };
+  }
+
+  await scenario("an app in a native shell is signed in to the account through the person's own browser: it never sees the password, keeps its token outside the page's storage, makes every request through the shell, keeps a notebook on the server with it, and is signed out from the list in the browser", async () => {
+    const rig = await programRig();
+    const { at, db, program } = rig;
+    let made;
+    try {
+      made = await rig.open();
+      const { page } = made;
+      const shot = async (name) => process.env.SCREENSHOTS && (mkdirSync(process.env.SCREENSHOTS, { recursive: true }), await page.screenshot({ path: join(process.env.SCREENSHOTS, `program-${name}.png`) }));
+      // not connected: the menu offers to connect, and does not offer to sign in with a password (that is done in the browser)
+      let names = await made.menuNames();
+      assert(names.includes("Connect to an account server…"), `the menu offers to connect (${names.join(" | ")})`);
+      assert(!names.includes("Sign in or create an account…"), "and not to sign in with a password here");
+      await made.choose("Connect to an account server…");
+      const dialog = made.dialog();
+      await dialog.getByRole("heading", { name: "Connect to an account server" }).waitFor();
+      const address = dialog.getByLabel("Address of the server", { exact: true });
+      assertEqual(await address.inputValue(), at, "the dialog starts with the server that the program suggests");
+      assert(await address.evaluate((el) => el.selectionStart === 0 && el.selectionEnd === el.value.length), "all of it is selected, to be typed over (not the part after the last colon, which would be the port)");
+      assert(await dialog.getByRole("button", { name: "Continue in the browser" }).isEnabled(), "which can be confirmed as it is");
+      // an address that can't be used is said so as it is typed, and can't be sent
+      await address.fill("http://example.org");
+      assert((await dialog.innerText()).includes("https"), "it says that a server that is not on this computer is reached over https");
+      assert(await dialog.getByRole("button", { name: "Continue in the browser" }).isDisabled(), "and it can't be confirmed");
+      await address.fill(`ada:secret@${at.replace("http://", "")}`);
+      assert((await dialog.innerText()).includes("Leave the name and the password out"), "no password in the address");
+      await address.fill(at);
+      await shot("connect");
+      await dialog.getByRole("button", { name: "Continue in the browser" }).click();
+      // the browser was sent for, and its address is on the screen (for a person whose browser did not open)
+      await dialog.locator(".wait-address").waitFor({ state: "visible" });
+      for (let waited = 0; program.opened.length === 0; waited += 50) {
+        if (waited > 10_000) throw new Error("the browser was never sent for");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assertEqual(await dialog.locator(".wait-address").innerText(), program.opened[0], "the dialog shows the address that was opened");
+      await shot("waiting");
+      const opened = new URL(program.opened[0]);
+      assertEqual(`${opened.origin}${opened.pathname}`, `${at}/`, "the browser was sent to the server");
+      assertEqual(opened.searchParams.get("code_challenge_method"), "S256", "with a hash of a secret");
+      assert(/^http:\/\/127\.0\.0\.1:\d+\/callback$/.test(opened.searchParams.get("redirect_uri")), "and a return address on this computer");
+      assert(!program.opened[0].includes("password"), "no password in it");
+
+      // the person's own browser: sign in, and the page asks whether to allow the app (with Cancel focused, so that a stray Enter does not allow it)
+      const S = await rig.browserPage();
+      const consent = await rig.allowInBrowser(S);
+      const asked = await consent.innerText();
+      assert(asked.includes("Zim Notebook program on a computer") && asked.includes("ada@example.org") && asked.includes("will not be able to change your password"), `the page says what is asked: ${asked}`);
+      assertEqual(await S.evaluate(() => document.activeElement?.textContent), "Cancel", "Cancel has the focus");
+      if (process.env.SCREENSHOTS) await S.screenshot({ path: join(process.env.SCREENSHOTS, "program-consent.png") });
+      await consent.getByRole("button", { name: "Allow" }).click();
+      // the browser is taken back to the program's port, which says that it is done
+      await S.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\/callback\?code=/);
+      assert((await S.locator("body").innerText()).includes("signed in"), "the program's port answered the browser");
+      await made.says(`Connected to ${at} as ada@example.org`);
+      await noDialogs(page);
+
+      // what it holds: a token in the program's keychain, and nowhere that the page's scripts can read
+      const token = program.secrets.get("account-token");
+      assert(token && token.length >= 40, "the program keeps a token");
+      const kept = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage }, cookie: document.cookie }));
+      assert(!kept.includes(token), "the token is not in the page's storage");
+      assert(kept.includes("account-server"), "the address of the server is (it is no secret)");
+      assertEqual((await made.context.cookies()).length, 0, "no cookie was ever set for the app");
+      // every request went through the shell, to the server, and carries the token once there is one
+      assertEqual(made.pageApi.length, 0, `the page asked the server for nothing itself: ${made.pageApi.join(" | ")}`);
+      assert(program.seen.length >= 2 && program.seen.every((r) => r.url.startsWith(`${at}/api/`)), "the shell asked the server only");
+      assert(program.seen.filter((r) => r.headers.authorization).every((r) => r.headers.authorization === `Bearer ${token}`), "and always with that token");
+      assertEqual(program.seen[0].headers.authorization, undefined, "the first request, to see whether it is a server for this, had none");
+      // the server: one app session, a hash of the token, and no password anywhere that the app could have had
+      const apps = db.prepare("select label, kind from sessions where kind = 'app'").all();
+      assertEqual(JSON.stringify(apps), JSON.stringify([{ label: "Zim Notebook for computers", kind: "app" }]), "the server has one app session");
+      assert(!JSON.stringify(db.prepare("select * from sessions").all()).includes(token), "of which only a hash is kept");
+      assertEqual(db.prepare("select count(*) as n from app_codes").get().n, 0, "the code was used up");
+      assert(!JSON.stringify(program.seen).includes("correct horse battery"), "the password never went through the program");
+
+      // the menu says who it is connected as; the account dialog says what is done where
+      names = await made.menuNames();
+      assert(names.includes("Account (ada@example.org)…") && !names.includes("Connect to an account server…"), `the menu says who (${names.join(" | ")})`);
+      await made.choose("Account (ada@example.org)…");
+      const account = await made.dialog().innerText();
+      assert(account.includes("ada@example.org") && account.includes(`open ${at} in a browser`), `the dialog says where the rest is done: ${account}`);
+      assert(!account.includes("Download my data") && !account.includes("Delete the account"), "and offers none of what a browser does");
+      await shot("account");
+      await made.dialog().getByRole("button", { name: "Close" }).click();
+      await noDialogs(page);
+
+      // a notebook is kept on the server with it (the server is asked with the bearer token, and the page still asks nothing itself)
+      await made.choose("Keep this notebook on the server…");
+      assert((await made.dialog().innerText()).includes("anyone who runs the server"), "the dialog says that the copy is in clear");
+      await made.dialog().getByRole("button", { name: "Keep it there" }).click();
+      await made.says("is kept on the server");
+      assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 1, "the server has the notebook");
+      assert(program.seen.some((r) => r.method === "PUT" && r.url.includes("/api/sync/notebooks/") && r.headers.authorization === `Bearer ${token}` && r.headers["x-requested-with"] === "zim"), "it was sent with the token and the site's header");
+      assertEqual(made.pageApi.length, 0, "the page still asked nothing itself");
+
+      // a service that is allowed in its own window can't be connected from the app (that window needs a browser): the dialog says so, and has no button for it
+      await made.choose("Connected services…");
+      let services = await made.dialog().innerText();
+      assert(services.includes("allowed in the web app, in a browser"), `the app says where Dropbox is connected: ${services}`);
+      assertEqual(await made.dialog().getByRole("button", { name: "Connect Dropbox…" }).count(), 0, "and has no button for it");
+      assert((await made.dialog().getByRole("button", { name: /^Connect .*(Nextcloud|WebDAV)/ }).count()) >= 1, "while the services that need no window are offered");
+      await made.dialog().getByRole("button", { name: "Close" }).click();
+      await noDialogs(page);
+
+      // the person ends the app's access from the list in the browser; the app finds out when it next asks, says so, and is signed out
+      await S.goto(`${at}/`);
+      await ready(S);
+      await S.evaluate(() => document.querySelector("#status") && (document.querySelector("#status").textContent = ""));
+      await S.locator(".notebook-button").click();
+      await S.locator(".menu").getByRole("menuitem", { name: "Account (ada@example.org)…" }).click();
+      await S.locator("dialog.dialog").getByRole("button", { name: "Connected apps…" }).click();
+      const list = S.locator("dialog.dialog", { has: S.getByRole("heading", { name: "Connected apps" }) });
+      await list.waitFor();
+      assert((await list.innerText()).includes("Zim Notebook for computers"), "the list has the program");
+      if (process.env.SCREENSHOTS) await S.screenshot({ path: join(process.env.SCREENSHOTS, "program-connected-apps.png") });
+      await list.getByRole("button", { name: /^Sign out Zim Notebook for computers/ }).click();
+      await list.getByText("No app is connected").waitFor({ state: "visible" });
+      assertEqual(db.prepare("select count(*) as n from sessions where kind = 'app'").get().n, 0, "the server ended it");
+      await list.getByRole("button", { name: "Close" }).click();
+      // (the browser, where the window can be opened, does offer to connect Dropbox)
+      await S.locator(".notebook-button").click();
+      await S.locator(".menu").getByRole("menuitem", { name: "Connected services…" }).click();
+      const browserServices = S.locator("dialog.dialog", { has: S.getByRole("heading", { name: "Connected services" }) });
+      await browserServices.waitFor();
+      assertEqual(await browserServices.getByRole("button", { name: "Connect Dropbox…" }).count(), 1, "a browser offers to connect Dropbox");
+      assert(!(await browserServices.innerText()).includes("allowed in the web app, in a browser"), "and does not send itself to the browser");
+      await browserServices.getByRole("button", { name: "Close" }).click();
+      // (opening the menu asks the server who this is)
+      await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+      await made.ui.openMenu();
+      await made.says("signed this app out");
+      await page.keyboard.press("Escape");
+      assertEqual(program.secrets.size, 0, "the token that is no good was forgotten");
+      names = await made.menuNames();
+      assert(names.includes("Connect to an account server…"), "and the menu offers to connect again");
+      assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 1, "what was on the server stays there");
+
+      // connected again (the browser is still signed in, so it is only asked to allow), and signed out from the app: the server is told, and the program keeps nothing
+      await made.choose("Connect to an account server…");
+      await made.dialog().getByRole("button", { name: "Continue in the browser" }).click();
+      const T = await rig.browserPage(1);
+      const again = await rig.allowInBrowser(T, { signIn: false });
+      await again.getByRole("button", { name: "Allow" }).click();
+      await made.says(`Connected to ${at} as ada@example.org`);
+      const second = program.secrets.get("account-token");
+      assert(second && second !== token, "a new token");
+      await made.choose("Account (ada@example.org)…");
+      await made.dialog().getByRole("button", { name: "Sign out of this app" }).click();
+      await made.says("Signed out");
+      assertEqual(program.secrets.size, 0, "the program forgot the token");
+      assertEqual(db.prepare("select count(*) as n from sessions where kind = 'app'").get().n, 0, "and the server ended it");
+      const afterwards = await fetch(`${at}/api/me`, { headers: { authorization: `Bearer ${second}` } }).then((r) => r.json());
+      assertEqual(afterwards.user, null, "the token no longer works");
+      names = await made.menuNames();
+      assert(names.includes("Connect to an account server…"), "the menu offers to connect");
+      // (the browser logs a request that was refused: the app's token, asked about after the server ended it, is answered with the person being nobody, which is no error)
+    } finally {
+      await made?.context.close();
+      await rig.close();
+    }
+  });
+
+  await scenario("an app in a native shell that is not allowed, cancelled, or sent a request that is not valid, ends signed out: nothing is kept, no code is made, and a port that is closed is not answered", async () => {
+    const rig = await programRig();
+    const { at, db, program } = rig;
+    const { default: http } = await import("node:http");
+    const other = http.createServer((req, res) => {
+      res.writeHead(404, { "content-type": "text/html" });
+      res.end("<html>not here</html>");
+    });
+    await new Promise((resolve) => other.listen(0, "127.0.0.1", resolve));
+    let made;
+    try {
+      made = await rig.open();
+      const { page } = made;
+      const connect = async (server = at) => {
+        await made.choose("Connect to an account server…");
+        await made.dialog().getByLabel("Address of the server", { exact: true }).fill(server);
+        await made.dialog().getByRole("button", { name: "Continue in the browser" }).click();
+      };
+      // an address that is not an account server: said before any browser is opened
+      await connect(`http://127.0.0.1:${other.address().port}`);
+      await made.dialog().locator(".dialog-error").filter({ hasText: "does not work as an account server" }).waitFor();
+      assertEqual(program.opened.length, 0, "no browser was opened for it");
+      assertEqual(program.listener, null, "no port was opened for it");
+      await made.dialog().getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(page);
+
+      // cancelled while waiting for the browser: the dialog closes at once, the program stops listening, and nothing was made on the server
+      await connect();
+      await made.dialog().locator(".wait-address").waitFor({ state: "visible" });
+      const port = program.listener.address().port;
+      await made.dialog().getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(page);
+      for (let waited = 0; program.cancels === 0; waited += 50) {
+        if (waited > 5_000) throw new Error("the program was never told to stop waiting");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assertEqual(program.cancels, 1, "the program was told to stop waiting");
+      const refused = await fetch(`http://127.0.0.1:${port}/callback?code=x&state=y`).then(() => false, () => true);
+      assert(refused, "the port is closed");
+      assertEqual(program.secrets.size, 0, "nothing was kept");
+      assertEqual(db.prepare("select count(*) as n from app_codes").get().n, 0, "and no code was made");
+      let names = await made.menuNames();
+      assert(names.includes("Connect to an account server…"), "still not connected");
+
+      // the person says no in the browser: no code is made, and the program goes on waiting until it is cancelled
+      await connect();
+      await made.dialog().locator(".wait-address").waitFor({ state: "visible" });
+      const S = await rig.browserPage(1);
+      const consent = await rig.allowInBrowser(S);
+      await consent.getByRole("button", { name: "Cancel" }).click();
+      await S.waitForFunction(() => document.querySelector("#status")?.textContent?.includes("The app was not allowed"));
+      assertEqual(db.prepare("select count(*) as n from app_codes").get().n, 0, "saying no made no code");
+      assertEqual(await made.dialog().count(), 1, "the program is still waiting");
+      // (Escape gives up the wait as Cancel does)
+      await page.keyboard.press("Escape");
+      await noDialogs(page);
+      for (let waited = 0; program.cancels < 2; waited += 50) {
+        if (waited > 5_000) throw new Error("Escape did not stop the wait");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      // a request that is not valid (another return address, a plain challenge) gets no dialog, and a normal visit to the page gets none either
+      const bad = await rig.systemBrowser.newPage();
+      rig.watch(bad);
+      const challenge = "A".repeat(43);
+      const state = "s".repeat(22);
+      for (const [what, query] of [
+        ["a return address on the web", `redirect_uri=${encodeURIComponent("https://evil.example/callback")}&code_challenge=${challenge}&code_challenge_method=S256&state=${state}`],
+        ["a plain challenge", `redirect_uri=${encodeURIComponent("http://127.0.0.1:49152/callback")}&code_challenge=${challenge}&code_challenge_method=plain&state=${state}`],
+        ["no state", `redirect_uri=${encodeURIComponent("http://127.0.0.1:49152/callback")}&code_challenge=${challenge}&code_challenge_method=S256`],
+      ]) {
+        await bad.goto(`${at}/?app=authorize&${query}`);
+        await ready(bad);
+        await bad.waitForFunction(() => document.querySelector("#status")?.textContent?.includes("not valid"));
+        assertEqual(await bad.locator("dialog.dialog").count(), 0, `no dialog for ${what}`);
+        assert(!(await bad.url()).includes("app=authorize"), `the address was cleaned for ${what}`);
+      }
+      await bad.goto(`${at}/`);
+      await ready(bad);
+      await bad.waitForTimeout(500);
+      assertEqual(await bad.locator("dialog.dialog").count(), 0, "a visit with nothing asked shows nothing");
+      assertEqual(await bad.evaluate(() => sessionStorage.getItem("zim:app-request")), null, "and keeps nothing");
+      assertEqual(db.prepare("select count(*) as n from app_codes").get().n, 0, "no code was made for any of it");
+    } finally {
+      await made?.context.close();
+      other.close();
+      await rig.close();
+    }
+  });
+
+  await scenario("a request that an app made is kept in the tab while the person signs in with a service and comes back, and is dropped otherwise; the token that it gives works for the one who asked", async () => {
+    const rig = await programRig();
+    const { at, db } = rig;
+    const { createHash, randomBytes } = await import("node:crypto");
+    const { default: http } = await import("node:http");
+    // the app's side, as the app would make it: a secret, its hash, a state, and a port that is listened on
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const state = randomBytes(16).toString("base64url");
+    let comeBack;
+    const back = new Promise((resolve) => (comeBack = resolve));
+    const listener = http.createServer((req, res) => {
+      const url = new URL(req.url, "http://127.0.0.1");
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<title>Allowed</title>done");
+      if (url.pathname === "/callback") comeBack(Object.fromEntries(url.searchParams));
+    });
+    await new Promise((resolve) => listener.listen(0, "127.0.0.1", resolve));
+    const redirectUri = `http://127.0.0.1:${listener.address().port}/callback`;
+    const asked = `${at}/?app=authorize&redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${challenge}&code_challenge_method=S256&state=${state}`;
+    const page = await rig.systemBrowser.newPage();
+    rig.watch(page);
+    try {
+      const stash = () => page.evaluate(() => sessionStorage.getItem("zim:app-request"));
+      // asked: the sign-in dialog, and the request is kept in the tab (and the address is cleaned: it is not in the history)
+      await page.goto(asked);
+      await ready(page);
+      await topDialog(page).getByRole("heading", { name: "Sign in" }).waitFor();
+      assert((await stash())?.includes(challenge), "the request is kept in the tab");
+      assert(!page.url().includes("app=authorize"), "and is not in the address");
+      // a visit with nothing asked drops what was left behind
+      await page.goto(`${at}/`);
+      await ready(page);
+      assertEqual(await stash(), null, "a request that was left is dropped by the next visit");
+      // asked again; the person signs in (as they would with a service: the page leaves and comes back with signed_in=1)
+      await page.goto(asked);
+      await ready(page);
+      await topDialog(page).getByRole("heading", { name: "Sign in" }).waitFor();
+      const status = await page.evaluate(async () => (await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json", "x-requested-with": "zim" }, body: JSON.stringify({ email: "ada@example.org", password: "correct horse battery" }) })).status);
+      assertEqual(status, 200, "signed in");
+      await page.goto(`${at}/?signed_in=1`);
+      await ready(page);
+      const consent = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Allow this app?" }) });
+      await consent.waitFor();
+      assertEqual(await stash(), null, "taken once");
+      await consent.getByRole("button", { name: "Allow" }).click();
+      const answer = await Promise.race([back, new Promise((_, reject) => setTimeout(() => reject(new Error("the page never went back to the app's port")), 15_000))]);
+      // (the page is on its way to the app's port: it is let arrive before it is taken anywhere else)
+      await page.waitForURL(/\/callback\?code=/);
+      assertEqual(answer.state, state, "the app's own state comes back");
+      assert(/^[A-Za-z0-9_-]{43}$/.test(answer.code), "with a code");
+      // the app trades the code: the secret that its challenge was made from, and the address that it was made for
+      const trade = (body) => fetch(`${at}/api/app/token`, { method: "POST", headers: { "content-type": "application/json", "x-requested-with": "zim" }, body: JSON.stringify(body) });
+      const wrong = await trade({ code: answer.code, code_verifier: randomBytes(32).toString("base64url"), redirect_uri: redirectUri });
+      assertEqual(wrong.status, 400, "another secret gets nothing");
+      assertEqual((await trade({ code: answer.code, code_verifier: verifier, redirect_uri: redirectUri })).status, 400, "and the code is used up by that try");
+      // (a second request, the same way, and the right secret: the page is back at the server, the browser being signed in there)
+      await page.goto(`${at}/`);
+      await ready(page);
+      const second = await page.evaluate(
+        async ([redirect, ch, st]) => (await fetch("/api/app/authorize", { method: "POST", headers: { "content-type": "application/json", "x-requested-with": "zim" }, body: JSON.stringify({ redirect_uri: redirect, code_challenge: ch, code_challenge_method: "S256", state: st }) })).json(),
+        [redirectUri, challenge, state],
+      );
+      const redeemed = await trade({ code: new URL(second.redirect).searchParams.get("code"), code_verifier: verifier, redirect_uri: redirectUri });
+      assertEqual(redeemed.status, 200, "the right secret gets the token");
+      const { token } = await redeemed.json();
+      const me = await fetch(`${at}/api/me`, { headers: { authorization: `Bearer ${token}` } }).then((r) => r.json());
+      assertEqual(me.user?.email, "ada@example.org", "the token is the account's");
+    } finally {
+      listener.close();
+      await rig.close();
+    }
+  });
+
+  await scenario("an Android app's request is answered with the app's own address, which a browser may only go to when a link is pressed: the page goes there, and offers the link", async () => {
+    const rig = await programRig();
+    const { at } = rig;
+    const { createHash, randomBytes } = await import("node:crypto");
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const state = randomBytes(16).toString("base64url");
+    const page = await rig.systemBrowser.newPage();
+    rig.watch(page);
+    try {
+      await page.goto(`${at}/`);
+      await ready(page);
+      const status = await page.evaluate(async () => (await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json", "x-requested-with": "zim" }, body: JSON.stringify({ email: "ada@example.org", password: "correct horse battery" }) })).status);
+      assertEqual(status, 200, "signed in");
+      await page.goto(`${at}/?app=authorize&redirect_uri=${encodeURIComponent("org.zimnotebook.app:/callback")}&code_challenge=${challenge}&code_challenge_method=S256&state=${state}`);
+      await ready(page);
+      const consent = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Allow this app?" }) });
+      await consent.waitFor();
+      assert((await consent.innerText()).includes("Android phone or tablet"), "the page says which app asks");
+      await consent.getByRole("button", { name: "Allow" }).click();
+      const allowed = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Allowed" }) });
+      await allowed.waitFor();
+      const link = allowed.getByRole("link", { name: "Go back to the app" });
+      const href = await link.getAttribute("href");
+      const back = new URL(href);
+      assert(href.startsWith("org.zimnotebook.app:/callback?code="), `the link is the app's own address (${href})`);
+      assertEqual(back.searchParams.get("state"), state, "with the app's state");
+      if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, "program-allowed.png") });
+      // (a browser with no app for that address says so in its console, which is what it does here; it is not the page's failure)
+      problems = problems.filter((p) => !/org\.zimnotebook\.app|scheme does not have a registered handler|launch/i.test(p));
+    } finally {
+      await rig.close();
+    }
+  });
+
+  await scenario("an encrypted notebook kept sealed from an app in a native shell: what the program asks of the server and what the server holds says nothing of it, and the key for sealed copies is kept with the app's token", async () => {
+    const rig = await programRig();
+    const { at, db, program } = rig;
+    let made;
+    try {
+      made = await rig.open();
+      const { page } = made;
+      // connected, through the person's browser, as in the first scenario
+      await made.choose("Connect to an account server…");
+      await made.dialog().getByRole("button", { name: "Continue in the browser" }).click();
+      const S = await rig.browserPage();
+      const consent = await rig.allowInBrowser(S);
+      await consent.getByRole("button", { name: "Allow" }).click();
+      await made.says(`Connected to ${at} as ada@example.org`);
+      const token = program.secrets.get("account-token");
+      // an encrypted notebook, with a sentence in it, kept sealed on the server
+      await keepSealed(made, "Quokka diary", { secret: "Okapi sentence that must stay secret" });
+      assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 1, "the server has the sealed notebook");
+      const held = db.prepare("select n.id, n.title, f.path, f.bytes from notebooks n join notebook_files f on f.user_id = n.user_id and f.notebook_id = n.id").all();
+      assert(held.length >= 2, "as objects and an index");
+      assert(held.every((f) => f.id.startsWith("zsl-") && f.title === "Encrypted notebook" && /\.zseal$/.test(f.path)), `under the generic name, in sealed objects (${held.map((f) => f.path).join(", ")})`);
+      // nothing readable went through the program's requests, nor is in what the server holds
+      const needles = ["Quokka", "Okapi", "must stay secret", "Quokka diary"];
+      const sent = JSON.stringify(program.seen);
+      for (const needle of needles) {
+        assert(!sent.includes(needle), `the program was not asked to send ${needle}`);
+        assert(!held.some((f) => Buffer.from(f.bytes).toString("latin1").includes(needle) || f.path.includes(needle)), `the server holds nothing of ${needle}`);
+      }
+      // the key for sealed copies is kept by the account, wrapped, through the app's token; every request still carried the token and went to the server
+      assert(program.seen.some((r) => r.method === "PUT" && r.url.endsWith("/api/sync/keychain") && r.headers.authorization === `Bearer ${token}`), "the wrapped key was kept with the app's token");
+      assert(program.seen.filter((r) => r.headers.authorization).every((r) => r.headers.authorization === `Bearer ${token}`), "and every request had the token");
+      assertEqual(made.pageApi.length, 0, "the page asked the server for nothing itself");
+      const storage = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage }, title: document.title, hash: location.hash, state: history.state }));
+      for (const needle of [...needles, token]) assert(!storage.includes(needle), `nothing of ${needle.slice(0, 8)} is in the page's storage, title or address`);
+    } finally {
+      await made?.context.close();
+      await rig.close();
+    }
   });
 
   for (const r of results) console.log(`${r.ok ? "ok  " : "FAIL"} ${r.name}${r.ok ? ` (${r.ms} ms)` : `\n    ${r.error}`}`);

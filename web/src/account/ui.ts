@@ -1,9 +1,12 @@
-// The account's dialogs: sign in, create an account (with the code that is e-mailed), the services, sign out, take the data away, delete. They only
-// talk to the account client; what they know of the app is `say` (a line of the status bar) and `saveFile`.
+// The account's dialogs: sign in, create an account (with the code that is e-mailed), the services, sign out, take the data away, delete, and the one that lets an app that
+// was started on a computer or a phone use the account (the page it sends the person to). They only talk to the account client; what they know of the app is `say` (a line
+// of the status bar) and `saveFile`.
 import { h } from "../app/dom";
-import { showDialog } from "../app/dialogs";
+import { showDialog, showMessage } from "../app/dialogs";
+import { APP_PARAMS, appKind, dropAppRequest, keepAppRequest, parseAppRequest, takeAppRequest } from "./app-request";
+import type { AppRequest } from "./app-request";
 import { AccountClient, ApiError, CONNECT_PROBLEMS, SIGN_IN_PROBLEMS } from "./client";
-import type { Account, Offer } from "./client";
+import type { Account, AppSession, Offer } from "./client";
 
 const SERVICE_NAMES: Record<string, string> = { google: "Google", github: "GitHub" };
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -16,18 +19,23 @@ export class AccountUi {
   onChange: (() => void) | null = null;
 
   constructor(
-    private readonly say: (text: string) => void,
+    protected readonly say: (text: string) => void,
     private readonly saveFile: (fileName: string, blob: Blob) => void,
     readonly client = new AccountClient(),
   ) {}
 
-  private changed(): void {
-    window.setTimeout(() => this.onChange?.(), 0);
+  protected changed(): void {
+    setTimeout(() => this.onChange?.(), 0);
   }
 
   /** Whether the menu has anything to say about accounts. */
   get available(): boolean {
     return this.offer !== null;
+  }
+
+  /** Whether what needs a browser's own windows (a service that is allowed in its own window, and sends the person back here) can be done from here: not in a native app. */
+  get inBrowser(): boolean {
+    return true;
   }
 
   /**
@@ -40,16 +48,68 @@ export class AccountUi {
     const signedIn = url.searchParams.get("signed_in");
     const connected = url.searchParams.get("connected");
     const connectProblem = url.searchParams.get("connect_error");
-    if (problem !== null || signedIn !== null || connected !== null || connectProblem !== null) {
-      for (const name of ["account_error", "signed_in", "connected", "connect_error"]) url.searchParams.delete(name);
+    // (an app that was started on a computer or a phone sends the person here to be allowed: the request is in the address, or was kept while they signed in with a service)
+    const appAsked = url.searchParams.has("app");
+    const appRequest = appAsked ? parseAppRequest(url.searchParams) : signedIn !== null ? takeAppRequest() : null;
+    if (!appRequest && problem === null) {
+      if (appAsked || signedIn === null) dropAppRequest();
+    } else if (problem !== null) dropAppRequest();
+    const touched = problem !== null || signedIn !== null || connected !== null || connectProblem !== null || appAsked;
+    if (touched) {
+      for (const name of ["account_error", "signed_in", "connected", "connect_error", ...APP_PARAMS]) url.searchParams.delete(name);
       history_.replaceState(history_.state, "", url.pathname + (url.search || "") + url.hash);
     }
-    if (problem === null && signedIn === null && connected === null && connectProblem === null) return;
+    if (!touched) return;
+    if (appAsked && !appRequest) return this.say("That request from an app is not valid. Start it again from the app.");
     await this.refresh();
     if (problem !== null) this.say(SIGN_IN_PROBLEMS[problem] ?? SIGN_IN_PROBLEMS.failed!);
     else if (signedIn !== null && this.account) this.say(`Signed in as ${this.account.email}.`);
     else if (connectProblem !== null) this.say(CONNECT_PROBLEMS[connectProblem] ?? CONNECT_PROBLEMS.failed!);
     else if (connected !== null) this.say("The service is connected. Choose it in “Keep this notebook on the server…”.");
+    if (appRequest && problem === null) await this.allowApp(appRequest);
+  }
+
+  /**
+   * An app asks to use the account. The person signs in here if they are not (with a service, the page leaves and comes back to `start`, which goes on from the request that was kept),
+   * and is asked, plainly, whether to allow it; the answer is the app's own return address with a code, which this page then goes to.
+   */
+  private async allowApp(request: AppRequest): Promise<void> {
+    if (!this.account) {
+      // (kept while the person signs in: with a service, the page leaves, and comes back to `start`, which takes the request from here)
+      keepAppRequest(request);
+      this.say("Sign in to allow the app that asked.");
+      await this.signInDialog();
+      if (!this.account) return;
+      dropAppRequest();
+    }
+    const account = this.account;
+    const kind = appKind(request.redirectUri);
+    const what = kind === "android" ? "The Zim Notebook app on an Android phone or tablet" : "The Zim Notebook program on a computer";
+    let back: string | null = null;
+    await showDialog({
+      title: "Allow this app?",
+      body: [
+        h("p", {}, what, " is asking to use your account ", h("strong", { text: account.email }), "."),
+        "It will be able to keep your notebooks on this server, as this page can. It will not be able to change your password, delete your account or download your data.",
+        "Allow it only if you have just asked that app to connect. You can sign it out later, from your account.",
+      ],
+      confirm: "Allow",
+      working: "Allowing…",
+      focus: "cancel",
+      submit: async () => {
+        try {
+          back = (await this.client.authorizeApp({ redirect_uri: request.redirectUri, code_challenge: request.challenge, code_challenge_method: "S256", state: request.state })).redirect;
+        } catch (error) {
+          return this.explain(error);
+        }
+      },
+    });
+    dropAppRequest();
+    if (!back) return this.say("The app was not allowed. You can close this page.");
+    const url: string = back;
+    // (a phone's browser may only go to an app's own address when a link is pressed: the link is there for that, and the page goes on its own where it may)
+    window.setTimeout(() => window.location.assign(url), 0);
+    await showMessage("Allowed", "The app was allowed. This page is taking you back to it. If nothing happens, press the link below, then close this page.", h("p", {}, h("a", { class: "service-link", href: url, text: "Go back to the app" })));
   }
 
   /** Ask the server what it offers and who is signed in (a server that doesn't answer is no account server: nothing is shown). */
@@ -216,7 +276,7 @@ export class AccountUi {
     const account = this.account;
     if (!account) return;
     const services = account.signIns.map((s) => SERVICE_NAMES[s] ?? s);
-    let next: "delete" | null = null;
+    let next: "delete" | "apps" | null = null;
     await showDialog({
       title: "Your account",
       body: [
@@ -228,11 +288,51 @@ export class AccountUi {
       noCancel: true,
       actions: [
         { label: "Sign out", run: (close) => (close(), void this.signOut()) },
+        { label: "Connected apps…", run: (close) => ((next = "apps"), close()) },
         { label: "Download my data", run: () => void this.download() },
         { label: "Delete the account…", run: (close) => ((next = "delete"), close()) },
       ],
     });
     if (next === "delete") await this.deleteDialog();
+    else if (next === "apps") await this.appsDialog();
+  }
+
+  /** The apps that were signed in to the account (the program on a computer, the app on a phone), each with the way to sign it out: what to do about a phone that was lost. */
+  private async appsDialog(): Promise<void> {
+    let apps: AppSession[];
+    try {
+      apps = await this.client.listApps();
+    } catch (error) {
+      this.say(`Couldn't list the apps: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const day = (seconds: number) => new Date(seconds * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    const list = h("ul", { class: "app-list" });
+    const empty = h("p", { class: "field-hint", text: "No app is connected: the program on a computer or the app on a phone, when you connect one, is listed here." });
+    const draw = () => {
+      list.replaceChildren(
+        ...apps.map((app) => {
+          const button = h("button", { type: "button", class: "secondary", text: "Sign out", "aria-label": `Sign out ${app.label}, connected ${day(app.connectedAt)}` });
+          button.addEventListener("click", () => {
+            button.disabled = true;
+            this.client.revokeApp(app.id).then(
+              () => {
+                apps = apps.filter((a) => a.id !== app.id);
+                draw();
+              },
+              (error: unknown) => {
+                button.disabled = false;
+                this.say(`Couldn't sign it out: ${error instanceof Error ? error.message : String(error)}`);
+              },
+            );
+          });
+          return h("li", {}, h("span", {}, h("strong", { text: app.label }), ` — connected ${day(app.connectedAt)}, last used ${day(app.lastUsed)}`), button);
+        }),
+      );
+      empty.hidden = apps.length > 0;
+    };
+    draw();
+    await showDialog({ title: "Connected apps", body: ["These apps can keep your notebooks on the server. Sign out one that you don't use any more, or one that was lost.", list, empty], confirm: "Close", noCancel: true });
   }
 
   async signOut(): Promise<void> {
@@ -279,7 +379,7 @@ export class AccountUi {
   }
 
   /** A failure as a line for a dialog (the server's own words are written for a person; a wait is said with its time). */
-  private explain(error: unknown): string {
+  protected explain(error: unknown): string {
     if (error instanceof ApiError) return error.status === 429 && error.retryAfter ? `Too many tries. Wait ${Math.ceil(error.retryAfter / 60)} minute(s) and try again.` : error.message;
     return error instanceof Error ? error.message : String(error);
   }

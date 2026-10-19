@@ -42,6 +42,59 @@ export interface FolderHooks {
   apply(id: string, change: FolderChange): Promise<void>;
 }
 
+/** One request that the shell makes for the page: a method, an address, headers and a text body (every body of the account server's is JSON). */
+export interface NetRequest {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body?: string;
+}
+
+/** What the server answered: the status, the headers (names in lower case) and the body as text. */
+export interface NetResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+/** What the person's own browser came back to the app with, after they signed in there (the query of the return address). */
+export interface SignInResult {
+  code?: string;
+  state?: string;
+  error?: string;
+}
+
+/** Signing in to an account through the person's own browser (`web/src/account/native.ts`; `server/src/apps.mjs` is the other end). */
+export interface SignInHooks {
+  /** Get ready to be sent back to, for a request that carries this `state`, and say where the browser is to be sent back to (an address that only this app receives). */
+  begin(state: string): Promise<{ redirectUri: string }>;
+  /** Open `url` in the person's browser and wait for it to come back to the return address. Rejects when `cancel` was called or the wait ran out. */
+  wait(url: string): Promise<SignInResult>;
+  /** Stop waiting (and stop being reachable at the return address). */
+  cancel(): void;
+}
+
+/** What has to stay secret on this device, kept where the system keeps such things (a keychain) or, where there is none, in a file that only the person's account can read. */
+export interface SecretHooks {
+  get(name: string): Promise<string | null>;
+  set(name: string, value: string): Promise<void>;
+  remove(name: string): Promise<void>;
+}
+
+/**
+ * What a shell gives for an account. The page's content policy lets it ask nowhere but its own address, so in a shell the account server is reached by the shell itself
+ * (`request`: no cookies, no cross-site rules to get around, and only what the shell checks), the person signs in in their own browser (`signIn`), and the token that this
+ * gives lives in `secrets`, never in the page's own storage.
+ */
+export interface AccountHooks {
+  /** The address of the server that the shell suggests when the person connects (put there by whoever set the app up: a team's server, a test); nothing is asked of it until the person confirms. */
+  defaultServer?: string | null;
+  /** An https request (or http, to this computer's own address). Rejects with words for a person when it can't be made (the certificate is not trusted, the server is not there). */
+  request(request: NetRequest): Promise<NetResponse>;
+  signIn: SignInHooks;
+  secrets: SecretHooks;
+}
+
 /** What a shell does for the app that a browser does itself. */
 export interface ShellHooks {
   /** What this shell is, for the "About this version" dialog: the app's version and the version of the web build inside it. */
@@ -53,6 +106,8 @@ export interface ShellHooks {
   saveFile?(fileName: string, blob: Blob): Promise<void>;
   /** Notebooks kept as folders of files on the computer. */
   folders?: FolderHooks;
+  /** An account on a server, reached by the shell and signed in through the person's browser. */
+  account?: AccountHooks;
 }
 
 /** The part of the window that a shell fills in. */

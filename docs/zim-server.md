@@ -24,7 +24,7 @@ Safeguards (each has a test that fails without it; the mutants were tried):
 - Requests that change something need the header `X-Requested-With: zim`, a same-site `Origin` and a same-origin `Sec-Fetch-Site`; JSON only, 16 KB at most; answers are `no-store`.
 - OAuth: a one-use `state` (stored hashed), PKCE (S256, the verifier stays on the server), and a cookie that binds the answer to the browser that started it.
 - Rate limits kept in the database (per address and per client): sign-ups, sign-ins, codes, resets, deletions → `429` with `Retry-After`.
-- The page's content policy is unchanged (`connect-src 'self'`); the service worker lets `/api/` through to the network; a native shell (Android, desktop) shows nothing of accounts (no `INTERNET`).
+- The page's content policy is unchanged (`connect-src 'self'`); the service worker lets `/api/` through to the network; a native shell does not ask the server from the page either: the program (or, on a phone, the app) makes the requests, with a token that it got through the person's browser (*Apps signed in*, below).
 
 ## Notebooks on the server (the storage side)
 
@@ -198,7 +198,7 @@ refused) and, when the connection is removed, **tells the service that the acces
 
 - Not done: a connected service for the encrypted notebooks' sealed copy, a sync of connected services from the native apps, and other services (the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what a new one plugs into).
 
-## Apps signed in (E17: `server/src/apps.mjs`; the program and the phone's app are E17b and E17c)
+## Apps signed in (E17: `server/src/apps.mjs`, `web/src/account/native.ts`; the program on a computer is E17b, the phone's app E17c)
 
 The program on a computer and the app on a phone are signed in the way RFC 8252 asks of an app that sends the person to **their own browser**, with PKCE (RFC 7636). The app never sees the password, nor the browser's session:
 
@@ -212,6 +212,13 @@ What the app then has is a **bearer token** (`Authorization: Bearer …`; 32 ran
 The web app lists what is connected and ends one (`GET /api/app/sessions`, `POST /api/app/revoke`; a lost phone). An app signs itself out with `POST /api/logout`. A new password (changed or reset) ends every app's token with the other sessions. Limits (kept in the database): 20 authorizations per account and 30 trades per address, per ten minutes. Not decided by a link: the name in the list is fixed (*Zim Notebook for computers*, *… for Android*), never text taken from the address.
 
 Known limit, as with every app that uses a loopback or scheme return address: a person who is made to press *Allow* for a request that someone else made (their challenge, a return address on this same computer or phone) gives that someone a token. The page says what it is asking, and the list in the account shows every app with the date of its last use.
+
+### The app's side (`web/src/account/`)
+
+- **`native.ts`**: `NativeAccount`. The address of the server (`parseServer`: only its origin; https, or http to this computer's own address for a server being tried out; no name, password or folder), PKCE (`challengeOf`, `randomToken`), and the flow (`connect`): it first asks the server whether it is one (`/api/providers`, with the shell's words if the certificate is not trusted), sends the browser with the challenge and a state, checks the state of the answer (nothing of an answer is shown but fixed text), trades the code, keeps the token in the shell's keychain and the address in the page's settings; a token that can't be kept is ended on the server at once. A `fetch` for the account client that goes through the shell to that server's `/api/` addresses only (nothing the client asks can go elsewhere), with the token; `disconnect` tells the server and forgets everything.
+- **`native-ui.ts`**: the dialogs: the address (suggested by the shell if it has one), the wait for the browser (the address that was opened is shown, for a browser that did not open; Cancel and Escape stop the wait at once), the account dialog (says that the password, the data and the other apps are dealt with in a browser). The server is asked who the app is at the start and when the menu opens; a token that it no longer knows is forgotten and the app says it was signed out. A service that needs a browser's own window (Dropbox, Google Drive) can't be connected from an app: the dialog says to do it in the web app, and lists it once connected.
+- **`ui.ts`, `app-request.ts`**: the page that the app sends the browser to (`/?app=authorize&redirect_uri=…&code_challenge=…&code_challenge_method=S256&state=…`): the person signs in as usual and is asked *Allow this app?* (what is asked, what is not given, **Cancel has the focus** so that a stray Enter does not allow it; the server's headers forbid framing the page, so it can't be clicked from another page), then the page goes to the app's return address, and shows a link to it for a phone's browser, which may only go to an app's address when a link is pressed. The request is kept in the tab (`sessionStorage`, ten minutes, once) only while signing in with a service leaves the page; a plain visit drops what was left. The account dialog has *Connected apps…*.
+- **What a shell gives** (`web/src/app/shell.ts`, `window.__zimShell.account`): `{ request, signIn: { begin, wait, cancel }, secrets: { get, set, remove }, defaultServer? }`. The desktop program: `docs/zim-desktop-shell.md`; the Android app: `docs/zim-mobile-shell.md`.
 
 ## Run it
 

@@ -2,7 +2,10 @@
 // own but what a WebView lacks: the page's script (shell.js) and a command that saves a file where the person says.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod account;
 mod folders;
+mod secrets;
+mod signin;
 
 use percent_encoding::percent_decode_str;
 use std::path::Path;
@@ -18,11 +21,19 @@ fn debugging() -> bool {
     std::env::var_os("ZIM_DESKTOP_DEBUG").is_some()
 }
 
+/// The address of the account server that the program suggests when the person connects to one: `ZIM_ACCOUNT_SERVER` in the program's environment (a computer that is set
+/// up for a team, a test), or none. It is only a suggestion in the dialog: nothing is asked of that address until the person confirms.
+fn default_server() -> Option<String> {
+    std::env::var("ZIM_ACCOUNT_SERVER").ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+}
+
 /// The script that runs in the page before the app, with the versions filled in.
 fn shell_script() -> String {
     include_str!("../shell.js")
         .replace("__ZIM_VERSION__", &format!("{} · web build {}", env!("CARGO_PKG_VERSION"), env!("ZIM_WEB_BUILD")))
         .replace("__ZIM_DEBUG__", if debugging() { "true" } else { "false" })
+        // (as a JSON string, which is also a string of the page's script, or `null`)
+        .replace("__ZIM_ACCOUNT_SERVER__", &serde_json::to_string(&default_server()).unwrap_or_else(|_| "null".into()))
 }
 
 /// What the page says about its errors, when asked to (`debugging`).
@@ -169,12 +180,88 @@ async fn fs_commit(registry: Registry<'_>, id: String, txn: String, plan: folder
     folders::commit(&folder_path(&registry, &id)?, &txn, &plan)
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// the account (the work is in account.rs, signin.rs and secrets.rs; shell.js is the page's side of it)
+
+/// What the account needs of the program: the requests to the server, the wait for the browser's return, and the place for the token.
+struct Account {
+    net: account::Net,
+    signin: signin::SignIn,
+    secrets: secrets::Secrets,
+}
+
+/// A request to the account server, made by the program (no cookies, no redirects, the system's trusted authorities).
+#[tauri::command]
+async fn account_request(account: State<'_, Account>, request: account::NetRequest) -> Result<account::NetResponse, String> {
+    account.net.send(request).await
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Begun {
+    redirect_uri: String,
+}
+
+/// Open a port of this computer for the browser to be sent back to, for a request that carries `state`; the return address is what comes back.
+#[tauri::command]
+async fn account_sign_in_begin(account: State<'_, Account>, state: String) -> Result<Begun, String> {
+    let port = account.signin.begin(&state).await?;
+    Ok(Begun { redirect_uri: format!("http://127.0.0.1:{port}/callback") })
+}
+
+/// Open the person's browser at `url` and wait for it to come back to the port: what it came back with.
+#[tauri::command]
+async fn account_sign_in_wait(account: State<'_, Account>, url: String) -> Result<signin::Callback, String> {
+    let url = account::check_browser_url(&url)?;
+    // (if no browser can be opened here, the wait goes on: the page shows the address, for the person to open themselves)
+    account.signin.wait(|| drop(open::that_detached(url.as_str())), signin::WAIT).await
+}
+
+/// Stop waiting for the browser.
+#[tauri::command]
+fn account_sign_in_cancel(account: State<'_, Account>) {
+    account.signin.cancel();
+}
+
+#[tauri::command]
+fn account_secret_get(account: State<'_, Account>, name: String) -> Result<Option<String>, String> {
+    account.secrets.get(&name)
+}
+
+#[tauri::command]
+fn account_secret_set(account: State<'_, Account>, name: String, value: String) -> Result<(), String> {
+    account.secrets.set(&name, &value)
+}
+
+#[tauri::command]
+fn account_secret_remove(account: State<'_, Account>, name: String) -> Result<(), String> {
+    account.secrets.remove(&name)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![save_file, debug_log, fs_roots, fs_pick, fs_forget, fs_list, fs_read, fs_stage, fs_commit])
+        .invoke_handler(tauri::generate_handler![
+            save_file,
+            debug_log,
+            fs_roots,
+            fs_pick,
+            fs_forget,
+            fs_list,
+            fs_read,
+            fs_stage,
+            fs_commit,
+            account_request,
+            account_sign_in_begin,
+            account_sign_in_wait,
+            account_sign_in_cancel,
+            account_secret_get,
+            account_secret_set,
+            account_secret_remove
+        ])
         .setup(|app| {
             app.manage(Mutex::new(folders::Registry::load(app.path().app_data_dir()?.join("folders.json"))));
+            app.manage(Account { net: account::Net::new()?, signin: signin::SignIn::default(), secrets: secrets::Secrets::new(Box::new(secrets::SystemKeychain), app.path().app_data_dir()?) });
             let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Zim Notebook")
                 .inner_size(1200.0, 800.0)
