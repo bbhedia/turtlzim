@@ -24,7 +24,7 @@ import { TurtlStore } from "../vault/turtl-store";
 import { createZip, readZip } from "../zip";
 import { SealedUi } from "../account/sealed";
 import { VaultSeal } from "../vault/seal";
-import { SyncUi } from "../account/sync-ui";
+import { keepsElsewhere, SyncUi } from "../account/sync-ui";
 import type { SyncState } from "../account/sync-ui";
 import { NativeAccount } from "../account/native";
 import { NativeAccountUi } from "../account/native-ui";
@@ -716,7 +716,7 @@ export class App {
     const children: Node[] = [h("span", { class: "notebook-title", text: this.session.title })];
     if (this.isPrivate) children.push(h("span", { class: "badge enc", text: "encrypted" }));
     // (a notebook that is kept elsewhere says so next to its title; one that is only here says nothing: that is the usual case, and the menu says it for every notebook)
-    const where = this.session.info.kind === "open" || this.session.info.kind === "encrypted" ? this.notebookBadges(this.session.info).find((b) => b.kind === "where" && b.synced) : undefined;
+    const where = keepsElsewhere(this.session.info.kind) ? this.notebookBadges(this.session.info).find((b) => b.kind === "where" && b.synced) : undefined;
     if (where) {
       // (the word “synced” and the state are two parts, so that a narrow screen can keep only the state, and only when it needs the person)
       const [first, ...rest] = where.short.split(" · ");
@@ -724,7 +724,7 @@ export class App {
     }
     children.push(h("span", { class: "caret-down", "aria-hidden": "true" }));
     this.els.notebookButton.replaceChildren(...children);
-    this.els.notebookButton.title = `${this.session.title}${this.isPrivate ? " · encrypted" : ""}${this.session.info.kind === "open" || this.session.info.kind === "encrypted" ? ` · ${this.notebookBadges(this.session.info).find((b) => b.kind === "where")?.text ?? ""}` : ""} — notebooks`;
+    this.els.notebookButton.title = `${this.session.title}${this.isPrivate ? " · encrypted" : ""}${keepsElsewhere(this.session.info.kind) ? ` · ${this.notebookBadges(this.session.info).find((b) => b.kind === "where")?.text ?? ""}` : ""} — notebooks`;
   }
 
   /**
@@ -734,7 +734,7 @@ export class App {
   private notebookBadges(info: NotebookInfo): Array<{ kind: "enc" | "where"; text: string; short: string; synced: boolean; state?: SyncState }> {
     const badges: Array<{ kind: "enc" | "where"; text: string; short: string; synced: boolean; state?: SyncState }> = [];
     if (info.kind === "encrypted") badges.push({ kind: "enc", text: "Encrypted", short: "encrypted", synced: false });
-    const status = info.kind === "open" || info.kind === "encrypted" ? this.sync.statusOf(info.id) : null;
+    const status = keepsElsewhere(info.kind) ? this.sync.statusOf(info.id) : null;
     if (status) {
       const words: Record<SyncState, string> = { ok: "up to date", pending: "waiting to be sent", sending: "syncing…", conflict: "needs you", error: "problem", offline: "offline" };
       const state = status.state ? ` · ${words[status.state]}` : "";

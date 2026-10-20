@@ -223,17 +223,18 @@ fn account_sign_in_cancel(account: State<'_, Account>) {
     account.signin.cancel();
 }
 
-#[tauri::command]
+// (a keychain can wait for the person to unlock it: these run on the async runtime's threads, not on the one that draws the window, which a command without `async` would block)
+#[tauri::command(async)]
 fn account_secret_get(account: State<'_, Account>, name: String) -> Result<Option<String>, String> {
     account.secrets.get(&name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn account_secret_set(account: State<'_, Account>, name: String, value: String) -> Result<(), String> {
     account.secrets.set(&name, &value)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn account_secret_remove(account: State<'_, Account>, name: String) -> Result<(), String> {
     account.secrets.remove(&name)
 }

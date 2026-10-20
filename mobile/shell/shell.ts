@@ -1,9 +1,12 @@
 // The shell's script. It runs in the WebView before the web app starts, and gives the app the things that a WebView does not do by
 // itself (web/src/app/shell.ts says which hooks there are and what a shell without one is). The web app depends on none of this.
 import { App } from "@capacitor/app";
+import { registerPlugin } from "@capacitor/core";
+import type { PluginListenerHandle } from "@capacitor/core";
 import { Directory, Filesystem } from "@capacitor/filesystem";
 import { Share } from "@capacitor/share";
-import type { ShellHooks } from "../../web/src/app/shell";
+import type { AccountHooks, NetRequest, NetResponse, ShellHooks, SignInHooks, SignInResult } from "../../web/src/app/shell";
+import { answerOf, REDIRECT_URI } from "./callback";
 
 /** The version of this app and of the web build inside it, put in by scripts/prepare.mjs. */
 declare const __SHELL_VERSION__: string;
@@ -56,5 +59,71 @@ void App.addListener("backButton", () => {
   else void App.exitApp();
 });
 
-const hooks: ShellHooks = { version: __SHELL_VERSION__, saveFile };
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// an account on a server (web/src/account/native.ts is the page's side). The page's content policy lets it ask nowhere but its own address, so the app's own code makes
+// the requests and keeps the token (android/app/src/main/java/org/zimnotebook/app/ZimNativePlugin.java), and the person signs in in their own browser, which sends them
+// back to this app by an address of its own that Android hands to it (`appUrlOpen`).
+
+interface ZimNative {
+  request(options: NetRequest): Promise<NetResponse>;
+  openBrowser(options: { url: string }): Promise<void>;
+  secretGet(options: { name: string }): Promise<{ value: string | null }>;
+  secretSet(options: { name: string; value: string }): Promise<void>;
+  secretRemove(options: { name: string }): Promise<void>;
+}
+const ZimNative = registerPlugin<ZimNative>("ZimNative");
+
+/** How long the browser is waited for: long enough to sign in, read the page and perhaps make an account (a code is mailed). */
+const WAIT_MS = 5 * 60 * 1000;
+
+let expectedState: string | null = null;
+let stopWaiting: ((reason: Error) => void) | null = null;
+
+const signIn: SignInHooks = {
+  async begin(state) {
+    stopWaiting?.(new Error("Another sign-in was begun."));
+    expectedState = state;
+    return { redirectUri: REDIRECT_URI };
+  },
+  wait(url) {
+    return new Promise<SignInResult>((resolve, reject) => {
+      let finished = false;
+      let listener: PluginListenerHandle | undefined;
+      const end = (finish: () => void) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        void listener?.remove();
+        stopWaiting = null;
+        expectedState = null;
+        finish();
+      };
+      const timer = setTimeout(() => end(() => reject(new Error("The browser did not come back in time."))), WAIT_MS);
+      stopWaiting = (reason) => end(() => reject(reason));
+      void App.addListener("appUrlOpen", (event) => {
+        const answer = answerOf(event.url, expectedState);
+        if (answer) end(() => resolve(answer));
+      }).then((handle) => {
+        listener = handle;
+        if (finished) void handle.remove();
+      });
+      ZimNative.openBrowser({ url }).catch((error: unknown) => end(() => reject(error instanceof Error ? error : new Error(String(error)))));
+    });
+  },
+  cancel() {
+    stopWaiting?.(new Error("The sign-in was cancelled."));
+  },
+};
+
+const account: AccountHooks = {
+  request: (request) => ZimNative.request(request),
+  signIn,
+  secrets: {
+    get: async (name) => (await ZimNative.secretGet({ name })).value,
+    set: (name, value) => ZimNative.secretSet({ name, value }),
+    remove: (name) => ZimNative.secretRemove({ name }),
+  },
+};
+
+const hooks: ShellHooks = { version: __SHELL_VERSION__, saveFile, account };
 (window as unknown as { __zimShell?: ShellHooks }).__zimShell = hooks;

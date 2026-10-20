@@ -196,7 +196,8 @@ refused) and, when the connection is removed, **tells the service that the acces
   - Then, in `~/.local/state/zim-server/oauth.json` (or `ZIM_DROPBOX_CLIENT_ID` / `ZIM_DROPBOX_CLIENT_SECRET`, `ZIM_GDRIVE_CLIENT_ID` / `ZIM_GDRIVE_CLIENT_SECRET`): `{ "dropbox": { "clientId": "…", "clientSecret": "…" }, "gdrive": { … } }` beside the sign-in apps' entries
     (these are separate apps, with their own ids, from the Google and GitHub sign-in ones).
 
-- Not done: a connected service for the encrypted notebooks' sealed copy, a sync of connected services from the native apps, and other services (the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what a new one plugs into).
+- Native apps (E17): the program on a computer and the app on a phone use the services that were connected (a WebDAV or Nextcloud folder, a GitHub or GitLab repository), through the account and its token, and connect those that need no window of a browser themselves; Dropbox and Google Drive are connected in the web app, in a browser, and are listed in the apps once they are. Nothing of this was tried against a real service.
+- Not done: other services (the `Connectors` registry, `driver.list/read/write/folders/test` and the client's `Remote` are what a new one plugs into).
 
 ## Apps signed in (E17: `server/src/apps.mjs`, `web/src/account/native.ts`; the program on a computer is E17b, the phone's app E17c)
 

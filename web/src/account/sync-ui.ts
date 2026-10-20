@@ -65,8 +65,12 @@ export interface SyncStatus {
   state?: SyncState;
 }
 
-/** The notebooks that can be kept elsewhere: ones that are not encrypted, as they are, and encrypted ones, sealed. (A folder of Zim files on the computer is its own copy.) */
-const kept = (kind: NotebookInfo["kind"]): boolean => kind === "open" || kind === "encrypted";
+/**
+ * The notebooks that can be kept elsewhere: ones that are not encrypted, as they are (in the browser's storage, or, in the desktop program, in a folder of Zim files: the folder is
+ * the working copy, and what is kept on the server is the same files), and encrypted ones, sealed.
+ */
+export const keepsElsewhere = (kind: NotebookInfo["kind"]): boolean => kind === "open" || kind === "folder" || kind === "encrypted";
+const kept = keepsElsewhere;
 
 /** The SHA-256 of a wrapped key, in hex, as the account's server names a key: what a replacement or a deletion says it saw. */
 async function sumOfKey(wrapped: string): Promise<string> {

@@ -39,8 +39,9 @@ Capacitor is used, and has not been started.
 - **The page's content policy is in the page.** The web server sends a `Content-Security-Policy` header; a WebView has no server, so
   `prepare.mjs` puts the same policy (it is exported by `web/scripts/serve.mjs`, `frame-ancestors` apart, which a `<meta>` can't carry) in
   `index.html`.
-- **No permission at all in the manifest**, `INTERNET` included: the app keeps its notebooks on the device and asks nothing of the network
-  (the web files are in the app). When the sync server comes, the permission is added on purpose. And **no automatic backup**
+- **One permission in the manifest, `INTERNET`**, for the app's own requests to an account server that the person typed the address of (below; since E17). The web files are
+  in the app and the page asks the network for nothing (its content policy allows none), so without an account the app does not use it. Nothing else is asked for (the other line that
+  `aapt2 dump permissions` shows is the app's own, which AndroidX adds). And **no automatic backup**
   (`allowBackup="false"`): the notebooks and the encrypted vault stay in this app's storage and are not sent to a cloud backup; to keep a copy,
   export a notebook (zip) or back the vault up (a file that is still encrypted).
 - **Files are handed to the system's own sheet**, not downloaded: a WebView does nothing with a link to a Blob that has `download`, which is
@@ -54,6 +55,23 @@ Capacitor is used, and has not been started.
 - **Icons and the start screen** are the web app's icon (`mobile/scripts/make-icons.py`, from `web/public/icons`) on its blue.
 
 **Not in the Android WebView**: *Import a folder…* (a folder picker is not a thing of a WebView's file chooser; import a zip instead).
+
+## An account on a server (E17)
+
+The app can be connected to an account on an account server (`docs/zim-server.md`, *Apps signed in*), to keep notebooks in step with other devices. As in the desktop program
+(`docs/zim-desktop-shell.md`) the page's content policy is **unchanged** (it allows no network at all), so **the app makes the requests**, not the WebView, and the person signs in in
+**their own browser**: the app never sees the password.
+
+| | |
+|---|---|
+| The page's side | `web/src/account/native.ts`, `native-ui.ts`; `mobile/shell/shell.ts` sets `window.__zimShell.account = { request, signIn, secrets }` over the plugin below |
+| The plugin | `ZimNativePlugin.java` (a Capacitor plugin of the app's own, registered in `MainActivity`: no third-party plugin) and `AccountRules.java` (the rules of what may be asked, with nothing of Android in them: tried on a plain JVM). `request`: OkHttp (the one new dependency, `com.squareup.okhttp3:okhttp:4.12.0`: `HttpURLConnection` has no PATCH, and a redirect must not be followed), for an https address, or http to this device only; an `/api/` path (the one OkHttp makes of the address: it resolves a dot segment however it is written, `%2e%2e` too, and the check reads it the same way); no name or password in it; four headers of the page's; no redirect; the system's trusted authorities, **no user-installed one** (`network_security_config.xml`, which also allows plain http to `localhost` and `127.0.0.1` only: a server being tried out); 16 MiB out and 32 MiB in. A certificate that the device does not trust is refused, and the dialog says so. `openBrowser`: ACTION_VIEW with BROWSABLE, for an https address or this device's own |
+| The return | an intent filter of `MainActivity` for the scheme `org.zimnotebook.app` (the reverse of the app's id, which is what RFC 8252 asks of an address of this kind); the activity is `singleTask`, so Android gives the address to the app that is running (`appUrlOpen`). The shell takes it only if it is `org.zimnotebook.app:/callback` **with the state that was given** (any app can send this one an address like it), and waits five minutes at most; Cancel and Escape end the wait. If Android ended the app while the person was in the browser, the answer finds a new app that knows nothing of the request: the sign-in is started again |
+| The token | `secretGet/Set/Remove`: AES-256-GCM with a key in the **Android Keystore** (it never leaves it), the sealed value in the app's own private preferences (and no backup of them); a value that can't be opened (a lost key) is forgotten, and the person signs in again |
+| The permission | `android.permission.INTERNET`, the one, for these requests |
+| The page | in Chrome the page that the app sends the person to asks *Allow this app?* (the Android app, named as such); after *Allow* the page goes to the app's address, and shows a link for the browsers that only go to an app's address when a link is pressed |
+
+**Not done**: a **self-signed certificate** (the device trusts what it trusts; a user-installed authority is not accepted by this app, on purpose); pinning; iOS; the return by an `https` App Link (which needs a domain of our own and its `assetlinks.json`: the scheme is what works without one, and what another app could also claim; the code is worth nothing without the secret that only this app has).
 
 ## The tools, installed without root
 
@@ -95,10 +113,24 @@ Then open `https://ADDRESS:8443/zim-notebook.apk` on the phone (or copy the file
   emulator's two emulated cores; a phone is much faster (`npm run measure:unlock` has the numbers for a browser), but it has not been measured on one.
   These were driven by hand through the WebView's DevTools socket (`adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>`, then
   a small CDP client: Playwright's `connectOverCDP` does not take a WebView, `Browser.setDownloadBehavior` is not supported), with `adb` for taps,
-  keys and screenshots (`mobile/scripts/emulator.sh`). They are now `npm run test:device` in `mobile/` (12 checks: start, hooks, no worker, no network
-  permission, keyboard and bar, save and restart, back twice, the share sheet; `VAULT=1` adds the encrypted notebook, minutes on an emulator). Removing the back
-  handling from `shell.ts` makes two of them fail.
-- The APK's manifest (`aapt2 dump xmltree`): no `INTERNET` permission, `allowBackup=false`, `adjustResize`, target SDK 36.
+  keys and screenshots (`mobile/scripts/emulator.sh`). They are now `npm run test:device` in `mobile/` (the basic checks: start, hooks, no worker, the exact list of
+  permissions, keyboard and bar, save and restart, back twice, the share sheet; `VAULT=1` adds the encrypted notebook, minutes on an emulator; `ONLY=account` runs the account's checks alone,
+  `ACCOUNT=0` leaves them out). Removing the back handling from `shell.ts` makes two of them fail.
+- The APK's manifest (`aapt2 dump xmltree`): `INTERNET` the only permission (`aapt2 dump permissions`: it and the app's own), `allowBackup=false`, `adjustResize`, target SDK 36, a network security configuration.
+- **The account** (E17, on the emulator, with the **real Chrome** of the emulator as the person's browser): the servers are on this machine (the account server with its own database; a second one over https
+  with an authority of its own, which the device does not know; a third that answers with a redirect) and the device reaches them by `adb reverse`; the emulator is a userdebug one (`adb root`, Chrome's flags
+  file for its first-run questions, the notification permission given to Chrome in advance), and Chrome is driven through its DevTools socket (`chrome_devtools_remote`: the same small client as for the WebView).
+  What `npm run test:device` checks: a secret is kept sealed (the app's storage holds its name and not its value), is there after the app is stopped and started, and is forgotten when removed; a request is
+  made by the app with the headers of an app only (no cookie, no origin, no referrer), a redirect is the answer and is not followed, a server that is not on the device over plain http, a path outside `/api/` (also one that climbs out of it by `%2e%2e`), a name and
+  password in the address and a file are refused (when the check in the plugin is taken out, the system's own network policy still refuses plain http to another server: it says *CLEARTEXT communication to example.org not permitted*),
+  a server whose certificate the device does not trust is refused with the reason; the browser is not opened at a file, a script, an intent or a web page over http; then the **whole sign-in**: the app opens Chrome at
+  the server's page, the person signs in there, Chrome asks *Allow this app?* for the Android app (Cancel focused), **an address like the app's own from another app, with another state, does not end the wait**,
+  a real tap on *Allow* makes Chrome go to `org.zimnotebook.app:/callback?…`, Android hands it to the app, which is in front again and says it is connected; the server has one session, named for Android; the token is in
+  the app's keystore-sealed storage and not in the clear, nor in what the page's scripts can read; the page itself asked the server for nothing; a notebook is kept on the server with the token; the app is still connected
+  after it is stopped and started; *Sign out of this app* ends the token on the server and in the app; and an address like the app's own, with nothing waiting for it, does nothing.
+  `gradlew testDebugUnitTest` (4 tests of `AccountRules`, on a plain JVM; 14 mutants, all caught; four of them are about the path as the client reads it: a pre-delivery review found that the first form of the rule read the raw address while OkHttp resolves a dot segment written `%2e%2e`, so a request could leave `/api/`; the address is now read as the client will read it, and the device test tries it on the real plugin), `web/test/mobile-callback.test.ts` (3 tests: the browser's return, and the server, the page, the manifest and the app's id
+  all agreeing on the app's address; 4 mutants, all caught), and 5 mutants of the plugin tried through the device test (redirects followed, every header going on, the browser opened at any address, a secret's name that may be a path,
+  a request to any address), all caught.
 - `web/test/shell.test.ts`, `pwa-page.test.ts` (the native phase), `mobile-page.test.ts` (the page of the shell: policy after the charset, the shell's
   script before the app's), `serve.test.ts` (a file given out at one address), the browser scenario "in an app of the phone's store…" (Chromium,
   with a stand-in `window.Capacitor` and `window.__zimShell`), and mutants of each: all caught.

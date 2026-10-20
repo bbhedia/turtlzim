@@ -241,7 +241,10 @@ docker compose up                   # Postgres + server (define compose file)
   `window.Capacitor` and gives what a WebView lacks through `window.__zimShell` (`web/src/app/shell.ts`: a hook for saving a file, the version);
   something a browser does by itself and a WebView does not goes through a hook set by `mobile/shell/shell.ts`, never into the web app's imports.
   In a shell there is no service worker (the code is the app), the page carries the web server's content policy in a `<meta>`, and the manifest has
-  no permission it does not use (no `INTERNET` until sync exists) and no backup. Asked 2026-10-13 whether Flutter would be better for the native
+  no permission it does not use and no backup: **the one permission is `INTERNET`** (E17), for the app's own requests to an account server (`ZimNativePlugin`: OkHttp, https or loopback http, `/api/` addresses,
+  four headers of the page's, no redirect, the system's authorities only, the rules in `AccountRules` tried on a JVM; the token is sealed by a key of the Android Keystore; the browser's return is the intent filter
+  of the scheme `org.zimnotebook.app`, taken by `mobile/shell/callback.ts` only with the state that was given). The page's content policy stays closed, so a page never asks the network; `npm run test:device`
+  checks the exact list of permissions. Asked 2026-10-13 whether Flutter would be better for the native
   apps: no (the editor would be rewritten), the shell it is.
 - **Writing on a phone** (`docs/zim-editor-plan.md`, *Writing on a phone*): the formatting bar runs the commands the keys
   run (no second rule for anything), never takes the focus from the text (a press that did would put the keyboard

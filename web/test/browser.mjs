@@ -3608,7 +3608,20 @@ try {
       const walk = async (dir, prefix) => {
         for await (const [name, handle] of dir.entries()) {
           if (handle.kind === "directory") await walk(handle, `${prefix}${name}/`);
-          else places[`opfs:${prefix}${name}`] = latin1(await (await handle.getFile()).arrayBuffer());
+          else {
+            // (a file that the vault is rewriting at this moment can't be read just then, and one that it removed is not there to read: the first is read again, the second is not a place that holds anything)
+            let bytes;
+            for (let attempt = 0; attempt < 8 && bytes === undefined; attempt++) {
+              try {
+                bytes = await (await handle.getFile()).arrayBuffer();
+              } catch (error) {
+                if (error?.name === "NotFoundError") bytes = null;
+                else if (error?.name !== "NotReadableError" || attempt === 7) throw error;
+                else await new Promise((resolve) => setTimeout(resolve, 100));
+              }
+            }
+            if (bytes) places[`opfs:${prefix}${name}`] = latin1(bytes);
+          }
         }
       };
       await walk(await navigator.storage.getDirectory(), "");
@@ -4725,65 +4738,72 @@ try {
     },
   );
 
+  /**
+   * The desktop program's file system, in the page: folders that the test makes (`window.__fake.make`), one of which the next folder dialog "chooses" (`window.__fake.next`). It adds
+   * `folders` to the hooks that the page has (so that a program with an account can have folders too).
+   */
+  const folderStandIn = () => {
+    // (the program's file system, in the page: folders that the test makes, one of which the next folder dialog "chooses")
+    window.__TAURI_INTERNALS__ = {};
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const folders = [];
+    const find = (id) => {
+      const folder = folders.find((f) => f.id === id && f.listed);
+      if (!folder) throw new Error("that folder is not one of the notebooks");
+      return folder;
+    };
+    window.__fake = {
+      next: null,
+      make(name, texts = {}) {
+        const folder = { id: `folder${folders.length + 1}`, name, listed: false, files: new Map() };
+        for (const [path, text] of Object.entries(texts)) folder.files.set(path, { bytes: encoder.encode(text), modified: 1000 });
+        folders.push(folder);
+        return folder.id;
+      },
+      text: (id, path) => (folders.find((f) => f.id === id)?.files.has(path) ? decoder.decode(folders.find((f) => f.id === id).files.get(path).bytes) : undefined),
+      paths: (id) => [...folders.find((f) => f.id === id).files.keys()].sort(),
+      listed: () => folders.filter((f) => f.listed).map((f) => f.id),
+    };
+    window.__zimShell = {
+      version: "test",
+      ...(window.__zimShell ?? {}),
+      folders: {
+        roots: async () => folders.filter((f) => f.listed).map((f) => ({ id: f.id, name: f.name, exists: true })),
+        pick: async () => {
+          const id = window.__fake.next;
+          window.__fake.next = null;
+          const folder = folders.find((f) => f.id === id);
+          if (!folder) return null;
+          folder.listed = true;
+          return { id: folder.id, name: folder.name, exists: true };
+        },
+        forget: async (id) => {
+          const folder = folders.find((f) => f.id === id);
+          if (folder) folder.listed = false;
+        },
+        list: async (id) => [...find(id).files].filter(([path]) => !path.split("/").some((p) => p.startsWith("."))).map(([path, f]) => ({ path, size: f.bytes.length, modified: f.modified })),
+        read: async (id, path) => {
+          const held = find(id).files.get(path);
+          if (!held) throw new Error(`could not read ${path}`);
+          return held.bytes.slice();
+        },
+        apply: async (id, change) => {
+          const files = find(id).files;
+          const before = new Map(files);
+          for (const [from] of change.moves) files.delete(from);
+          for (const path of change.deletes) files.delete(path);
+          for (const [from, to] of change.moves) if (before.has(from)) files.set(to, before.get(from));
+          for (const write of change.writes) files.set(write.path, { bytes: write.bytes.slice(), modified: write.modified ?? Date.now() });
+        },
+      },
+    };
+  };
+
   await app(
     "in the desktop program a folder of Zim files is a notebook: opened as it is, written back where it was, made new, and only unlisted when it is removed",
     {
-      beforeLoad: () => {
-        // (the program's file system, in the page: folders that the test makes, one of which the next folder dialog "chooses")
-        window.__TAURI_INTERNALS__ = {};
-        const encoder = new TextEncoder();
-        const decoder = new TextDecoder();
-        const folders = [];
-        const find = (id) => {
-          const folder = folders.find((f) => f.id === id && f.listed);
-          if (!folder) throw new Error("that folder is not one of the notebooks");
-          return folder;
-        };
-        window.__fake = {
-          next: null,
-          make(name, texts = {}) {
-            const folder = { id: `folder${folders.length + 1}`, name, listed: false, files: new Map() };
-            for (const [path, text] of Object.entries(texts)) folder.files.set(path, { bytes: encoder.encode(text), modified: 1000 });
-            folders.push(folder);
-            return folder.id;
-          },
-          text: (id, path) => (folders.find((f) => f.id === id)?.files.has(path) ? decoder.decode(folders.find((f) => f.id === id).files.get(path).bytes) : undefined),
-          paths: (id) => [...folders.find((f) => f.id === id).files.keys()].sort(),
-          listed: () => folders.filter((f) => f.listed).map((f) => f.id),
-        };
-        window.__zimShell = {
-          version: "test",
-          folders: {
-            roots: async () => folders.filter((f) => f.listed).map((f) => ({ id: f.id, name: f.name, exists: true })),
-            pick: async () => {
-              const id = window.__fake.next;
-              window.__fake.next = null;
-              const folder = folders.find((f) => f.id === id);
-              if (!folder) return null;
-              folder.listed = true;
-              return { id: folder.id, name: folder.name, exists: true };
-            },
-            forget: async (id) => {
-              const folder = folders.find((f) => f.id === id);
-              if (folder) folder.listed = false;
-            },
-            list: async (id) => [...find(id).files].filter(([path]) => !path.split("/").some((p) => p.startsWith("."))).map(([path, f]) => ({ path, size: f.bytes.length, modified: f.modified })),
-            read: async (id, path) => {
-              const held = find(id).files.get(path);
-              if (!held) throw new Error(`could not read ${path}`);
-              return held.bytes.slice();
-            },
-            apply: async (id, change) => {
-              const files = find(id).files;
-              const before = new Map(files);
-              for (const [from] of change.moves) files.delete(from);
-              for (const path of change.deletes) files.delete(path);
-              for (const [from, to] of change.moves) if (before.has(from)) files.set(to, before.get(from));
-              for (const write of change.writes) files.set(write.path, { bytes: write.bytes.slice(), modified: write.modified ?? Date.now() });
-            },
-          },
-        };
-      },
+      beforeLoad: folderStandIn,
     },
     async (ui) => {
       const { page } = ui;
@@ -7521,9 +7541,16 @@ try {
       await context.exposeFunction("__program_secret_set", async (name, value) => void program.secrets.set(name, value));
       await context.exposeFunction("__program_secret_remove", async (name) => void program.secrets.delete(name));
     };
-    /** A program: a page with the shell's hooks. */
-    const open = async () => {
-      const made = await openApp({ at, beforeLoad: standInProgram, prepare });
+    /** A program: a page with the shell's hooks (and the desktop program's file system, if it is asked for). */
+    const open = async ({ folders = false } = {}) => {
+      const made = await openApp({
+        at,
+        beforeLoad: standInProgram,
+        prepare: async (context) => {
+          await prepare(context);
+          if (folders) await context.addInitScript(folderStandIn);
+        },
+      });
       const { page } = made.ui;
       const pageApi = [];
       page.on("request", (request) => request.url().startsWith(`${at}/api/`) && pageApi.push(`${request.method()} ${request.url()}`));
@@ -7567,6 +7594,16 @@ try {
       await consent.waitFor();
       return consent;
     };
+    /** Connect a program to the account, through the person's browser (signed in there already, or not). Gives the page of the browser. */
+    const connect = async (made, { signIn = true } = {}) => {
+      await made.choose("Connect to an account server…");
+      await made.dialog().getByRole("button", { name: "Continue in the browser" }).click();
+      const S = await browserPage(program.browserPages.length);
+      const consent = await allowInBrowser(S, { signIn });
+      await consent.getByRole("button", { name: "Allow" }).click();
+      await made.says(`Connected to ${at} as ada@example.org`);
+      return S;
+    };
     const close = async () => {
       closeListener();
       for (const page of program.browserPages) await page.close().catch(() => {});
@@ -7575,7 +7612,7 @@ try {
       site.close();
       db.close();
     };
-    return { at, db, accounts, mailer, program, open, browserPage, allowInBrowser, prepare, close, systemBrowser, watch };
+    return { at, db, accounts, mailer, program, open, browserPage, allowInBrowser, connect, prepare, close, systemBrowser, watch };
   }
 
   await scenario("an app in a native shell is signed in to the account through the person's own browser: it never sees the password, keeps its token outside the page's storage, makes every request through the shell, keeps a notebook on the server with it, and is signed out from the list in the browser", async () => {
@@ -7974,6 +8011,91 @@ try {
       const storage = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage }, title: document.title, hash: location.hash, state: history.state }));
       for (const needle of [...needles, token]) assert(!storage.includes(needle), `nothing of ${needle.slice(0, 8)} is in the page's storage, title or address`);
     } finally {
+      await made?.context.close();
+      await rig.close();
+    }
+  });
+
+  await scenario("in the desktop program a notebook that is a folder of Zim files is kept on the server: the server gets the very bytes of the files, what is changed elsewhere comes back into the folder and nothing else of it is touched, and what is changed in the folder goes out", async () => {
+    const rig = await programRig();
+    const { at, db } = rig;
+    let made;
+    let other;
+    try {
+      made = await rig.open({ folders: true });
+      const { page } = made;
+      await rig.connect(made);
+      const header = "Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\nCreation-Date: 2026-10-06T09:00:00+02:00\n\n";
+      const files = {
+        "notebook.zim": "[Notebook]\nversion=0.4\nname=Field notes\nhome=Start\n",
+        "Start.txt": `${header}====== Start ======\nhello from files\n`,
+        "Projects/My_Note.txt": `${header}====== My Note ======\nin a folder\n`,
+      };
+      const folder = await page.evaluate(([name, texts]) => window.__fake.make(name, texts), ["Field notes folder", files]);
+      await made.ui.openMenu();
+      await page.evaluate((id) => (window.__fake.next = id), folder);
+      await made.ui.menu().getByRole("menuitem", { name: "Open a folder as a notebook…" }).click();
+      await page.waitForFunction(() => document.querySelector(".notebook-title")?.textContent === "Field notes");
+      const folderText = (path) => page.evaluate(([id, p]) => window.__fake.text(id, p), [folder, path]);
+
+      // the menu offers to keep a folder on the server, as it does the others, and it is kept: the server has the files as they are in the folder, byte for byte
+      await made.choose("Keep this notebook on the server…");
+      await made.dialog().getByRole("button", { name: "Keep it there" }).click();
+      await made.says("is kept on the server");
+      const held = () => new Map(db.prepare("select f.path, f.bytes from notebook_files f").all().map((f) => [f.path, Buffer.from(f.bytes).toString("utf8")]));
+      assertEqual(held().get("Start.txt"), files["Start.txt"], "the server has the file as it is in the folder, byte for byte");
+      assertEqual(held().get("Projects/My_Note.txt"), files["Projects/My_Note.txt"], "and the one in a folder of the notebook");
+      assert(held().get("notebook.zim").includes("name=Field notes"), "and notebook.zim, with the name");
+      assert((await page.locator(".notebook-button").innerText()).toLowerCase().includes("synced"), "the title says that the notebook is kept on the server");
+      assertDeepEqual(await page.evaluate((id) => window.__fake.paths(id), folder), ["Projects/My_Note.txt", "Start.txt", "notebook.zim"], "and nothing was added to the folder by it");
+
+      // another device of the account opens it from the server and changes a page there
+      other = await openApp({ at });
+      const O = other.ui;
+      const saysOn = (target, text, timeout = 20_000) =>
+        target.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout }).catch(async () => {
+          throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await target.locator("#status").innerText())}`);
+        });
+      const chooseOn = async (ui, target, name) => {
+        await target.evaluate(() => (document.querySelector("#status").textContent = ""));
+        await ui.openMenu();
+        await ui.menu().getByRole("menuitem", { name }).click();
+      };
+      await chooseOn(O, other.ui.page, "Sign in or create an account…");
+      const dialog = topDialog(O.page);
+      await dialog.getByLabel("E-mail address", { exact: true }).fill("ada@example.org");
+      await dialog.getByLabel("Password", { exact: true }).fill("correct horse battery");
+      await dialog.getByRole("button", { name: "Sign in" }).click();
+      await saysOn(O.page, "Signed in as ada@example.org");
+      await chooseOn(O, O.page, "Open a notebook from the server…");
+      await topDialog(O.page).getByRole("button", { name: "Open" }).click();
+      await saysOn(O.page, "was copied from the server");
+      assertDeepEqual(await O.names(), ["Projects:My Note", "Start"], "the other device has the pages of the files");
+      await O.typeAtEnd("what the other device adds\n");
+      await O.flush();
+      await chooseOn(O, O.page, "Sync this notebook now");
+      await saysOn(O.page, "was sent to the server");
+
+      // the program brings it into the folder: the file that changed has it, the others are as they were, and notebook.zim keeps the keys that Zim put there
+      await made.choose("Sync this notebook now");
+      await made.says("was brought up to date from the server");
+      assert((await folderText("Start.txt")).includes("what the other device adds"), "the change is in the folder's file");
+      assert((await folderText("Start.txt")).startsWith(`${header}====== Start ======\nhello from files\n`), "which keeps what it had, header included");
+      assertEqual(await folderText("Projects/My_Note.txt"), files["Projects/My_Note.txt"], "the page that was not changed is as it was");
+      assert((await folderText("notebook.zim")).includes("version=0.4") && (await folderText("notebook.zim")).includes("name=Field notes"), "and notebook.zim keeps its keys");
+      assertDeepEqual(await page.evaluate((id) => window.__fake.paths(id), folder), ["Projects/My_Note.txt", "Start.txt", "notebook.zim"], "no file was added to the folder");
+
+      // a change made in the folder's notebook goes out, and the other device has it
+      await made.ui.typeAtEnd("written in the folder\n");
+      await made.ui.flush();
+      await made.choose("Sync this notebook now");
+      await made.says("was sent to the server");
+      assert(held().get("Start.txt").includes("written in the folder") && held().get("Start.txt").includes("what the other device adds"), "the server has both changes");
+      await chooseOn(O, O.page, "Sync this notebook now");
+      await saysOn(O.page, "was brought up to date from the server");
+      assert((await O.text()).includes("written in the folder"), "and the other device has what was written in the folder");
+    } finally {
+      await other?.context.close();
       await made?.context.close();
       await rig.close();
     }

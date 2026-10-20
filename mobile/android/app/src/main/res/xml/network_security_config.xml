@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What the app may reach, and how. Every address is https, with the authorities that the system trusts (a certificate that the device does not trust is refused, and the
+     person is told so); the one exception is this device itself, over plain http, which is how a server on the same machine is tried out (nothing on it leaves the device).
+     No user-installed authority is trusted: that is the default for an app of this target level, and it is said here so that it stays so. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

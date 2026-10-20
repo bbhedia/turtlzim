@@ -1,7 +1,8 @@
 // minimal CDP client for an Android WebView page
-export async function connect(port = 9222) {
+export async function connect(port = 9222, match = (t) => t.type === "page") {
   const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  const target = list.find((t) => t.type === "page");
+  const target = list.find(match);
+  if (!target) throw new Error(`no page to connect to on port ${port}: ${JSON.stringify(list.map((t) => t.url))}`);
   const ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });
   let id = 0; const pending = new Map(); const events = [];

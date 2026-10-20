@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- The one permission: the app's own requests to an account server that the person typed the address of (ZimNativePlugin). The web files are in the app, and the
+         page itself asks the network for nothing (its content policy allows none): see docs/zim-mobile-shell.md. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:allowBackup="false"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -23,6 +28,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Where the person's browser sends them back after they signed in and allowed the app: `org.zimnotebook.app:/callback?code=…&state=…` (the reverse of the app's id,
+                 as RFC 8252 asks of an address of this kind). The app checks the state it gave and trades the code with a secret that only it knows. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="org.zimnotebook.app" />
+            </intent-filter>
+
         </activity>
 
         <provider
@@ -35,7 +49,4 @@
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
     </application>
-
-    <!-- No permission: the app keeps its notebooks on the device and asks nothing of the network (the web files are in the app). When the
-         sync server comes, `android.permission.INTERNET` is added here, on purpose. -->
 </manifest>

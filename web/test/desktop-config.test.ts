@@ -34,7 +34,7 @@ describe("the desktop program", () => {
     expect(program).toContain('.get("x-file-name")');
     // every command that the program has is one it answers to (a command that is written and not listed is a call that fails only when a person makes it)
     const listed = [...(/generate_handler!\[([^\]]*)\]/s.exec(program)?.[1] ?? "").split(",")].map((name) => name.trim()).filter(Boolean);
-    const written = [...program.matchAll(/#\[tauri::command\]\s*(?:async )?fn (\w+)/g)].map((m) => m[1]);
+    const written = [...program.matchAll(/#\[tauri::command(?:\(async\))?\]\s*(?:async )?fn (\w+)/g)].map((m) => m[1]);
     expect([...listed].sort()).toEqual([...written].sort());
     for (const command of ["save_file", "debug_log", "fs_roots", "fs_pick", "fs_forget", "fs_list", "fs_read", "fs_stage", "fs_commit"]) expect(listed, command).toContain(command);
     // and the program puts the script in the page before the app's own

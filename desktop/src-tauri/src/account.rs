@@ -199,11 +199,19 @@ mod tests {
             "https://notes.example.org/apix/me",
             "https://notes.example.org/api/me#x",
             "https://notes.example.org/../etc/passwd",
+            // a dot segment is resolved by the parser that makes the request, however it is written: what counts is the path that is left
+            "https://notes.example.org/api/../etc/passwd",
+            "https://notes.example.org/api/%2e%2e/etc/passwd",
+            "https://notes.example.org/api/%2E%2E/etc/passwd",
+            "https://notes.example.org/api/.%2e/etc/passwd",
+            "https://notes.example.org/api/x/%2e%2e/%2e%2e/y",
             "not an address",
             "",
         ] {
             assert!(check_url(bad).is_err(), "{bad}");
         }
+        // (and a dot segment that leaves the path under /api/ is only a longer way to write it)
+        assert_eq!(check_url("https://notes.example.org/api/./x/../me").unwrap().path(), "/api/me");
     }
 
     #[test]
