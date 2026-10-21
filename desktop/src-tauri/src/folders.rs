@@ -304,6 +304,18 @@ fn prepare(root: &Path, transaction: &str, plan: &Plan) -> Result<Prepared, Stri
     Ok(prepared)
 }
 
+/// Where the file that was put aside for the original `k` is. On a disk that ignores case, two spellings of a name (a move that changes only the case of a name names both) are the same file: it was put
+/// aside once, under the first spelling that named it, and the other has nothing of its own under `old/`.
+fn saved_copy(prepared: &Prepared, k: u32) -> PathBuf {
+    let old = prepared.base.join("old");
+    let own = old.join(k.to_string());
+    if own.exists() {
+        return own;
+    }
+    let name = prepared.originals.iter().find(|o| o.k == k).map(|o| key(&o.path));
+    prepared.originals.iter().find(|o| Some(key(&o.path)) == name && old.join(o.k.to_string()).exists()).map(|o| old.join(o.k.to_string())).unwrap_or(own)
+}
+
 /// Put the new state in place: what was put aside comes back where the change says (as a link, so that it is still there to undo this), and what was staged is moved in.
 fn place(root: &Path, prepared: &Prepared) -> Result<(), String> {
     for (spelled, source) in prepared.result.values() {
@@ -313,7 +325,7 @@ fn place(root: &Path, prepared: &Prepared) -> Result<(), String> {
         }
         match source {
             Source::Old(k) => {
-                let saved = prepared.base.join("old").join(k.to_string());
+                let saved = saved_copy(prepared, *k);
                 if fs::hard_link(&saved, &dest).is_err() {
                     fs::copy(&saved, &dest).map_err(|e| format!("could not write {spelled}: {e}"))?;
                 }
@@ -596,8 +608,37 @@ mod tests {
         commit(&root.0, "t", &plan(&[("old.txt", 0)], &[], &[("x.png", "y.png"), ("y.png", "x.png"), ("Case/a.png", "case/A.png")])).unwrap();
         assert_eq!(root.text("x.png").as_deref(), Some("Y"));
         assert_eq!(root.text("y.png").as_deref(), Some("X"));
-        assert_eq!(root.files(), ["case/A.png", "old.txt", "x.png", "y.png"]);
+        // (a disk that ignores case keeps the spelling that a folder already has: `Case`, with the file in it spelled as it was asked to be)
+        if cfg!(windows) {
+            assert_eq!(root.files(), ["Case/A.png", "old.txt", "x.png", "y.png"]);
+        } else {
+            assert_eq!(root.files(), ["case/A.png", "old.txt", "x.png", "y.png"]);
+        }
         assert_eq!(root.text("old.txt").as_deref(), Some("newer"));
+        assert_eq!(root.text("case/A.png").as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn a_file_that_two_spellings_of_a_name_stand_for_is_put_back_from_the_one_copy_that_was_put_aside() {
+        // what a disk that ignores case does with a move that changes only the case of a name: both spellings are named by the change, the file was put aside once (under the first), and
+        // the other spelling has nothing of its own in `old/`. (Made here by hand, so that any disk shows what is done with it: on Windows this is what `Case/a.png` to `case/A.png` is.)
+        let root = Scratch::new();
+        let base = root.0.join("work");
+        fs::create_dir_all(base.join("old")).unwrap();
+        fs::write(base.join("old").join("0"), "the file").unwrap();
+        let prepared = Prepared {
+            base: base.clone(),
+            originals: vec![Original { path: "Case/a.png".into(), k: 0, existed: true }, Original { path: "case/A.png".into(), k: 1, existed: true }],
+            result: HashMap::from([("case/a.png".to_string(), ("case/A.png".to_string(), Source::Old(1)))]),
+        };
+        assert_eq!(saved_copy(&prepared, 1), base.join("old").join("0"), "the copy that exists is the one that is used");
+        assert_eq!(saved_copy(&prepared, 0), base.join("old").join("0"), "and a spelling that has its own copy uses it");
+        place(&root.0, &prepared).unwrap();
+        assert_eq!(root.text("case/A.png").as_deref(), Some("the file"));
+        // a name that was never put aside under any spelling is still an error, told as one
+        let missing = Prepared { result: HashMap::from([("z.png".to_string(), ("z.png".to_string(), Source::Old(7)))]), ..prepared };
+        let failure = place(&root.0, &missing).unwrap_err();
+        assert!(failure.contains("could not write z.png"), "{failure}");
     }
 
     #[test]
