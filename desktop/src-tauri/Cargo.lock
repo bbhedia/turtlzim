@@ -5481,16 +5481,22 @@ dependencies = [
 name = "zim-notebook-desktop"
 version = "0.1.0"
 dependencies = [
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "keyring",
+ "native-tls",
  "open",
  "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tokio",
+ "tokio-native-tls",
  "url",
  "webkit2gtk",
 ]

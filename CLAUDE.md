@@ -154,7 +154,7 @@ cd ../web && scripts/serve.sh restart --host :: --port 8443 --tls --name ADDRESS
 # Desktop program (desktop/; docs/zim-desktop-shell.md): Tauri around web/dist; Linux needs `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev patchelf file`
 cd desktop && npm install
 npm run package -- --web            # npm run build in web/, then tauri build -> desktop/out/ (.deb .rpm .AppImage on Linux, .exe .msi on Windows) + SHA256SUMS
-(cd src-tauri && cargo test)        # the program's folder code: paths, listing, the all-or-nothing change and its recovery
+(cd src-tauri && cargo test)        # the program's folder code (paths, listing, the all-or-nothing change and its recovery), its account's requests, and the TLS that checks a certificate that nothing trusts before a byte is sent (real TLS servers on this computer); CI runs it on Linux and Windows
 
 # Mobile (Capacitor)
 npx cap sync
@@ -237,6 +237,12 @@ docker compose up                   # Postgres + server (define compose file)
   (`account.rs`: https, or http to this computer only; `/api/` addresses; four headers of the page's; no redirect followed; the system's trusted authorities), opens the person's browser and waits for
   its return on a loopback port, for one answer (`signin.rs`: Host, state and path checked, anything else answered and ignored), and keeps the token in the system's keychain or a mode-600 file (`secrets.rs`),
   never in the page's storage. A new command that touches the network or a secret goes through these, and gets the same kind of test (and mutants).
+  **A server whose certificate the system does not know** (E17e, `docs/zim-desktop-shell.md`): trusted **only by the fingerprint of its own certificate**, which the person compares with the one the server's console prints
+  (`pinNote` in `web/scripts/serve.mjs`) and says yes to (`window.__zimShell.account.trust = { inspect, pin, pinned, unpin }`; Cancel focused). What was trusted is kept by the *program* (`pins.rs`), never by the page, and the page's
+  `request` carries no fingerprint. A request to such an address goes through `tls::send_pinned` (and nothing else): the handshake is made there (the one place with `danger_accept_invalid_certs`) and **the certificate is compared with
+  the fingerprint before a byte of the request is sent**, on the connection the request then goes over; there is **no fallback** to what the system trusts for that address, and `inspect` is a handshake and nothing more (nothing is sent
+  to a server that was not trusted yet). A different certificate is refused as `certificate-changed` and the person is asked again, with both fingerprints. Do not add a way round this (a `reqwest` client that accepts invalid
+  certificates, a second place that turns the check off, a pin that is compared after the request); `web/test/trust-contract.test.ts` and the program's `tls.rs` tests (a TLS server that shows one of two certificates, and what it was sent) say what is checked.
 - **The app in a native shell** (`mobile/`, `docs/zim-mobile-shell.md`): the web app depends on no shell package. A shell is recognised by
   `window.Capacitor` and gives what a WebView lacks through `window.__zimShell` (`web/src/app/shell.ts`: a hook for saving a file, the version);
   something a browser does by itself and a WebView does not goes through a hook set by `mobile/shell/shell.ts`, never into the web app's imports.
@@ -244,7 +250,9 @@ docker compose up                   # Postgres + server (define compose file)
   no permission it does not use and no backup: **the one permission is `INTERNET`** (E17), for the app's own requests to an account server (`ZimNativePlugin`: OkHttp, https or loopback http, `/api/` addresses,
   four headers of the page's, no redirect, the system's authorities only, the rules in `AccountRules` tried on a JVM; the token is sealed by a key of the Android Keystore; the browser's return is the intent filter
   of the scheme `org.zimnotebook.app`, taken by `mobile/shell/callback.ts` only with the state that was given). The page's content policy stays closed, so a page never asks the network; `npm run test:device`
-  checks the exact list of permissions. Asked 2026-10-13 whether Flutter would be better for the native
+  checks the exact list of permissions. **A server whose certificate the device does not know** (E17e, `docs/zim-mobile-shell.md`) is trusted the same way as on the desktop, by `PinnedTrust` (`Pin`: the trust manager of a
+  connection that has a certificate trusted for it takes that fingerprint as the first of the chain and nothing else, in the handshake; `Look`, which takes anything, is for looking at what a server shows, is made in one place and never
+  carries a request); what is trusted is kept by the plugin in `zim_pins`, a user-installed authority is still not accepted, and the failures are told by `AccountRules.describe` (a code only when the certificate was what was refused). Asked 2026-10-13 whether Flutter would be better for the native
   apps: no (the editor would be rewritten), the shell it is.
 - **Writing on a phone** (`docs/zim-editor-plan.md`, *Writing on a phone*): the formatting bar runs the commands the keys
   run (no second rule for anything), never takes the focus from the text (a press that did would put the keyboard

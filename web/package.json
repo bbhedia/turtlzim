@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit && tsc -p pwa",
     "test": "vitest run",
     "test:browser": "node test/browser.mjs",
-    "test:browser:webkit": "ZIM_BROWSER=webkit SKIP='saved on the device|a saved app|a new version|a version approved|a file that the browser cleared|an update asked for|what the worker keeps|offer to install|a copy of the app that is not saved|certificate|served over https|an SVG picture opened as a page|a browser that promises|a browser that answers late' node test/browser.mjs",
+    "test:browser:webkit": "ZIM_BROWSER=webkit SKIP='saved on the device|a saved app|a new version|a version approved|a file that the browser cleared|an update asked for|what the worker keeps|offer to install|a copy of the app that is not saved|certificate warning|whose certificate the browser trusts|served over https|an SVG picture opened as a page|a browser that promises|a browser that answers late' node test/browser.mjs",
     "test:vault": "node test/vault-browser.mjs",
     "measure:unlock": "node test/measure-unlock.mjs",
     "screenshots": "node test/screenshots.mjs"

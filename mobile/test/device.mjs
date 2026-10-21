@@ -112,8 +112,30 @@ async function accountChecks() {
   const port = await listen(site);
   config.baseUrl = `http://127.0.0.1:${port}`;
   const tls = selfSignedCertificate(mkdtempSync(join(tmpdir(), "zim-device-tls-")), []);
-  const secure = createStaticServer({ dir: dist, tls: { key: tls.key, cert: tls.cert }, api });
+  /** What the https server was asked (a handshake is not a request: a server that was only looked at has seen none). */
+  const secureSeen = [];
+  // (an account server is one address: the https server has settings of its own, with its own address, which is what a page served from it has its requests held to)
+  const secureConfig = { ...config };
+  const secureApi = createApi({ accounts, oauth: new OAuth({ db, accounts, config: secureConfig }), config: secureConfig });
+  const loggedSecure = (req, res) => {
+    if ((req.url ?? "").startsWith("/api/")) secureSeen.push({ method: req.method, url: req.url, headers: { ...req.headers } });
+    return secureApi(req, res);
+  };
+  let secure = createStaticServer({ dir: dist, tls: { key: tls.key, cert: tls.cert }, api: loggedSecure });
+  let secureTls = tls;
   const securePort = await listen(secure);
+  secureConfig.baseUrl = `https://127.0.0.1:${securePort}`;
+  /** The same address with another certificate (a server whose certificate was made again): the old one is shut, and a new one listens on the port that the device reaches by `adb reverse`. */
+  const makeCertificateAgain = async () => {
+    secure.closeAllConnections?.();
+    await new Promise((ok) => secure.close(ok));
+    secureTls = selfSignedCertificate(mkdtempSync(join(tmpdir(), "zim-device-tls-")), []);
+    secure = createStaticServer({ dir: dist, tls: { key: secureTls.key, cert: secureTls.cert }, api: loggedSecure });
+    await new Promise((ok, no) => {
+      secure.once("error", no);
+      secure.listen(securePort, "127.0.0.1", ok);
+    });
+  };
   for (const p of [port, securePort]) adb("reverse", `tcp:${p}`, `tcp:${p}`);
   const base = `http://127.0.0.1:${port}`;
   await accounts.register("ada@example.org", "correct horse battery");
@@ -157,6 +179,53 @@ async function accountChecks() {
     const untrusted = await hook(`${account}.request({ url: "https://127.0.0.1:${securePort}/api/health", method: "GET", headers: {} })`);
     check(untrusted.failed?.includes("certificate is not one that this device trusts"), `refuses a server whose certificate the device does not trust, and says so (${untrusted.failed ?? JSON.stringify(untrusted.ok).slice(0, 60)})`);
 
+    // a server whose certificate the device does not know can be trusted by its fingerprint: it is looked at (a handshake, and nothing sent), the person compares the fingerprint with the one
+    // that the server's own console gives, and what they trust is kept by the app and is then the one certificate that this address is taken with
+    const origin = `https://127.0.0.1:${securePort}`;
+    const trust = `${account}.trust`;
+    const attempt = (expression) => hook(`(${expression}).then((answer) => ({ done: answer ?? null }), (e) => ({ code: e.code ?? null, message: e.message }))`);
+    const refusedAs = async (url) => (await attempt(`${account}.request({ url: "${url}", method: "GET", headers: { authorization: "Bearer t0ken-that-must-not-leave" } })`)).ok;
+    let outcome = await refusedAs(`${origin}/api/providers`);
+    check(outcome?.code === "certificate-untrusted" && /not one that this device trusts/.test(outcome.message), `a request to a server whose certificate the device does not know fails with the code that the page acts on (${JSON.stringify(outcome)})`);
+    check(secureSeen.length === 0 && (await hook(`${trust}.pinned("${origin}")`)).ok === null, "and nothing is trusted for it");
+    const looked = (await hook(`${trust}.inspect("${origin}")`)).ok;
+    check(looked?.fingerprint === tls.certificateFingerprint && looked.names?.includes("127.0.0.1") && /zim-web server/.test(looked.subject ?? "") && looked.notAfter > Date.now(), `looking at it gives the fingerprint of its own certificate, what the certificate says, and the dates (${JSON.stringify(looked)?.slice(0, 160)})`);
+    check(tls.certificateFingerprint !== tls.fingerprint, "(which is not the fingerprint of the authority that made it, though the server sends that too)");
+    check(secureSeen.length === 0, "the server saw a handshake and no request: nothing was sent to a server that is not trusted");
+    outcome = (await attempt(`${trust}.pin("${origin}", "${tls.fingerprint}")`)).ok;
+    check(outcome?.code === "certificate-changed" && (await hook(`${trust}.pinned("${origin}")`)).ok === null, `a fingerprint that the server does not show (the authority's) is not trusted, and nothing is kept (${JSON.stringify(outcome)})`);
+    outcome = (await attempt(`${trust}.pin("${origin}", "not a fingerprint")`)).ok;
+    check(outcome?.message === "That is not a fingerprint." && (await hook(`${trust}.pinned("${origin}")`)).ok === null, "and what is not a fingerprint is refused");
+    for (const [what, url, words] of [["an address that is not https", "http://127.0.0.1:1", "only for an https address"], ["a page of a server", `${origin}/api/me`, "not for a page"], ["a name and a password", `https://ada:secret@127.0.0.1:${securePort}`, "name or password"]]) {
+      outcome = (await attempt(`${trust}.inspect(${JSON.stringify(url)})`)).ok;
+      check(outcome?.message?.includes(words), `a certificate is not looked at for ${what}`);
+    }
+    outcome = (await attempt(`${trust}.pin("${origin}", ${JSON.stringify(tls.certificateFingerprint.toLowerCase().replaceAll(":", " "))})`)).ok;
+    check(outcome?.done === null, `the one that it shows is trusted, however the fingerprint is written (${JSON.stringify(outcome)})`);
+    check((await hook(`${trust}.pinned("${origin}")`)).ok === tls.certificateFingerprint, "and is given back as the app writes a fingerprint");
+    const keptPins = adbTry("shell", `run-as ${PKG} cat shared_prefs/zim_pins.xml`);
+    check(keptPins.includes(origin) && keptPins.includes(tls.certificateFingerprint), "and is kept in the app's private storage (a fingerprint is no secret)");
+    const sent = (await hook(`${account}.request({ url: "${origin}/api/providers", method: "GET", headers: { authorization: "Bearer t0ken-for-the-pinned-server", "x-requested-with": "zim" } })`)).ok;
+    check(sent?.status === 200 && JSON.parse(sent.body).email === true, `a request to it is made now, over the certificate that was trusted (${JSON.stringify(sent)?.slice(0, 120)})`);
+    check(secureSeen.length === 1 && secureSeen[0].headers.authorization === "Bearer t0ken-for-the-pinned-server", "and the server saw it, with its token");
+    page.close();
+    page = await launch();
+    check((await hook(`${trust}.pinned("${origin}")`)).ok === tls.certificateFingerprint && (await hook(`${account}.request({ url: "${origin}/api/providers", method: "GET", headers: {} })`)).ok?.status === 200, "what was trusted is still trusted after the app is stopped and started");
+    // the server's certificate is made again: what it shows is not what was trusted, and nothing is sent
+    const seenBefore = secureSeen.length;
+    await makeCertificateAgain();
+    outcome = await refusedAs(`${origin}/api/providers`);
+    check(outcome?.code === "certificate-changed" && /not the one that you trusted/.test(outcome.message), `a server that shows another certificate than the one that was trusted is refused as changed (${JSON.stringify(outcome)})`);
+    check(secureSeen.length === seenBefore, "and was sent nothing: the token did not leave");
+    check((await hook(`${trust}.inspect("${origin}")`)).ok?.fingerprint === secureTls.certificateFingerprint && secureTls.certificateFingerprint !== tls.certificateFingerprint, "what it shows now can be looked at, and is another certificate");
+    outcome = (await attempt(`${trust}.pin("${origin}", "${tls.certificateFingerprint}")`)).ok;
+    check(outcome?.code === "certificate-changed" && (await hook(`${trust}.pinned("${origin}")`)).ok === tls.certificateFingerprint, "the old one can't be trusted again while the server shows the new one, and the old trust is kept until the person decides");
+    await hook(`${trust}.pin("${origin}", "${secureTls.certificateFingerprint}")`);
+    check((await hook(`${account}.request({ url: "${origin}/api/providers", method: "GET", headers: {} })`)).ok?.status === 200 && (await hook(`${trust}.pinned("${origin}")`)).ok === secureTls.certificateFingerprint, "the new one is trusted in its place when the person says so, and the requests go again");
+    await hook(`${trust}.unpin("${origin}")`);
+    check((await hook(`${trust}.pinned("${origin}")`)).ok === null && (await refusedAs(`${origin}/api/providers`))?.code === "certificate-untrusted" && !adbTry("shell", `run-as ${PKG} cat shared_prefs/zim_pins.xml`).includes(origin), "and when it is forgotten the server is one that the system does not know again, and nothing of it is kept");
+    check((await attempt(`${trust}.unpin("${origin}")`)).ok?.done === null, "(forgetting what was not trusted is not a failure)");
+
     // the person's browser is only opened at an address that a person would go to: not a file of the app's own, not a script, not a web page over plain http
     for (const url of [`file:///data/data/${PKG}/shared_prefs/zim_secrets.xml`, "javascript:alert(1)", "http://example.org/", "intent://scan/#Intent;scheme=zxing;end"]) {
       await hook(`${account}.signIn.begin("${"a".repeat(22)}")`);
@@ -169,7 +238,8 @@ async function accountChecks() {
     if (!rooted) {
       console.log("skip  the rest of the account checks need a userdebug emulator (adb root) to drive Chrome");
     } else {
-      adb("shell", "echo '_ --no-first-run --disable-fre --no-default-browser-check --disable-notifications' > /data/local/tmp/chrome-command-line; chmod 755 /data/local/tmp/chrome-command-line");
+      // (--ignore-certificate-errors stands in for the person pressing Advanced > Proceed in Chrome's warning about a server whose certificate it does not know, which is what they would do for the https server below)
+      adb("shell", "echo '_ --no-first-run --disable-fre --no-default-browser-check --disable-notifications --ignore-certificate-errors' > /data/local/tmp/chrome-command-line; chmod 755 /data/local/tmp/chrome-command-line");
       adb("shell", "am force-stop com.android.chrome");
       adbTry("shell", "pm clear com.android.chrome");
       adbTry("shell", "pm grant com.android.chrome android.permission.POST_NOTIFICATIONS");
@@ -261,6 +331,117 @@ async function accountChecks() {
       await click(page, "Sign out of this app");
       await until("the app says it is signed out", async () => (await status()).includes("Signed out"), 30);
       check(db.prepare("select count(*) as n from sessions where kind = 'app'").get().n === 0 && (await hook(`${account}.secrets.get("account-token")`)).ok === null, "signed out: the server ended the token and the app forgot it");
+      await sleep(500);
+
+      // the same, for a server whose certificate the device does not know: the app puts the certificate to the person (a no trusts nothing), goes on after a yes, keeps what was trusted,
+      // refuses the server when it shows another certificate and asks again, and forgets it all when it is signed out
+      const secureOrigin = `https://127.0.0.1:${securePort}`;
+      const dialogText = () => page.evaluate("[...document.querySelectorAll('dialog[open]')].at(-1)?.innerText ?? ''");
+      // (a question on top of the dialog of the address: its buttons are the ones that are meant, not the address dialog's, which has a Cancel of its own)
+      const clickTop = (target, label) => target.evaluate(`(() => { const top = [...document.querySelectorAll('dialog[open]')].at(-1); const b = [...top.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)}); if (!b) throw new Error('no button ${label}'); b.click(); })()`);
+      const titled = (start) => page.evaluate(`[...document.querySelectorAll('dialog[open] h2')].some((h) => h.textContent.startsWith(${JSON.stringify(start)}))`);
+      const connectTo = async (address) => {
+        await menu(page, "Connect to an account server");
+        await sleep(1000);
+        await set(page, "#field-server", address);
+        await sleep(500);
+        await click(page, "Continue in the browser");
+      };
+      const chromeSignsIn = async (siteOrigin) => {
+        await until("Chrome was opened at the server", async () => adbTry("shell", "dumpsys window | grep mCurrentFocus").includes("com.android.chrome"), 30);
+        await until("Chrome's DevTools socket", async () => adbTry("shell", "cat /proc/net/unix").includes("chrome_devtools_remote"), 30);
+        adb("forward", "tcp:9333", "localabstract:chrome_devtools_remote");
+        let browser;
+        await until("Chrome's page", async () => {
+          try {
+            browser = await connect(9333, (t) => t.type === "page" && t.url.startsWith(`${siteOrigin}/`));
+            return true;
+          } catch {
+            return false;
+          }
+        }, 30);
+        const asksToAllow = "[...document.querySelectorAll('dialog[open] h2')].some((h) => h.textContent === 'Allow this app?')";
+        try {
+          await until("the sign-in dialog or the question in Chrome", () => browser.evaluate(`!!document.querySelector('dialog[open] #field-email') || ${asksToAllow}`), 40);
+        } catch (error) {
+          // (what Chrome shows, for finding out why: a warning about the certificate instead of the page, say)
+          console.log("Chrome shows:", await browser.evaluate("JSON.stringify({ url: location.href, title: document.title, text: document.body?.innerText?.slice(0, 400) })").catch((e) => String(e)));
+          shot("chrome-no-sign-in");
+          throw error;
+        }
+        // (the person may be signed in there already: the same Chrome signed in to the first server, and a cookie is for a host, not for a port)
+        if (await browser.evaluate("!!document.querySelector('dialog[open] #field-email')")) {
+          await set(browser, "#field-email", "ada@example.org");
+          await set(browser, "#field-password", "correct horse battery");
+          await click(browser, "Sign in");
+        }
+        await until("the question in Chrome", () => browser.evaluate(asksToAllow), 40);
+        await sleep(3000);
+        const tap = JSON.parse(await browser.evaluate(`(() => { const b = [...document.querySelectorAll('dialog[open] button')].find((b) => b.textContent.trim() === 'Allow'); const r = b.getBoundingClientRect(); return JSON.stringify({ x: r.left + r.width / 2, y: r.top + r.height / 2 }); })()`));
+        await browser.send("Input.dispatchMouseEvent", { type: "mousePressed", x: tap.x, y: tap.y, button: "left", clickCount: 1 });
+        await browser.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: tap.x, y: tap.y, button: "left", clickCount: 1 });
+        browser.close();
+      };
+      const pinsFile = () => adbTry("shell", `run-as ${PKG} cat shared_prefs/zim_pins.xml`);
+      const requested = secureSeen.length;
+      await connectTo(secureOrigin);
+      await until("the certificate is put to the person", () => titled("Trust this server"), 30);
+      const put = await dialogText();
+      check(put.includes(secureTls.certificateFingerprint), "the app puts the certificate to the person, with the fingerprint of the server's own certificate");
+      check(!put.includes(secureTls.fingerprint), "(and not the authority's fingerprint, which the server also sends)");
+      check(await page.evaluate("document.activeElement?.textContent.trim() === 'Cancel'"), "Cancel is where the focus is: a stray Enter trusts nothing");
+      shot("trust");
+      check(secureSeen.length === requested, "nothing was asked of the server while the person decides");
+      await clickTop(page, "Cancel");
+      await until("the refusal is told in the dialog of the address", async () => (await page.evaluate("document.querySelector('dialog[open] .dialog-error')?.innerText ?? ''")).includes("did not trust that server's certificate"), 20);
+      check(secureSeen.length === requested && !pinsFile().includes(secureOrigin) && !adbTry("shell", "dumpsys window | grep mCurrentFocus").includes("com.android.chrome"), "a no trusts nothing, asks the server nothing and does not open the browser");
+      await click(page, "Continue in the browser");
+      await until("the certificate is put to the person again", () => titled("Trust this server"), 30);
+      await clickTop(page, "Trust this certificate");
+      await chromeSignsIn(secureOrigin);
+      try {
+        await until("the app says it is connected over https", async () => (await status()).includes(`Connected to ${secureOrigin} as ada@example.org`), 60);
+      } catch (error) {
+        // (what the app says instead, for finding out why)
+        console.log("the app says:", JSON.stringify({ status: await status(), dialog: await dialogText(), seen: secureSeen.slice(requested).map((r) => `${r.method} ${r.url}`) }));
+        shot("not-connected-over-https");
+        throw error;
+      }
+      shot("connected-pinned");
+      check(db.prepare("select count(*) as n from sessions where kind = 'app'").get().n === 1 && secureSeen.slice(requested).some((r) => r.url === "/api/app/token"), "after a yes the sign-in goes on, and the code is traded with the server over the certificate that was trusted");
+      check((await hook(`${trust}.pinned("${secureOrigin}")`)).ok === secureTls.certificateFingerprint && pinsFile().includes(secureTls.certificateFingerprint), "and that certificate is what the app keeps for that server");
+      const carriedSecure = secureSeen.slice(requested).filter((r) => r.headers.authorization);
+      const secureToken = (await hook(`${account}.secrets.get("account-token")`)).ok;
+      check(typeof secureToken === "string" && carriedSecure.every((r) => r.headers.authorization === `Bearer ${secureToken}`), "(the token is the one that this sign-in made)");
+      // the account dialog says what is trusted, and can look again
+      await menu(page, "Account (ada@example.org)");
+      await sleep(1500);
+      const accountText = await dialogText();
+      check(accountText.includes(secureTls.certificateFingerprint) && accountText.includes("Look at the certificate"), "the account dialog says that a certificate was trusted, with its fingerprint, and offers to look at it");
+      shot("account-pinned");
+      await click(page, "Look at the certificate…");
+      await until("the certificate is the one that was trusted", () => titled("This is the certificate you trusted"), 30);
+      await clickTop(page, "OK");
+      // the server's certificate is made again: the app is refused the server, says so, and the menu leads to the certificate; the person is asked, and a yes brings the account back with no new sign-in
+      const earlier = secureTls.certificateFingerprint;
+      await makeCertificateAgain();
+      page.close();
+      page = await launch();
+      await sleep(3000);
+      await menu(page, "The server's certificate");
+      await until("the change is put to the person", () => titled("The server's certificate has changed"), 30);
+      const changed = await dialogText();
+      check(changed.includes(secureTls.certificateFingerprint) && changed.includes(earlier) && earlier !== secureTls.certificateFingerprint, "the app says that the certificate changed, with the new fingerprint and the one that was trusted before");
+      check(await page.evaluate("document.activeElement?.textContent.trim() === 'Cancel'"), "(Cancel has the focus there too)");
+      shot("trust-changed");
+      await clickTop(page, "Trust the new certificate");
+      await until("the app is connected again", async () => (await status()).includes(`Connected to ${secureOrigin} as ada@example.org`), 30);
+      check((await hook(`${trust}.pinned("${secureOrigin}")`)).ok === secureTls.certificateFingerprint && db.prepare("select count(*) as n from sessions where kind = 'app'").get().n === 1, "a yes trusts the new certificate and the app is connected again, with the token it had");
+      await menu(page, "Account (ada@example.org)");
+      await sleep(1500);
+      await click(page, "Sign out of this app");
+      await until("the app says it is signed out", async () => (await status()).includes("Signed out"), 30);
+      check(db.prepare("select count(*) as n from sessions where kind = 'app'").get().n === 0 && (await hook(`${account}.secrets.get("account-token")`)).ok === null && !pinsFile().includes(secureOrigin) && (await hook(`${trust}.pinned("${secureOrigin}")`)).ok === null, "signing out forgets the token and what was trusted for the server");
       await sleep(500);
     }
 

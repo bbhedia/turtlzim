@@ -9,4 +9,6 @@ export function certificateName(name: string): string;
 export function selfSignedCertificate(
   directory?: string,
   extraNames?: string[],
-): { key: Buffer; cert: Buffer; authority: Buffer; authorityFile: string; fingerprint: string; names: string[] };
+): { key: Buffer; cert: Buffer; authority: Buffer; authorityFile: string; fingerprint: string; certificateFingerprint: string; names: string[] };
+/** What to tell the person who runs the server about the certificate that an app of a computer or a phone pins: its own fingerprint, which they compare with the one the app shows. */
+export function pinNote(tls: { certificateFingerprint: string }): string;

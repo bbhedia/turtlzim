@@ -8,21 +8,21 @@ import android.net.Uri;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.IOException;
-import java.net.ConnectException;
-import java.net.SocketTimeoutException;
 import java.net.URI;
-import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.security.MessageDigest;
 import java.util.Iterator;
 import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -30,7 +30,7 @@ import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
-import javax.net.ssl.SSLException;
+import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
@@ -50,6 +50,12 @@ public class ZimNativePlugin extends Plugin {
     /** One request at a time per thread; the plugin's own thread is not held for the time that a server takes. */
     private final ExecutorService network = Executors.newCachedThreadPool();
 
+    /** What the person trusted for servers that the system does not know: a fingerprint for each (`https://host:port`), kept in the app's own private preferences. */
+    private static final String PINS = "zim_pins";
+
+    /** The clients for servers that have a certificate trusted for them, by that certificate's fingerprint (a connection made under one is reused only by requests that take the same one). */
+    private final ConcurrentHashMap<String, OkHttpClient> pinned = new ConcurrentHashMap<>();
+
     /** No redirect is followed: the token is for the server that was typed, and goes to no other. The system's trusted authorities are used (and its proxy settings). */
     private final OkHttpClient client = new OkHttpClient.Builder()
         .followRedirects(false)
@@ -63,7 +69,16 @@ public class ZimNativePlugin extends Plugin {
     // ---------------------------------------------------------------------------------------------------------------------------------------------------------
     // the requests
 
-    /** A request to the account server: `{ url, method, headers, body }` in; `{ status, headers, body }` out (the body as text). A failure is words for a person. */
+    private void reject(PluginCall call, AccountRules.Failure failure) {
+        String code = failure.code;
+        call.reject(failure.message, code);
+    }
+
+    /**
+     * A request to the account server: `{ url, method, headers, body }` in; `{ status, headers, body }` out (the body as text). A failure is words for a person, and, when it is about the
+     * server's certificate, a `code` too: the system does not know it and nothing was trusted for this server (`certificate-untrusted`), or something was and the server shows another
+     * (`certificate-changed`).
+     */
     @PluginMethod
     public void request(final PluginCall call) {
         network.execute(() -> {
@@ -72,22 +87,47 @@ public class ZimNativePlugin extends Plugin {
             } catch (AccountRules.Refused refused) {
                 call.reject(refused.getMessage());
             } catch (IOException failure) {
-                call.reject(describe(failure));
+                reject(call, AccountRules.describe(failure));
             } catch (RuntimeException failure) {
                 call.reject("The request could not be made: " + failure.getClass().getSimpleName());
             }
         });
     }
 
+    private SharedPreferences pins() {
+        return getContext().getSharedPreferences(PINS, Context.MODE_PRIVATE);
+    }
+
+    /**
+     * The client for a request: the one that takes the system's trust, or, for a server that has a certificate trusted for it, one whose connection takes that certificate and nothing else
+     * (checked in the handshake, so that nothing is sent to a server that shows another; the host name is not what is checked then, the certificate is). A trust that can't be read is no trust:
+     * the system is asked, and refuses what it does not know.
+     */
+    private OkHttpClient clientFor(HttpUrl target) {
+        if (!target.isHttps()) return client;
+        byte[] wanted = PinnedTrust.parse(pins().getString(AccountRules.originKey(target), null));
+        if (wanted == null) return client;
+        return pinned.computeIfAbsent(PinnedTrust.format(wanted), key -> {
+            PinnedTrust.Pin manager = new PinnedTrust.Pin(wanted);
+            try {
+                return client.newBuilder().sslSocketFactory(PinnedTrust.socketFactory(manager), manager).hostnameVerifier((host, session) -> true).build();
+            } catch (GeneralSecurityException impossible) {
+                throw new IllegalStateException(impossible);
+            }
+        });
+    }
+
     private JSObject send(PluginCall call) throws AccountRules.Refused, IOException {
         URI uri = AccountRules.checkUrl(call.getString("url"));
+        HttpUrl target = HttpUrl.parse(uri.toString());
+        if (target == null) throw new AccountRules.Refused("That is not an address.");
         String method = (call.getString("method") == null ? "GET" : call.getString("method")).toUpperCase(Locale.ROOT);
         if (!AccountRules.METHODS.contains(method)) throw new AccountRules.Refused("That is not a request that this app makes.");
         String text = call.getString("body");
         byte[] body = text == null ? null : text.getBytes(StandardCharsets.UTF_8);
         if (body != null && body.length > AccountRules.MAX_BODY) throw new AccountRules.Refused("That request is too big.");
 
-        Request.Builder builder = new Request.Builder().url(uri.toString()).header("User-Agent", "ZimNotebook-Android");
+        Request.Builder builder = new Request.Builder().url(target).header("User-Agent", "ZimNotebook-Android");
         JSObject headers = call.getObject("headers");
         String contentType = "application/json";
         if (headers != null) {
@@ -104,7 +144,7 @@ public class ZimNativePlugin extends Plugin {
         RequestBody requestBody = carries ? RequestBody.create(body == null ? new byte[0] : body, okhttp3.MediaType.parse(contentType)) : null;
         builder.method(method, requestBody);
 
-        try (Response response = client.newCall(builder.build()).execute()) {
+        try (Response response = clientFor(target).newCall(builder.build()).execute()) {
             JSObject answer = new JSObject();
             answer.put("status", response.code());
             JSObject seen = new JSObject();
@@ -121,14 +161,95 @@ public class ZimNativePlugin extends Plugin {
         }
     }
 
-    /** A failure of a request in words that a person can act on (a certificate that this device does not trust is the one that matters most). */
-    static String describe(IOException failure) {
-        if (failure instanceof SSLException) return "The server's certificate is not one that this device trusts (" + failure.getMessage() + ").";
-        if (failure instanceof UnknownHostException) return "The server's name was not found: check the address, and that this device is online.";
-        if (failure instanceof ConnectException) return "The server did not answer: check the address, and that this device is online.";
-        if (failure instanceof SocketTimeoutException) return "The server took too long to answer.";
-        String message = failure.getMessage();
-        return message == null || message.isEmpty() ? "The request could not be made." : message;
+    // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+    // a server whose certificate the system does not know (PinnedTrust): looked at, trusted by its fingerprint, and forgotten
+
+    private static JSObject infoOf(PinnedTrust.Info info) {
+        JSObject answer = new JSObject();
+        answer.put("fingerprint", info.fingerprint);
+        answer.put("subject", info.subject);
+        answer.put("issuer", info.issuer);
+        JSArray names = new JSArray();
+        for (String name : info.names) names.put(name);
+        answer.put("names", names);
+        answer.put("notBefore", info.notBefore);
+        answer.put("notAfter", info.notAfter);
+        return answer;
+    }
+
+    /** What the server at this origin shows as its certificate, found out by a handshake and nothing else: no request is made, so nothing is sent to a server that was not trusted yet. */
+    @PluginMethod
+    public void trustInspect(final PluginCall call) {
+        network.execute(() -> {
+            try {
+                HttpUrl url = AccountRules.checkOrigin(call.getString("origin"));
+                call.resolve(infoOf(PinnedTrust.look(url.host(), url.port())));
+            } catch (AccountRules.Refused refused) {
+                call.reject(refused.getMessage());
+            } catch (IOException failure) {
+                reject(call, AccountRules.describe(failure));
+            } catch (GeneralSecurityException | RuntimeException failure) {
+                call.reject("The certificate could not be looked at: " + failure.getClass().getSimpleName());
+            }
+        });
+    }
+
+    /** Trust the certificate with this fingerprint for this origin, if the server shows it now (it is looked at again: what the person was shown is not taken for what the server shows). */
+    @PluginMethod
+    public void trustPin(final PluginCall call) {
+        network.execute(() -> {
+            try {
+                HttpUrl url = AccountRules.checkOrigin(call.getString("origin"));
+                byte[] wanted = PinnedTrust.parse(call.getString("fingerprint"));
+                if (wanted == null) {
+                    call.reject("That is not a fingerprint.");
+                    return;
+                }
+                PinnedTrust.Info shown = PinnedTrust.look(url.host(), url.port());
+                if (!MessageDigest.isEqual(shown.digest, wanted)) {
+                    String code = PinnedTrust.CERTIFICATE_CHANGED;
+                    call.reject("The server shows another certificate now, so nothing was trusted.", code);
+                    return;
+                }
+                if (!pins().edit().putString(AccountRules.originKey(url), PinnedTrust.format(wanted)).commit()) {
+                    call.reject("The device would not keep it.");
+                    return;
+                }
+                call.resolve();
+            } catch (AccountRules.Refused refused) {
+                call.reject(refused.getMessage());
+            } catch (IOException failure) {
+                reject(call, AccountRules.describe(failure));
+            } catch (GeneralSecurityException | RuntimeException failure) {
+                call.reject("The certificate could not be trusted: " + failure.getClass().getSimpleName());
+            }
+        });
+    }
+
+    /** The fingerprint that was trusted for this origin, or null. */
+    @PluginMethod
+    public void trustPinned(PluginCall call) {
+        try {
+            HttpUrl url = AccountRules.checkOrigin(call.getString("origin"));
+            String kept = pins().getString(AccountRules.originKey(url), null);
+            JSObject answer = new JSObject();
+            answer.put("fingerprint", PinnedTrust.parse(kept) == null ? JSObject.NULL : kept);
+            call.resolve(answer);
+        } catch (AccountRules.Refused refused) {
+            call.reject(refused.getMessage());
+        }
+    }
+
+    /** Stop trusting what was trusted for this origin (that nothing was is not a failure). */
+    @PluginMethod
+    public void trustUnpin(PluginCall call) {
+        try {
+            HttpUrl url = AccountRules.checkOrigin(call.getString("origin"));
+            pins().edit().remove(AccountRules.originKey(url)).commit();
+            call.resolve();
+        } catch (AccountRules.Refused refused) {
+            call.reject(refused.getMessage());
+        }
     }
 
     /** Open the person's browser at an address (https, or this device's own): where they sign in and allow the app. The browser sends them back to the app's own address. */

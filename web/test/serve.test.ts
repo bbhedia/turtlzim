@@ -1,9 +1,10 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { X509Certificate } from "node:crypto";
+import { createHash, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import type { AddressInfo } from "node:net";
+import { connect as tlsConnect } from "node:tls";
 import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -446,6 +447,27 @@ describe.skipIf(!hasOpenssl)("https", () => {
     // what it says to check is the authority's fingerprint
     expect(made.fingerprint).toBe(new X509Certificate(readFileSync(join(directory, "ca.pem"))).fingerprint256);
     expect(made.authorityFile).toBe(join(directory, "ca.pem"));
+    // and, for an app that pins the server's own certificate, the fingerprint of that one (which is not the authority's, and is the first of what the server sends)
+    expect(made.certificateFingerprint).toBe(new X509Certificate(readFileSync(join(directory, "cert.pem"))).fingerprint256);
+    expect(made.certificateFingerprint).toBe(new X509Certificate(made.cert).fingerprint256);
+    expect(made.certificateFingerprint).not.toBe(made.fingerprint);
+  });
+
+  it("presents the certificate whose fingerprint it announces: what an app that pins it computes from the handshake is that fingerprint", async () => {
+    const made = selfSignedCertificate(join(outside, "tls-presented"), ["127.0.0.1"]);
+    const server = createStaticServer({ dir: site, tls: { key: made.key, cert: made.cert }, authority: made.authority });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const presented = await new Promise<string>((resolve, reject) => {
+      const socket = tlsConnect({ host: "127.0.0.1", port, rejectUnauthorized: false }, () => {
+        const certificate = socket.getPeerCertificate();
+        socket.end();
+        resolve(createHash("sha256").update(certificate.raw).digest("hex").toUpperCase().replace(/(..)(?=.)/g, "$1:"));
+      });
+      socket.on("error", reject);
+    });
+    expect(presented).toBe(made.certificateFingerprint);
   });
 
   it("takes only names: an address or a host name, nothing that openssl's settings would read as something else", () => {
@@ -513,7 +535,7 @@ describe.skipIf(!hasOpenssl)("https", () => {
       child.stdout.on("data", () => {
         const match = /https:\/\/127\.0\.0\.1:\d+\//.exec(output);
         // (what it says about the certificate comes in the lines after the address: wait for all that is asserted on)
-        if (match && output.includes("Its SHA-256:")) {
+        if (match && output.includes("SHA-256 fingerprint:")) {
           clearTimeout(timer);
           resolve(match[0]);
         }
@@ -522,6 +544,9 @@ describe.skipIf(!hasOpenssl)("https", () => {
     try {
       expect(output).toContain("over https");
       expect(output).toContain("signed by an authority that exists only for it");
+      // the server's own certificate's fingerprint, which an app that pins it shows (not the authority's)
+      const own = new X509Certificate(readFileSync(join(state, "zim-web", "tls", "cert.pem"))).fingerprint256;
+      expect(output).toContain(`The server's own certificate, SHA-256 fingerprint: ${own} (`);
       expect((await secureRequest(Number(new URL(url).port), "/")).status).toBe(200);
       expect(existsSync(join(state, "zim-web", "tls", "cert.pem"))).toBe(true);
     } finally {
@@ -540,7 +565,7 @@ describe.skipIf(!hasOpenssl)("https", () => {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`no fingerprint announced: ${output}`)), 15000);
       child.stdout.on("data", () => {
-        if (output.includes("Its SHA-256:")) {
+        if (output.includes("SHA-256 fingerprint:")) {
           clearTimeout(timer);
           resolve();
         }

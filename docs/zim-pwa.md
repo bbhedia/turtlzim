@@ -155,6 +155,11 @@ a site-signing key. (The certificate the server made before this was itself an a
 server; it was never meant to be imported, and is not made any more.) It is valid for a year, and a new one
 (a new authority, to trust again) is made when the names change or a year is nearly up.
 
+**The apps of a computer or a phone do not need this.** The program for a computer and the Android app (`docs/zim-desktop-shell.md`, `docs/zim-mobile-shell.md`) can talk to such a server without any
+authority being trusted: they show the person the SHA-256 fingerprint of **the server's own certificate** and ask whether to trust it, and the server prints that fingerprint when it starts (*The server's own
+certificate, SHA-256 fingerprint: …*, which is not the authority's: an app compares that one). From then on an app takes that certificate for that address and no other, and asks again when the
+certificate is made again. A *browser* still needs the authority below (or the warning's *Proceed*, which gives no offline app).
+
 **On each computer that visits:**
 
 1. Get the authority's file: `https://ADDRESS:PORT/ca.pem` (it is sent as a certificate to install, and a

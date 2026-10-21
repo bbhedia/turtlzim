@@ -69,6 +69,33 @@ public class AccountRulesTest {
     }
 
     @Test
+    public void aCertificateIsTrustedForAServerAndNotForAPageOfItOrForAnAddressThatIsNotHttps() throws Exception {
+        for (String good : new String[] { "https://notes.example.org", "https://notes.example.org:8443", "https://notes.example.org:8443/", "https://192.168.10.10:8443", "https://[::1]:8443", "HTTPS://Notes.Example.org" }) AccountRules.checkOrigin(good);
+        for (String bad : new String[] { "http://notes.example.org", "http://127.0.0.1:8080", "ftp://notes.example.org", "https://ada:secret@notes.example.org", "https://ada@notes.example.org", "https://notes.example.org/api/me", "https://notes.example.org/?x=1", "https://notes.example.org/#x", "https://", "not an address", "" }) {
+            try {
+                AccountRules.checkOrigin(bad);
+                fail("was not refused: " + bad);
+            } catch (AccountRules.Refused expected) {
+                assertFalse(expected.getMessage().isEmpty());
+            }
+        }
+        try {
+            AccountRules.checkOrigin(null);
+            fail("null was not refused");
+        } catch (AccountRules.Refused expected) {
+            // as it should be
+        }
+        // the key is the origin, the port always written, so that one server is one key whichever way its address was typed
+        assertEquals("https://notes.example.org:443", AccountRules.originKey(AccountRules.checkOrigin("https://Notes.Example.org/")));
+        assertEquals("https://notes.example.org:443", AccountRules.originKey(AccountRules.checkOrigin("https://notes.example.org:443")));
+        assertEquals("https://notes.example.org:8443", AccountRules.originKey(AccountRules.checkOrigin("https://notes.example.org:8443")));
+        assertEquals("https://192.168.10.10:8443", AccountRules.originKey(AccountRules.checkOrigin("https://192.168.10.10:8443")));
+        assertEquals("https://[::1]:8443", AccountRules.originKey(AccountRules.checkOrigin("https://[::1]:8443")));
+        // and the address of a request has the same key as the origin that its server was trusted under
+        assertEquals("https://notes.example.org:8443", AccountRules.originKey(okhttp3.HttpUrl.parse("https://notes.example.org:8443/api/sync/x?y=1")));
+    }
+
+    @Test
     public void theBrowserIsSentOnlyWhereAPersonWouldGo() throws Exception {
         for (String good : new String[] { "https://notes.example.org/?app=authorize&state=x", "http://127.0.0.1:8080/?app=authorize", "http://localhost:3000/" }) {
             AccountRules.checkBrowserUrl(good);

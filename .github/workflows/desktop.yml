@@ -90,6 +90,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libxdo-dev libssl-dev patchelf file
+      # (the program's own tests, on each system: its folders, its requests, and the check of a certificate that nothing trusts, made before a byte of the request is sent, by the TLS that
+      # the system has: OpenSSL here, SChannel on Windows)
+      - name: the program's tests
+        working-directory: desktop/src-tauri
+        run: cargo test
       - name: installers
         working-directory: desktop
         shell: bash # (Windows' own would not read the retry below)

@@ -4,8 +4,10 @@
 
 mod account;
 mod folders;
+mod pins;
 mod secrets;
 mod signin;
+mod tls;
 
 use percent_encoding::percent_decode_str;
 use std::path::Path;
@@ -181,19 +183,51 @@ async fn fs_commit(registry: Registry<'_>, id: String, txn: String, plan: folder
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------
-// the account (the work is in account.rs, signin.rs and secrets.rs; shell.js is the page's side of it)
+// the account (the work is in account.rs, tls.rs, pins.rs, signin.rs and secrets.rs; shell.js is the page's side of it)
 
-/// What the account needs of the program: the requests to the server, the wait for the browser's return, and the place for the token.
+/// What the account needs of the program: the requests to the server, the certificates that the person trusted for servers the system does not know, the wait for the browser's return, and
+/// the place for the token.
 struct Account {
     net: account::Net,
+    pins: pins::Pins,
     signin: signin::SignIn,
     secrets: secrets::Secrets,
 }
 
-/// A request to the account server, made by the program (no cookies, no redirects, the system's trusted authorities).
+/// A request to the account server, made by the program (no cookies, no redirects, the system's trusted authorities, or, for a server whose certificate the person trusted, that one).
 #[tauri::command]
-async fn account_request(account: State<'_, Account>, request: account::NetRequest) -> Result<account::NetResponse, String> {
-    account.net.send(request).await
+async fn account_request(account: State<'_, Account>, request: account::NetRequest) -> Result<account::NetResponse, account::NetFailure> {
+    let pin = tls::origin_of(&request.url).and_then(|origin| account.pins.get(&origin));
+    account.net.send(request, pin.as_deref()).await
+}
+
+/// What the server at this origin shows as its certificate: a handshake, and no request.
+#[tauri::command]
+async fn account_trust_inspect(origin: String) -> Result<tls::CertificateInfo, account::NetFailure> {
+    tls::inspect(&origin).await
+}
+
+/// Trust the certificate with this fingerprint for this origin, if the server shows it now.
+#[tauri::command]
+async fn account_trust_pin(account: State<'_, Account>, origin: String, fingerprint: String) -> Result<(), account::NetFailure> {
+    tls::trust(&account.pins, &origin, &fingerprint).await
+}
+
+/// The fingerprint that was trusted for this origin, if one was.
+#[tauri::command]
+fn account_trust_pinned(account: State<'_, Account>, origin: String) -> Result<Option<String>, String> {
+    let url = tls::check_origin(&origin)?;
+    Ok(tls::origin_key(&url).and_then(|key| account.pins.get(&key)))
+}
+
+/// Stop trusting what was trusted for this origin.
+#[tauri::command]
+fn account_trust_unpin(account: State<'_, Account>, origin: String) -> Result<(), String> {
+    let url = tls::check_origin(&origin)?;
+    match tls::origin_key(&url) {
+        Some(key) => account.pins.remove(&key),
+        None => Ok(()),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -258,11 +292,20 @@ fn main() {
             account_sign_in_cancel,
             account_secret_get,
             account_secret_set,
-            account_secret_remove
+            account_secret_remove,
+            account_trust_inspect,
+            account_trust_pin,
+            account_trust_pinned,
+            account_trust_unpin
         ])
         .setup(|app| {
             app.manage(Mutex::new(folders::Registry::load(app.path().app_data_dir()?.join("folders.json"))));
-            app.manage(Account { net: account::Net::new()?, signin: signin::SignIn::default(), secrets: secrets::Secrets::new(Box::new(secrets::SystemKeychain), app.path().app_data_dir()?) });
+            app.manage(Account {
+                net: account::Net::new()?,
+                pins: pins::Pins::new(app.path().app_data_dir()?),
+                signin: signin::SignIn::default(),
+                secrets: secrets::Secrets::new(Box::new(secrets::SystemKeychain), app.path().app_data_dir()?),
+            });
             let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
                 .title("Zim Notebook")
                 .inner_size(1200.0, 800.0)

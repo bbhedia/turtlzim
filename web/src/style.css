@@ -83,6 +83,8 @@ button.secondary { background: transparent; }
 .app-list li > button { flex: none; }
 /* the address that the person's browser was sent to, for a person whose browser did not open: easy to select and copy whole */
 .wait-address { display: block; margin-top: 0.3rem; padding: 0.4rem 0.5rem; border: 1px solid var(--zim-border); border-radius: 6px; background: var(--zim-code-bg); font-size: 0.75rem; overflow-wrap: anywhere; user-select: all; }
+/* a certificate's fingerprint, to be read and compared with another one: whole, in a fixed-width face, easy to select */
+.fingerprint { display: block; margin: 0.3rem 0; padding: 0.4rem 0.5rem; border: 1px solid var(--zim-border); border-radius: 6px; background: var(--zim-code-bg); font-size: 0.8rem; line-height: 1.5; overflow-wrap: normal; word-break: normal; user-select: all; }
 
 .loading { padding: 2rem; color: var(--zim-muted); }
 

@@ -73,11 +73,16 @@
 
   // An account on a server (web/src/account/native.ts is the page's side of it): the program makes the requests itself (the page's content policy lets it ask nowhere but its own address),
   // the person signs in in their own browser (the program opens it, and waits for it to come back to a port of this computer), and the token is kept where the system keeps secrets.
-  // What an answer or a failure is, is the program's to say: a failure comes back as the words for a person.
+  // What an answer or a failure is, is the program's to say: a failure comes back as the words for a person, and, when it is about the server's certificate, with a `code` that the page acts on
+  // (`certificate-untrusted`, `certificate-changed`): the program sends that as an object, and the page is given an error that has both.
+  const failed = (error) => {
+    if (error === null || typeof error !== "object") throw error;
+    throw Object.assign(new Error(String(error.message ?? "The request could not be made.")), error.code ? { code: String(error.code) } : {});
+  };
   const account = {
     // the address that the program suggests when the person connects (ZIM_ACCOUNT_SERVER, or none)
     defaultServer: __ZIM_ACCOUNT_SERVER__,
-    request: (request) => invoke("account_request", { request }),
+    request: (request) => invoke("account_request", { request }).catch(failed),
     signIn: {
       begin: (state) => invoke("account_sign_in_begin", { state }),
       wait: (url) => invoke("account_sign_in_wait", { url }),
@@ -87,6 +92,13 @@
       get: (name) => invoke("account_secret_get", { name }),
       set: (name, value) => invoke("account_secret_set", { name, value }),
       remove: (name) => invoke("account_secret_remove", { name }),
+    },
+    // a server whose certificate the system does not know, trusted by its fingerprint after the person has looked at it (tls.rs, pins.rs): the program keeps what was trusted
+    trust: {
+      inspect: (origin) => invoke("account_trust_inspect", { origin }).catch(failed),
+      pin: (origin, fingerprint) => invoke("account_trust_pin", { origin, fingerprint }).catch(failed),
+      pinned: (origin) => invoke("account_trust_pinned", { origin }),
+      unpin: (origin) => invoke("account_trust_unpin", { origin }),
     },
   };
 

@@ -151,6 +151,8 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
       event.preventDefault();
       if (working || !refresh()) return;
       working = true;
+      // (what was said of the last attempt is not left on the screen while the next one is under way)
+      errorLine.textContent = "";
       confirmButton.disabled = true;
       for (const button of walkAways) button.disabled = true;
       if (options.working) confirmButton.textContent = options.working;

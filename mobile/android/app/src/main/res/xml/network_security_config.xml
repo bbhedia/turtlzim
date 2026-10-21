@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- What the app may reach, and how. Every address is https, with the authorities that the system trusts (a certificate that the device does not trust is refused, and the
      person is told so); the one exception is this device itself, over plain http, which is how a server on the same machine is tried out (nothing on it leaves the device).
-     No user-installed authority is trusted: that is the default for an app of this target level, and it is said here so that it stays so. -->
+     No user-installed authority is trusted: that is the default for an app of this target level, and it is said here so that it stays so.
+     One more thing is not decided here: a server whose own certificate the person trusted by its fingerprint (PinnedTrust, E17e). That connection has a trust manager of its own, which takes
+     that certificate and nothing else, and this configuration does not apply to it; it is for that one address only, and the system's trust is not what it falls back to. -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>

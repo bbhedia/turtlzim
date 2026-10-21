@@ -3,10 +3,12 @@
 // the shell's hooks are made up here.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import type { AccountHooks, NetRequest, NetResponse, SignInResult } from "../src/app/shell";
+import { CERTIFICATE_CHANGED, CERTIFICATE_UNTRUSTED } from "../src/app/shell";
+import type { AccountHooks, CertificateInfo, NetRequest, NetResponse, SignInResult } from "../src/app/shell";
 import { APP_PARAMS, appKind, keepAppRequest, parseAppRequest, takeAppRequest } from "../src/account/app-request";
 import { ApiError, TransportError } from "../src/account/client";
-import { challengeOf, NativeAccount, parseServer, randomToken, SERVER_SETTING, SignInCancelled } from "../src/account/native";
+import { CertificateRefused, challengeOf, NativeAccount, parseServer, randomToken, SERVER_SETTING, sameFingerprint, SignInCancelled } from "../src/account/native";
+import type { CertificateQuestion } from "../src/account/native";
 import { NativeAccountUi } from "../src/account/native-ui";
 
 const SERVER = "https://notes.example.org";
@@ -337,6 +339,290 @@ describe("connecting an app to an account", () => {
       await expect(fetcher(input), input).rejects.toBeInstanceOf(TransportError);
     }
     expect(server.log).toEqual([]);
+  });
+});
+
+/** Two fingerprints as a shell writes them (capitals, colons). */
+const FP_A = Array.from({ length: 32 }, (_, i) => (i * 7 + 1).toString(16).padStart(2, "0").toUpperCase()).join(":");
+const FP_B = Array.from({ length: 32 }, (_, i) => (i * 11 + 5).toString(16).padStart(2, "0").toUpperCase()).join(":");
+
+/**
+ * What a shell does about a certificate that the system does not know, as far as the page can tell (the real ones are tried against real TLS servers: the program's Rust tests, the device
+ * test): a request to an origin is refused with `CERTIFICATE_UNTRUSTED` unless a certificate was trusted for it, and with `CERTIFICATE_CHANGED` if the one trusted is not what the server
+ * shows; `inspect` says what the server shows; `pin` keeps it only if the server shows it now.
+ */
+function trusting(made: ReturnType<typeof shell>, shown: { fingerprint: string; knownToSystem?: boolean }) {
+  const pins = new Map<string, string>();
+  const calls: string[] = [];
+  const through = made.hooks.request;
+  made.hooks.request = async (request) => {
+    const origin = new URL(request.url).origin;
+    const pin = pins.get(origin);
+    if (pin !== undefined && !sameFingerprint(pin, shown.fingerprint)) throw Object.assign(new Error("The server's certificate is not the one that you trusted for it."), { code: CERTIFICATE_CHANGED });
+    if (pin === undefined && !shown.knownToSystem) throw Object.assign(new Error("The server's certificate is not one that this computer trusts (self-signed certificate)."), { code: CERTIFICATE_UNTRUSTED });
+    return through(request);
+  };
+  made.hooks.trust = {
+    inspect: async (origin) => {
+      calls.push(`inspect ${origin}`);
+      return { fingerprint: shown.fingerprint, names: ["notes.example.org"] } satisfies CertificateInfo;
+    },
+    pin: async (origin, fingerprint) => {
+      calls.push(`pin ${origin} ${fingerprint}`);
+      if (!sameFingerprint(fingerprint, shown.fingerprint)) throw new Error("The server shows another certificate now.");
+      pins.set(origin, fingerprint);
+    },
+    pinned: async (origin) => pins.get(origin) ?? null,
+    unpin: async (origin) => {
+      calls.push(`unpin ${origin}`);
+      pins.delete(origin);
+    },
+  };
+  return { pins, calls };
+}
+
+describe("a server whose certificate the system does not know", () => {
+  /** An app, a server that shows `FP_A`, and the questions that the person was put to (answered with `answers`, in order). */
+  const setup = (answers: boolean[] = [true]) => {
+    const server = new StandInServer();
+    const made = shell(server);
+    const trust = trusting(made, { fingerprint: FP_A });
+    const native = new NativeAccount(made.hooks, made.store);
+    const asked: CertificateQuestion[] = [];
+    const ask = async (question: CertificateQuestion) => {
+      asked.push(question);
+      trust.calls.push("ask");
+      return answers.shift() ?? false;
+    };
+    return { server, made, trust, native, asked, ask };
+  };
+
+  it("is put to the person with its fingerprint before anything else, and is trusted only if they say yes: then the browser is opened and the account is connected", async () => {
+    const { server, made, trust, native, asked, ask } = setup();
+    expect(native.canTrustCertificates).toBe(true);
+    const account = await native.connect(SERVER, undefined, ask);
+    expect(account.email).toBe("ada@example.org");
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toMatchObject({ kind: "new", previous: null, server: SERVER, info: { fingerprint: FP_A } });
+    expect(asked[0]!.reason, "the shell's own words are shown").toMatch(/not one that this computer trusts/);
+    // looked at first, put to the person, and only then trusted (for the server's address and for what was looked at); the browser comes after
+    expect(trust.calls).toEqual([`inspect ${SERVER}`, "ask", `pin ${SERVER} ${FP_A}`]);
+    expect(made.calls).toEqual(["begin", "wait"]);
+    expect(trust.pins.get(SERVER)).toBe(FP_A);
+    // what went to the server before the certificate was trusted went nowhere: the shell refused it, so the server saw the first request only once it was trusted
+    expect(server.log.map((r) => new URL(r.url).pathname)).toEqual(["/api/providers", "/api/app/token"]);
+    expect(server.log.every((r) => r.headers.authorization === undefined)).toBe(true);
+  });
+
+  it("is not trusted when the person says no: nothing is kept, the browser is not opened, and the refusal is not a failure to explain", async () => {
+    const { server, made, trust, native, asked, ask } = setup([false]);
+    const failure = await native.connect(SERVER, undefined, ask).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(CertificateRefused);
+    expect((failure as Error).message).toMatch(/did not trust that server's certificate, so nothing was connected/);
+    expect(asked).toHaveLength(1);
+    expect(trust.pins.size).toBe(0);
+    expect(trust.calls).toEqual([`inspect ${SERVER}`, "ask"]);
+    expect(made.calls).toEqual([]);
+    expect(server.log).toEqual([]);
+    expect(made.secrets.size).toBe(0);
+    expect(made.settings.size).toBe(0);
+  });
+
+  it("is asked about again, with the one that was trusted, when the server shows another: a new one is trusted only if the person says yes, and an old one is kept if they say no", async () => {
+    // yes: the new one replaces the old one
+    let setting = setup([true]);
+    setting.trust.pins.set(SERVER, FP_B);
+    await setting.native.connect(SERVER, undefined, setting.ask);
+    expect(setting.asked).toHaveLength(1);
+    expect(setting.asked[0]).toMatchObject({ kind: "changed", previous: FP_B, info: { fingerprint: FP_A } });
+    expect(setting.asked[0]!.reason).toMatch(/not the one that you trusted/);
+    expect(setting.trust.pins.get(SERVER)).toBe(FP_A);
+    // no: what was trusted stays, and nothing else happens
+    setting = setup([false]);
+    setting.trust.pins.set(SERVER, FP_B);
+    await expect(setting.native.connect(SERVER, undefined, setting.ask)).rejects.toBeInstanceOf(CertificateRefused);
+    expect(setting.trust.pins.get(SERVER), "the old one stays").toBe(FP_B);
+    expect(setting.made.calls).toEqual([]);
+  });
+
+  it("asks nothing of a certificate that was trusted and is shown again, and nothing of one that the system knows", async () => {
+    const trusted = setup();
+    trusted.trust.pins.set(SERVER, FP_A.toLowerCase().replace(/:/g, " "));
+    await trusted.native.connect(SERVER, undefined, trusted.ask);
+    expect(trusted.asked, "the same fingerprint, written otherwise").toEqual([]);
+    const server = new StandInServer();
+    const made = shell(server);
+    const known = trusting(made, { fingerprint: FP_A, knownToSystem: true });
+    await new NativeAccount(made.hooks, made.store).connect(SERVER, undefined, async () => {
+      throw new Error("asked");
+    });
+    expect(known.calls, "nothing was looked at, and nothing kept").toEqual([]);
+  });
+
+  it("is refused, with the shell's words, when the person can't be asked or the shell can't keep what they trust", async () => {
+    // no way to ask: the server does not work, and nothing was looked at
+    let setting = setup();
+    await expect(setting.native.connect(SERVER)).rejects.toThrow(/does not work as an account server: The server's certificate is not one that this computer trusts/);
+    expect(setting.trust.calls).toEqual([]);
+    // a shell that can't keep what is trusted
+    setting = setup();
+    delete setting.made.hooks.trust;
+    const without = new NativeAccount(setting.made.hooks, setting.made.store);
+    expect(without.canTrustCertificates).toBe(false);
+    await expect(without.connect(SERVER, undefined, setting.ask)).rejects.toThrow(/does not work as an account server: The server's certificate is not one that this computer trusts/);
+    expect(setting.asked).toEqual([]);
+    expect(await without.pinned(SERVER)).toBeNull();
+  });
+
+  it("says when the certificate could not be looked at, or could not be trusted, and does not go round again", async () => {
+    let setting = setup();
+    setting.made.hooks.trust!.inspect = async () => {
+      throw new Error("The server did not answer.");
+    };
+    await expect(setting.native.connect(SERVER, undefined, setting.ask)).rejects.toThrow(/could not be looked at: The server did not answer/);
+    expect(setting.asked).toEqual([]);
+    // the shell looked again and the server showed another one: nothing is trusted
+    setting = setup();
+    let shown = FP_A;
+    setting.made.hooks.trust!.inspect = async () => ({ fingerprint: shown });
+    setting.made.hooks.trust!.pin = async () => {
+      throw new Error("The server shows another certificate now.");
+    };
+    await expect(setting.native.connect(SERVER, undefined, async (question) => ((shown = FP_B), (void question, true)))).rejects.toThrow(/could not be trusted: The server shows another certificate now/);
+    // a trust that does not take (the server is refused all the same): the person is asked once, not again and again
+    setting = setup([true, true, true]);
+    setting.made.hooks.trust!.pin = async () => undefined;
+    await expect(setting.native.connect(SERVER, undefined, setting.ask)).rejects.toThrow(/does not work as an account server/);
+    expect(setting.asked).toHaveLength(1);
+  });
+
+  it("is not asked about when the person cancels while the shell is looking, and the browser is not opened", async () => {
+    const { made, native, trust } = setup();
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => (release = resolve));
+    const inspect = made.hooks.trust!.inspect;
+    made.hooks.trust!.inspect = async (origin) => {
+      await slow;
+      return inspect(origin);
+    };
+    const asked: number[] = [];
+    const connecting = native.connect(SERVER, undefined, async () => (asked.push(1), true));
+    for (let i = 0; i < 50 && !trust.calls.length; i++) await new Promise((r) => setTimeout(r, 2));
+    native.cancel();
+    release();
+    await expect(connecting).rejects.toBeInstanceOf(SignInCancelled);
+    expect(asked).toEqual([]);
+    // (the shell was told to stop; it was never sent for the browser)
+    expect(made.calls).toEqual(["cancel"]);
+    expect(made.opened).toEqual([]);
+    expect(trust.pins.size).toBe(0);
+  });
+
+  it("is forgotten with the connection: signing out, and a connection to another server, drop what was trusted for the one that is left", async () => {
+    const { made, trust, native, ask } = setup([true, true, true]);
+    await native.connect(SERVER, undefined, ask);
+    expect(trust.pins.get(SERVER)).toBe(FP_A);
+    expect(await native.pinned()).toBe(FP_A);
+    await native.disconnect();
+    expect(trust.pins.size).toBe(0);
+    expect(await native.pinned()).toBeNull();
+    // connected to another server before: its trust goes when this server replaces it
+    made.store.set(SERVER_SETTING, "https://old.example.org");
+    trust.pins.set("https://old.example.org", FP_B);
+    await new NativeAccount(made.hooks, made.store).connect(SERVER, undefined, ask);
+    expect([...trust.pins.keys()]).toEqual([SERVER]);
+    // and the token that goes with a lost connection keeps both the address and what was trusted: signing in again is one step
+    const again = new NativeAccount(made.hooks, made.store);
+    await again.forgetToken();
+    expect(again.server).toBe(SERVER);
+    expect(trust.pins.get(SERVER)).toBe(FP_A);
+  });
+
+  it("is told to what is asked of the server afterwards as a refusal about the certificate, not as a server that is down", async () => {
+    const { made, trust, native, ask } = setup();
+    await native.connect(SERVER, undefined, ask);
+    expect((await native.client.me())?.email).toBe("ada@example.org");
+    // the server shows another certificate: what was trusted is not it
+    trust.pins.set(SERVER, FP_B);
+    const changed = await native.client.me().then(() => null, (error: unknown) => error);
+    expect(changed).toBeInstanceOf(ApiError);
+    expect((changed as ApiError).code).toBe(CERTIFICATE_CHANGED);
+    expect((changed as ApiError).message).toMatch(/not the one that you trusted/);
+    // while a server that is down is still told as that
+    made.hooks.request = async () => {
+      throw new Error("The server did not answer.");
+    };
+    const down = await native.client.me().then(() => null, (error: unknown) => error);
+    expect((down as ApiError).code).toBe("offline");
+    // (a code that the page does not act on is not passed on)
+    made.hooks.request = async () => {
+      throw Object.assign(new Error("odd"), { code: "something-else" });
+    };
+    expect(((await native.client.me().then(() => null, (error: unknown) => error)) as ApiError).code).toBe("offline");
+  });
+
+  it("is told by what a shell rejects with: an error, an object with a message, or words", async () => {
+    for (const failure of [Object.assign(new Error("words"), { code: CERTIFICATE_UNTRUSTED }), { message: "words", code: CERTIFICATE_UNTRUSTED }]) {
+      const server = new StandInServer();
+      const made = shell(server);
+      made.store.set(SERVER_SETTING, SERVER);
+      made.hooks.request = async () => {
+        throw failure;
+      };
+      const error = await new NativeAccount(made.hooks, made.store).client.me().then(() => null, (e: unknown) => e);
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).code).toBe(CERTIFICATE_UNTRUSTED);
+      expect((error as ApiError).message).toBe("words");
+    }
+    const server = new StandInServer();
+    const made = shell(server);
+    made.store.set(SERVER_SETTING, SERVER);
+    made.hooks.request = async () => {
+      throw "just words" as unknown as Error;
+    };
+    const error = (await new NativeAccount(made.hooks, made.store).client.me().then(() => null, (e: unknown) => e)) as ApiError;
+    expect([error.code, error.message]).toEqual(["offline", "just words"]);
+  });
+
+  it("compares fingerprints however they are written, and only whole ones", () => {
+    expect(sameFingerprint(FP_A, FP_A.toLowerCase())).toBe(true);
+    expect(sameFingerprint(FP_A, FP_A.replace(/:/g, " "))).toBe(true);
+    expect(sameFingerprint(FP_A, FP_A.replace(/:/g, ""))).toBe(true);
+    expect(sameFingerprint(FP_A, FP_B)).toBe(false);
+    expect(sameFingerprint(FP_A.slice(0, -3), FP_A.slice(0, -3)), "a short one is no fingerprint, even if it is equal to itself").toBe(false);
+    expect(sameFingerprint("", "")).toBe(false);
+    // (what only differs in the last digit)
+    expect(sameFingerprint(FP_A, `${FP_A.slice(0, -1)}${FP_A.endsWith("0") ? "1" : "0"}`)).toBe(false);
+  });
+});
+
+describe("what the menu says of a certificate that the app was refused", () => {
+  it("is said once, and leads to the certificate, until it is trusted; a server that is down says nothing of one", async () => {
+    const server = new StandInServer();
+    const made = shell(server);
+    const trust = trusting(made, { fingerprint: FP_A });
+    const native = new NativeAccount(made.hooks, made.store);
+    const said: string[] = [];
+    const accountUi = new NativeAccountUi((text) => said.push(text), () => {}, native);
+    await native.connect(SERVER, undefined, async () => true);
+    await accountUi.refresh();
+    expect(accountUi.account?.email).toBe("ada@example.org");
+    // (a new run: what the server shows is not what was trusted)
+    trust.pins.set(SERVER, FP_B);
+    const again = new NativeAccountUi((text) => said.push(text), () => {}, new NativeAccount(made.hooks, made.store));
+    await again.refresh();
+    expect(again.account, "no account is known while the certificate is refused").toBeNull();
+    expect(again.menuLabel).toBe("The server's certificate…");
+    expect(said).toHaveLength(1);
+    expect(said[0]).toMatch(/not the one you trusted/);
+    await again.refresh();
+    expect(said, "said once").toHaveLength(1);
+    // a server that is down is not a certificate
+    made.hooks.request = async () => {
+      throw new Error("The server did not answer.");
+    };
+    await again.refresh();
+    expect(again.menuLabel).toBe("Connect to an account server…");
   });
 });
 

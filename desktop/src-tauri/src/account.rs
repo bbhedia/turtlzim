@@ -3,6 +3,7 @@
 // server (or of a server on this computer's own address, which is how one is tried out), with the few headers that an app's request has, and follows no redirect: the token is for the server
 // that was typed, and goes to no other. The system's own list of trusted certificate authorities is used (OpenSSL on Linux, SChannel on Windows): a server whose certificate this computer
 // does not trust is refused, with the reason in words.
+use crate::tls::{self, CERTIFICATE_UNTRUSTED};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -32,8 +33,34 @@ pub struct NetResponse {
     pub body: String,
 }
 
+/// A request that could not be made: the words for a person and, for the two ways that a certificate is refused (`tls.rs`), the code that the page acts on.
+#[derive(Debug, Serialize, PartialEq, Eq, Clone)]
+pub struct NetFailure {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
+}
+
+impl NetFailure {
+    pub fn coded(code: &'static str, message: &str) -> NetFailure {
+        NetFailure { message: message.to_string(), code: Some(code) }
+    }
+}
+
+impl From<String> for NetFailure {
+    fn from(message: String) -> NetFailure {
+        NetFailure { message, code: None }
+    }
+}
+
+impl From<&str> for NetFailure {
+    fn from(message: &str) -> NetFailure {
+        NetFailure { message: message.to_string(), code: None }
+    }
+}
+
 /// The headers of the page's request that go on: the others (a cookie, an origin, a referrer, and everything the page's engine adds) are the page's, and not an app's.
-const FORWARDED: [&str; 4] = ["authorization", "content-type", "x-requested-with", "accept"];
+pub(crate) const FORWARDED: [&str; 4] = ["authorization", "content-type", "x-requested-with", "accept"];
 
 fn is_loopback(url: &Url) -> bool {
     match url.host() {
@@ -98,8 +125,10 @@ impl Net {
         Ok(Net { remote, local })
     }
 
-    /// Make a request, and say what came of it. A failure is told in words that a person can act on (the certificate is not trusted, the server is not there).
-    pub async fn send(&self, request: NetRequest) -> Result<NetResponse, String> {
+    /// Make a request, and say what came of it. A failure is told in words that a person can act on (the certificate is not trusted, the server is not there). `pin` is the fingerprint of
+    /// the certificate that the person trusted for this server, if they did (the program keeps it, `pins.rs`): the request then goes over a connection whose certificate is checked against it
+    /// before anything is sent (`tls::send_pinned`), and the system's own trust is not asked about that server at all.
+    pub async fn send(&self, request: NetRequest, pin: Option<&str>) -> Result<NetResponse, NetFailure> {
         let url = check_url(&request.url)?;
         let method = match request.method.to_ascii_uppercase().as_str() {
             "GET" => reqwest::Method::GET,
@@ -109,6 +138,10 @@ impl Net {
             "DELETE" => reqwest::Method::DELETE,
             _ => return Err("That is not a request that this app makes.".into()),
         };
+        // (a trust that can't be read is no trust: the server is then one that the system does not know, and the person is asked again)
+        if let Some(pin) = pin.and_then(tls::parse_fingerprint).filter(|_| url.scheme() == "https") {
+            return tls::send_pinned(&url, &pin, method, &request.headers, request.body).await;
+        }
         let client = if is_loopback(&url) { &self.local } else { &self.remote };
         let mut builder = client.request(method, url);
         for (name, value) in &request.headers {
@@ -136,8 +169,9 @@ impl Net {
     }
 }
 
-/// A failure of a request, with its causes in order (the certificate is not trusted: that is deep in the chain, and is what the person needs to read).
-fn describe(error: reqwest::Error) -> String {
+/// A failure of a request, with its causes in order (the certificate is not trusted: that is deep in the chain, and is what the person needs to read). One about the certificate carries the code
+/// that the page acts on.
+fn describe(error: reqwest::Error) -> NetFailure {
     let error = error.without_url();
     let mut parts = vec![error.to_string()];
     let mut source = std::error::Error::source(&error);
@@ -148,14 +182,34 @@ fn describe(error: reqwest::Error) -> String {
         }
         source = cause.source();
     }
-    explain(&parts.join(": "))
+    let said = parts.join(": ");
+    NetFailure { code: refused_certificate(&said).then_some(CERTIFICATE_UNTRUSTED), message: explain(&said) }
+}
+
+/// Whether the system said what it said for the sake of the server's certificate (and not for one of the failures that `explain` tells otherwise).
+fn refused_certificate(said: &str) -> bool {
+    let lower = said.to_ascii_lowercase();
+    lower.contains("certificate") && !is_connection_failure(&lower)
+}
+
+/// The failures that are about getting to the server and not about what it showed, written in the system's words (lower case).
+fn is_connection_failure(lower: &str) -> bool {
+    lower.contains("connection refused")
+        || lower.contains("actively refused")
+        || lower.contains("dns error")
+        || lower.contains("failed to lookup")
+        || lower.contains("name or service not known")
+        || lower.contains("no such host")
+        || lower.contains("nodename nor servname")
+        || lower.contains("timed out")
+        || lower.contains("deadline has elapsed")
 }
 
 /// What the system said, in words for a person. A failure about the server's certificate is told as that (the system's own words for it are long, and a person can do
 /// something about this one: trust the authority that made it, or use a server whose certificate is from one that the system knows); the reason that the system gave is kept.
-fn explain(said: &str) -> String {
+pub(crate) fn explain(said: &str) -> String {
     let lower = said.to_ascii_lowercase();
-    if lower.contains("connection refused") {
+    if lower.contains("connection refused") || lower.contains("actively refused") {
         return "The server did not answer: check the address, and that it is running.".to_string();
     }
     if lower.contains("dns error") || lower.contains("failed to lookup") || lower.contains("name or service not known") || lower.contains("no such host") || lower.contains("nodename nor servname") {
@@ -238,6 +292,28 @@ mod tests {
         assert_eq!(explain("error sending request: operation timed out"), "The server took too long to answer.");
         // what is not one of these is said as the system said it
         assert_eq!(explain("error sending request: something else broke"), "error sending request: something else broke");
+        // (and Windows says a refused connection in its own words)
+        assert_eq!(explain("error sending request: client error (Connect): No connection could be made because the target machine actively refused it. (os error 10061)"), "The server did not answer: check the address, and that it is running.");
+    }
+
+    #[test]
+    fn calls_a_refusal_for_the_certificate_that_and_nothing_else_by_that_code() {
+        let openssl = "error sending request: client error (Connect): error:0A000086:SSL routines:tls_post_process_server_certificate:certificate verify failed:../ssl/statem/statem_clnt.c:2124: (self-signed certificate in certificate chain)";
+        let schannel = "error sending request: client error (Connect): The certificate chain was issued by an authority that is not trusted. (os error -2146762487)";
+        for said in [openssl, schannel, "error sending request: the certificate has expired", "error sending request: Hostname mismatch, certificate is not valid for '192.168.1.1'"] {
+            assert!(refused_certificate(said), "{said}");
+        }
+        for said in [
+            "error sending request: client error (Connect): tcp connect error: Connection refused (os error 111)",
+            "error sending request: client error (Connect): dns error: failed to lookup address information: Name or service not known",
+            "error sending request: operation timed out",
+            "error sending request: something else broke",
+            // (a failure that mentions a certificate in passing, on the way to a server that is not there, is the server not being there)
+            "error sending request: certificate lookup: Connection refused (os error 111)",
+            "error sending request: certificate lookup: No connection could be made because the target machine actively refused it. (os error 10061)",
+        ] {
+            assert!(!refused_certificate(said), "{said}");
+        }
     }
 
     /// A server on this computer that answers every request with `answer` (its text is sent as it is), and tells what it was sent.
@@ -289,7 +365,7 @@ mod tests {
         let (port, mut seen) = serves(ok("{\"user\":null}")).await;
         let net = Net::new().unwrap();
         let sent = request(port, "POST", "/api/sync/x", &[("Authorization", "Bearer t0ken"), ("content-type", "application/json"), ("X-Requested-With", "zim"), ("cookie", "zim=stolen"), ("Origin", "https://evil.example"), ("referer", "https://evil.example/"), ("x-made-up", "1")], Some("{\"a\":1}"));
-        let answer = net.send(sent).await.unwrap();
+        let answer = net.send(sent, None).await.unwrap();
         assert_eq!(answer.status, 200);
         assert_eq!(answer.body, "{\"user\":null}");
         assert_eq!(answer.headers.get("x-answer").map(String::as_str), Some("yes"));
@@ -307,11 +383,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn knows_nothing_of_a_trusted_certificate_for_an_address_that_is_not_https() {
+        // (a fingerprint that is given with a plain http address is not a reason to talk TLS to it)
+        let (port, mut seen) = serves(ok("{\"user\":null}")).await;
+        let net = Net::new().unwrap();
+        let fingerprint = "93:B9:5C:F3:A9:7D:EA:48:7F:20:8A:87:CA:FA:03:DB:E1:C3:50:85:3A:D7:A0:64:02:86:98:6D:5C:FF:F5:55";
+        let answer = net.send(request(port, "GET", "/api/me", &[("authorization", "Bearer t0ken")], None), Some(fingerprint)).await.unwrap();
+        assert_eq!((answer.status, answer.body.as_str()), (200, "{\"user\":null}"));
+        assert!(seen.recv().await.unwrap().to_ascii_lowercase().starts_with("get /api/me http/1.1"), "it was asked in plain http");
+    }
+
+    #[tokio::test]
     async fn makes_every_kind_of_request_that_the_app_makes() {
         let net = Net::new().unwrap();
         for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "patch"] {
             let (port, mut seen) = serves(ok("{}")).await;
-            let answer = net.send(request(port, method, "/api/sync/notebooks/x", &[], if method == "GET" || method == "DELETE" { None } else { Some("{}") })).await.unwrap();
+            let answer = net.send(request(port, method, "/api/sync/notebooks/x", &[], if method == "GET" || method == "DELETE" { None } else { Some("{}") }), None).await.unwrap();
             assert_eq!(answer.status, 200, "{method}");
             let head = seen.recv().await.unwrap();
             assert!(head.starts_with(&format!("{} /api/sync/notebooks/x ", method.to_ascii_uppercase())), "{method}: {head}");
@@ -329,7 +416,7 @@ mod tests {
         for name in ["HTTP_PROXY", "http_proxy"] {
             std::env::remove_var(name);
         }
-        let answer = net.send(request(port, "GET", "/api/me", &[], None)).await.unwrap();
+        let answer = net.send(request(port, "GET", "/api/me", &[], None), None).await.unwrap();
         assert_eq!(answer.status, 200);
     }
 
@@ -337,12 +424,12 @@ mod tests {
     async fn gives_the_status_that_the_server_gave_and_follows_no_redirect() {
         let (port, _) = serves("HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/api/elsewhere\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into()).await;
         let net = Net::new().unwrap();
-        let answer = net.send(request(port, "GET", "/api/me", &[("authorization", "Bearer t0ken")], None)).await.unwrap();
+        let answer = net.send(request(port, "GET", "/api/me", &[("authorization", "Bearer t0ken")], None), None).await.unwrap();
         assert_eq!(answer.status, 302, "the redirect is the answer");
         assert_eq!(answer.headers.get("location").map(String::as_str), Some("http://127.0.0.1:1/api/elsewhere"));
         let body = "{\"code\":\"browser-only\"}";
         let (port, _) = serves(format!("HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())).await;
-        let answer = net.send(request(port, "GET", "/api/me", &[], None)).await.unwrap();
+        let answer = net.send(request(port, "GET", "/api/me", &[], None), None).await.unwrap();
         assert_eq!((answer.status, answer.body.as_str()), (403, "{\"code\":\"browser-only\"}"));
     }
 
@@ -350,13 +437,13 @@ mod tests {
     async fn refuses_what_is_not_a_request_of_the_app_before_it_connects() {
         let net = Net::new().unwrap();
         // (nothing listens at these: the refusal is the program's, not the network's)
-        let outside = net.send(NetRequest { url: "http://192.0.2.1/api/me".into(), method: "GET".into(), headers: HashMap::new(), body: None }).await.unwrap_err();
+        let outside = net.send(NetRequest { url: "http://192.0.2.1/api/me".into(), method: "GET".into(), headers: HashMap::new(), body: None }, None).await.unwrap_err().message;
         assert!(outside.contains("https"), "{outside}");
-        let wrong_method = net.send(request(1, "TRACE", "/api/me", &[], None)).await.unwrap_err();
+        let wrong_method = net.send(request(1, "TRACE", "/api/me", &[], None), None).await.unwrap_err().message;
         assert!(wrong_method.contains("not a request that this app makes"), "{wrong_method}");
-        let wrong_path = net.send(request(1, "GET", "/other", &[], None)).await.unwrap_err();
+        let wrong_path = net.send(request(1, "GET", "/other", &[], None), None).await.unwrap_err().message;
         assert!(wrong_path.contains("account server"), "{wrong_path}");
-        let big = net.send(request(1, "POST", "/api/x", &[], Some(&"x".repeat(MAX_BODY + 1)))).await.unwrap_err();
+        let big = net.send(request(1, "POST", "/api/x", &[], Some(&"x".repeat(MAX_BODY + 1))), None).await.unwrap_err().message;
         assert!(big.contains("too big"), "{big}");
     }
 
@@ -365,9 +452,10 @@ mod tests {
         // a port that nobody listens on
         let port = { TcpListener::bind(("127.0.0.1", 0)).await.unwrap().local_addr().unwrap().port() };
         let net = Net::new().unwrap();
-        let failure = net.send(request(port, "GET", "/api/me", &[], None)).await.unwrap_err();
-        assert!(!failure.is_empty());
-        assert!(!failure.contains(&port.to_string()), "an address does not come back with a failure: {failure}");
+        let failure = net.send(request(port, "GET", "/api/me", &[], None), None).await.unwrap_err();
+        assert!(!failure.message.is_empty());
+        assert!(!failure.message.contains(&port.to_string()), "an address does not come back with a failure: {}", failure.message);
+        assert_eq!(failure.code, None, "a server that is not there is not a certificate");
     }
 
     /// By hand, against a real TLS server (`ZIM_TLS_URL=https://127.0.0.1:PORT/api/health [ZIM_TLS_EXPECT=refused] cargo test --bin zim-notebook-desktop tls -- --ignored --nocapture`):
@@ -378,9 +466,11 @@ mod tests {
     async fn a_server_with_a_certificate_that_the_system_does_not_trust_is_refused_and_one_it_trusts_is_not() {
         let url = std::env::var("ZIM_TLS_URL").expect("ZIM_TLS_URL names the server to ask");
         let net = Net::new().unwrap();
-        let result = net.send(NetRequest { url, method: "GET".into(), headers: HashMap::new(), body: None }).await;
+        let result = net.send(NetRequest { url, method: "GET".into(), headers: HashMap::new(), body: None }, None).await;
         if std::env::var("ZIM_TLS_EXPECT").as_deref() == Ok("refused") {
-            let reason = result.unwrap_err();
+            let failure = result.unwrap_err();
+            assert_eq!(failure.code, Some(CERTIFICATE_UNTRUSTED), "a server that the system does not trust is refused with the code that the page acts on");
+            let reason = failure.message;
             println!("refused, as it should be: {reason}");
             assert!(reason.to_lowercase().contains("certificate") || reason.to_lowercase().contains("tls") || reason.to_lowercase().contains("ssl"), "{reason}");
         } else {
@@ -395,7 +485,7 @@ mod tests {
         let body = "x".repeat(MAX_ANSWER + 1);
         let (port, _) = serves(ok(&body)).await;
         let net = Net::new().unwrap();
-        let failure = net.send(request(port, "GET", "/api/big", &[], None)).await.unwrap_err();
-        assert!(failure.contains("too big"), "{failure}");
+        let failure = net.send(request(port, "GET", "/api/big", &[], None), None).await.unwrap_err();
+        assert!(failure.message.contains("too big"), "{}", failure.message);
     }
 }

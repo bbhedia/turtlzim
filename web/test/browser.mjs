@@ -7436,6 +7436,11 @@ try {
   // ==========================================================================================
   const standInProgram = () => {
     window.__TAURI_INTERNALS__ = {};
+    // (what the program does for a failure: the page is given an error that has the words and, for a certificate that is refused, the code that it acts on; the test's side sends both as an object)
+    const unwrap = (answer) => {
+      if (answer && typeof answer === "object" && "failed" in answer) throw Object.assign(new Error(answer.failed.message), answer.failed.code ? { code: answer.failed.code } : {});
+      return answer.ok;
+    };
     window.__zimShell = {
       version: "stand-in program",
       account: {
@@ -7443,14 +7448,30 @@ try {
         get defaultServer() {
           return window.__PROGRAM_DEFAULT_SERVER ?? null;
         },
-        request: (request) => window.__program_request(request),
+        request: (request) => window.__program_request(request).then(unwrap),
         signIn: { begin: (state) => window.__program_begin(state), wait: (url) => window.__program_wait(url), cancel: () => void window.__program_cancel() },
         secrets: { get: (name) => window.__program_secret_get(name), set: (name, value) => window.__program_secret_set(name, value), remove: (name) => window.__program_secret_remove(name) },
+        // (a program that can keep a certificate that the person trusts for a server that the system does not know; an older one has no such hooks. Read when it is used, after the test has said which this is)
+        get trust() {
+          return window.__PROGRAM_NO_TRUST
+            ? undefined
+            : {
+                inspect: (origin) => window.__program_trust_inspect(origin).then(unwrap),
+                pin: (origin, fingerprint) => window.__program_trust_pin(origin, fingerprint).then(unwrap),
+                pinned: (origin) => window.__program_trust_pinned(origin),
+                unpin: (origin) => window.__program_trust_unpin(origin),
+              };
+        },
       },
     };
   };
 
-  async function programRig() {
+  /**
+   * A program and its account server. With `secure`, the account's server is a second one, over https, with a certificate made for it by an authority that nothing knows (the person's
+   * browser is told to go on, as they would press Advanced > Proceed): the program trusts it by its fingerprint or not at all, as the real one does (`tls.rs`): a request goes over a connection
+   * whose certificate is checked **before anything is sent** on it, with no way round that the system knows the certificate.
+   */
+  async function programRig({ secure = false } = {}) {
     const { Accounts } = await import("../../server/src/accounts.mjs");
     const { createApi } = await import("../../server/src/api.mjs");
     const { openDatabase } = await import("../../server/src/db.mjs");
@@ -7458,22 +7479,50 @@ try {
     const { OAuth } = await import("../../server/src/oauth.mjs");
     const { randomBytes } = await import("node:crypto");
     const { default: http } = await import("node:http");
+    const { default: tlsModule } = await import("node:tls");
+    const { isIP } = await import("node:net");
     // (a service that is allowed in its own window is set up on this server: a browser offers to connect it, an app is sent to the browser for that)
     const config = { baseUrl: "http://127.0.0.1", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: {}, connectorApps: { dropbox: { clientId: "id", clientSecret: "secret" } } };
     const db = openDatabase(":memory:");
     const mailer = new OutboxMailer();
     const accounts = new Accounts({ db, mailer, config });
-    const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
-    const site = createStaticServer({ dir: dist, api });
+    const realApi = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+    /** What the server was asked (a handshake is not a request: a server that was only looked at, or that a program turned away, has seen none). */
+    const asked = [];
+    const api = (req, res) => {
+      if ((req.url ?? "").startsWith("/api/")) asked.push(`${req.method} ${req.url}`);
+      return realApi(req, res);
+    };
+    // (the app's own page comes from an http server; the account's server is the same one, or, with `secure`, another, over https)
+    const site = createStaticServer({ dir: dist, ...(secure ? {} : { api }) });
     await new Promise((resolve) => site.listen(0, "127.0.0.1", resolve));
     const at = `http://127.0.0.1:${site.address().port}`;
-    config.baseUrl = at;
+    let serverTls = secure ? selfSignedCertificate(mkdtempSync(join(tmpdir(), "zim-program-tls-")), []) : null;
+    let accountServer = site;
+    const startAccountServer = async (port = 0) => {
+      accountServer = createStaticServer({ dir: dist, tls: { key: serverTls.key, cert: serverTls.cert }, api });
+      await new Promise((resolve, reject) => {
+        accountServer.once("error", reject);
+        accountServer.listen(port, "127.0.0.1", resolve);
+      });
+    };
+    if (secure) await startAccountServer();
+    const serverAt = secure ? `https://127.0.0.1:${accountServer.address().port}` : at;
+    config.baseUrl = serverAt;
+    /** The server's certificate is made again, as it is now and then: the same address, another certificate. */
+    const makeCertificateAgain = async () => {
+      const port = accountServer.address().port;
+      accountServer.closeAllConnections?.();
+      await new Promise((resolve) => accountServer.close(resolve));
+      serverTls = selfSignedCertificate(mkdtempSync(join(tmpdir(), "zim-program-tls-")), []);
+      await startAccountServer(port);
+    };
     await accounts.register("ada@example.org", "correct horse battery");
     accounts.verify("ada@example.org", /\b(\d{6})\b/.exec(mailer.sent.at(-1).text)[1]);
 
     /** What the program does and has: the requests it made (as the program makes them: three headers of the page's go on), what its keychain holds, the port it listens on, the pages that "the browser" opened. */
-    const program = { seen: [], secrets: new Map(), listener: null, state: null, wait: null, cancels: 0, browserPages: [], opened: [] };
-    const systemBrowser = await browser.newContext({ serviceWorkers: "block", viewport: { width: 1100, height: 900 } });
+    const program = { seen: [], secrets: new Map(), pins: new Map(), listener: null, state: null, wait: null, cancels: 0, browserPages: [], opened: [] };
+    const systemBrowser = await browser.newContext({ serviceWorkers: "block", viewport: { width: 1100, height: 900 }, ignoreHTTPSErrors: secure });
     systemBrowser.setDefaultTimeout(process.env.ZIM_BROWSER === "webkit" ? 30_000 : 10_000);
     await systemBrowser.addInitScript(exposeApp);
     const watch = (page) => {
@@ -7489,14 +7538,88 @@ try {
     const prepare = async (context) => {
       await context.addInitScript((value) => {
         window.__PROGRAM_DEFAULT_SERVER = value;
-      }, at);
+      }, serverAt);
+      /** A handshake with a server, taking whatever certificate it shows: the connection, with nothing sent on it. */
+      const reach = (url) =>
+        new Promise((resolve, reject) => {
+          const target = new URL(url);
+          const socket = tlsModule.connect({ host: target.hostname, port: Number(target.port) || 443, rejectUnauthorized: false, ...(isIP(target.hostname) ? {} : { servername: target.hostname }) }, () => resolve(socket));
+          socket.once("error", reject);
+        });
+      const notThere = { failed: { message: "The server did not answer: check the address, and that it is running." } };
       await context.exposeFunction("__program_request", async (request) => {
         const forwarded = {};
         for (const [name, value] of Object.entries(request.headers)) if (["authorization", "content-type", "x-requested-with", "accept"].includes(name.toLowerCase())) forwarded[name] = value;
         program.seen.push({ url: request.url, method: request.method, headers: forwarded, body: request.body });
-        const response = await fetch(request.url, { method: request.method, headers: forwarded, body: request.body, redirect: "manual" });
-        return { status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() };
+        const target = new URL(request.url);
+        const viaFetch = async () => {
+          const response = await fetch(request.url, { method: request.method, headers: forwarded, body: request.body, redirect: "manual" });
+          return { status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() };
+        };
+        if (target.protocol !== "https:") return { ok: await viaFetch() };
+        const pin = program.pins.get(target.origin);
+        if (pin === undefined) {
+          // nothing is trusted for it: the system's own checks, which refuse a certificate that nobody it knows signed
+          try {
+            return { ok: await viaFetch() };
+          } catch (error) {
+            const reason = String(error?.cause?.code ?? "");
+            if (/CERT|SELF_SIGNED|UNABLE_TO_VERIFY/.test(reason)) return { failed: { code: "certificate-untrusted", message: `The server's certificate is not one that this computer trusts (${reason.toLowerCase().replaceAll("_", " ")}).` } };
+            return notThere;
+          }
+        }
+        // something was trusted for it: the one connection that is made is checked against it before anything is sent on it, and the request goes over that connection and no other
+        let socket;
+        try {
+          socket = await reach(request.url);
+        } catch {
+          return notThere;
+        }
+        if (socket.getPeerCertificate().fingerprint256 !== pin) {
+          socket.destroy();
+          return { failed: { code: "certificate-changed", message: "The server's certificate is not the one that you trusted for it." } };
+        }
+        return new Promise((resolve) => {
+          // (an agent of its own that makes no other connection and keeps none: the request is made over the socket that was checked)
+          const agent = new http.Agent({ keepAlive: false });
+          agent.createConnection = () => socket;
+          const outgoing = http.request({ agent, method: request.method, host: target.hostname, port: target.port, path: `${target.pathname}${target.search}`, headers: { ...forwarded, connection: "close" } }, (incoming) => {
+            const chunks = [];
+            incoming.on("data", (chunk) => chunks.push(chunk));
+            incoming.on("end", () => resolve({ ok: { status: incoming.statusCode, headers: Object.fromEntries(Object.entries(incoming.headers).map(([k, v]) => [k, String(v)])), body: Buffer.concat(chunks).toString("utf8") } }));
+          });
+          outgoing.on("error", () => resolve(notThere));
+          outgoing.end(request.body);
+        });
       });
+      await context.exposeFunction("__program_trust_inspect", async (origin) => {
+        let socket;
+        try {
+          socket = await reach(origin);
+        } catch {
+          return notThere;
+        }
+        const certificate = socket.getPeerCertificate();
+        socket.destroy();
+        const names = (certificate.subjectaltname ?? "").split(", ").filter(Boolean).map((name) => name.replace(/^(DNS:|IP Address:)/, ""));
+        return { ok: { fingerprint: certificate.fingerprint256, subject: `CN=${certificate.subject?.CN}`, issuer: `CN=${certificate.issuer?.CN}`, names, notBefore: Date.parse(certificate.valid_from), notAfter: Date.parse(certificate.valid_to) } };
+      });
+      await context.exposeFunction("__program_trust_pin", async (origin, fingerprint) => {
+        let socket;
+        try {
+          socket = await reach(origin);
+        } catch {
+          return notThere;
+        }
+        const shown = socket.getPeerCertificate().fingerprint256;
+        socket.destroy();
+        // (what the person was shown is not taken for what the server shows now)
+        if (shown.replaceAll(":", "").toLowerCase() !== String(fingerprint).replace(/[^0-9a-f]/gi, "").toLowerCase()) return { failed: { code: "certificate-changed", message: "The server shows another certificate now, so nothing was trusted." } };
+        program.pins.set(new URL(origin).origin, shown);
+        return { ok: null };
+      });
+      await context.exposeFunction("__program_trust_pinned", async (origin) => program.pins.get(new URL(origin).origin) ?? null);
+      await context.exposeFunction("__program_trust_unpin", async (origin) => void program.pins.delete(new URL(origin).origin));
       await context.exposeFunction("__program_begin", async (state) => {
         closeListener();
         program.state = state;
@@ -7542,13 +7665,15 @@ try {
       await context.exposeFunction("__program_secret_remove", async (name) => void program.secrets.delete(name));
     };
     /** A program: a page with the shell's hooks (and the desktop program's file system, if it is asked for). */
-    const open = async ({ folders = false } = {}) => {
+    const open = async ({ folders = false, noTrust = false } = {}) => {
       const made = await openApp({
         at,
         beforeLoad: standInProgram,
         prepare: async (context) => {
           await prepare(context);
           if (folders) await context.addInitScript(folderStandIn);
+          // (a program from before there was a way to trust a certificate)
+          if (noTrust) await context.addInitScript(() => (window.__PROGRAM_NO_TRUST = true));
         },
       });
       const { page } = made.ui;
@@ -7601,18 +7726,40 @@ try {
       const S = await browserPage(program.browserPages.length);
       const consent = await allowInBrowser(S, { signIn });
       await consent.getByRole("button", { name: "Allow" }).click();
-      await made.says(`Connected to ${at} as ada@example.org`);
+      await made.says(`Connected to ${serverAt} as ada@example.org`);
       return S;
     };
     const close = async () => {
       closeListener();
       for (const page of program.browserPages) await page.close().catch(() => {});
       await systemBrowser.close().catch(() => {});
-      site.closeAllConnections?.();
-      site.close();
+      for (const server of new Set([site, accountServer])) {
+        server.closeAllConnections?.();
+        server.close();
+      }
       db.close();
     };
-    return { at, db, accounts, mailer, program, open, browserPage, allowInBrowser, connect, prepare, close, systemBrowser, watch };
+    return {
+      at,
+      serverAt,
+      get tls() {
+        return serverTls;
+      },
+      asked,
+      makeCertificateAgain,
+      db,
+      accounts,
+      mailer,
+      program,
+      open,
+      browserPage,
+      allowInBrowser,
+      connect,
+      prepare,
+      close,
+      systemBrowser,
+      watch,
+    };
   }
 
   await scenario("an app in a native shell is signed in to the account through the person's own browser: it never sees the password, keeps its token outside the page's storage, makes every request through the shell, keeps a notebook on the server with it, and is signed out from the list in the browser", async () => {
@@ -8096,6 +8243,251 @@ try {
       assert((await O.text()).includes("written in the folder"), "and the other device has what was written in the folder");
     } finally {
       await other?.context.close();
+      await made?.context.close();
+      await rig.close();
+    }
+  });
+
+  // ==========================================================================================
+  // A server whose certificate the system does not know, trusted by its fingerprint (E17e). The program's side is made up as above, with a TLS of its own that does what the real one
+  // does: a request goes over a connection whose certificate is checked against what was trusted before anything is sent on it. The server is the real one, over https, with a certificate
+  // made for it by an authority that nothing knows.
+  // ==========================================================================================
+  await scenario("an app in a native shell connects to a server whose certificate the system does not know by its fingerprint: the certificate is put to the person with the server's own fingerprint, a no trusts nothing and opens no browser, a yes goes on, and signing out forgets what was trusted", async () => {
+    const rig = await programRig({ secure: true });
+    const { serverAt, db, program } = rig;
+    const trusted = new URL(serverAt).origin;
+    let made;
+    try {
+      made = await rig.open();
+      const { page } = made;
+      const shot = async (name) => process.env.SCREENSHOTS && (mkdirSync(process.env.SCREENSHOTS, { recursive: true }), await page.screenshot({ path: join(process.env.SCREENSHOTS, `program-${name}.png`) }));
+      const titled = (title) => page.locator("dialog.dialog", { has: page.getByRole("heading", { name: title, exact: true }) });
+      await made.choose("Connect to an account server…");
+      const connect = titled("Connect to an account server");
+      await connect.waitFor();
+      assertEqual(await connect.getByLabel("Address of the server", { exact: true }).inputValue(), serverAt, "the dialog starts with the server that the program suggests");
+      await connect.getByRole("button", { name: "Continue in the browser" }).click();
+
+      // the certificate is put to the person, with the fingerprint of the server's own certificate (the one that its console shows), and Cancel has the focus
+      const question = titled("Trust this server's certificate?");
+      await question.waitFor();
+      const text = await question.innerText();
+      assert(text.includes(rig.tls.certificateFingerprint), `the dialog shows the fingerprint of the server's own certificate: ${text}`);
+      assert(!text.includes(rig.tls.fingerprint), "and not the authority's, which the server also sends");
+      assert(text.includes(serverAt.replace("https://", "")) && text.includes("does not know"), "it says which server, and that this device does not know the certificate");
+      assert(text.includes("The certificate says it is for") && text.includes("127.0.0.1") && text.includes("made by CN=authority for") && text.includes("valid until"), `it says what the certificate says of itself (${text})`);
+      assert(text.includes("Compare this fingerprint") && text.includes("exactly the same"), "and what to do with the fingerprint");
+      assertEqual(await page.evaluate(() => document.activeElement?.textContent), "Cancel", "Cancel has the focus: a stray Enter trusts nothing");
+      await shot("trust");
+      assertEqual(rig.asked.length, 0, "the server was asked nothing while the person decides (it saw a handshake)");
+      assertEqual(program.opened.length, 0, "and the browser was not opened");
+
+      // a no: nothing is trusted, nothing is kept, no browser, and the dialog of the address says so and can be tried again
+      await question.getByRole("button", { name: "Cancel" }).click();
+      await connect.locator(".dialog-error").waitFor({ state: "visible" });
+      assert((await connect.innerText()).includes("did not trust that server's certificate, so nothing was connected"), "the dialog says that nothing was connected");
+      assertEqual(program.pins.size + program.secrets.size + program.opened.length + rig.asked.length, 0, "nothing was trusted, kept, opened or asked");
+      assert(await connect.getByRole("button", { name: "Continue in the browser" }).isEnabled(), "and it can be tried again");
+
+      // a yes: the person's browser is sent for, the sign-in goes on, and what is kept for the server is the certificate that was shown
+      await connect.getByRole("button", { name: "Continue in the browser" }).click();
+      await question.waitFor();
+      await question.getByRole("button", { name: "Trust this certificate" }).click();
+      const S = await rig.browserPage();
+      const consent = await rig.allowInBrowser(S);
+      await consent.getByRole("button", { name: "Allow" }).click();
+      await made.says(`Connected to ${serverAt} as ada@example.org`);
+      await noDialogs(page);
+      assertEqual(program.pins.get(trusted), rig.tls.certificateFingerprint, "the program keeps the certificate that was trusted, for that server");
+      assertEqual(db.prepare("select count(*) as n from sessions where kind = 'app'").get().n, 1, "the server has one app session");
+      assert(rig.asked.length > 0 && program.seen.every((r) => r.url.startsWith(`${serverAt}/api/`)), "everything that the program asked was asked of that server");
+      assertEqual(made.pageApi.length, 0, "and the page asked the server nothing itself");
+
+      // what was trusted is in the account dialog, which can look at it again; a notebook is kept on the server over it
+      await made.choose("Account (ada@example.org)…");
+      const account = await made.dialog().innerText();
+      assert(account.includes(rig.tls.certificateFingerprint) && account.includes("you trusted this one"), `the account dialog says that a certificate was trusted: ${account}`);
+      await shot("account");
+      await made.dialog().getByRole("button", { name: "Look at the certificate…" }).click();
+      const same = titled("This is the certificate you trusted");
+      await same.waitFor();
+      assert((await same.innerText()).includes(rig.tls.certificateFingerprint), "looking at it again says that it is the same one");
+      await same.getByRole("button", { name: "OK" }).click();
+      await noDialogs(page);
+      await made.choose("Keep this notebook on the server…");
+      await made.dialog().getByRole("button", { name: "Keep it there" }).click();
+      await made.says("is kept on the server");
+      assertEqual(db.prepare("select count(*) as n from notebooks").get().n, 1, "the notebook is on the server");
+
+      // the program starts again: it is still connected, over what it kept
+      await page.reload();
+      await ready(page);
+      await made.ui.openMenu();
+      await page.locator(".menu").getByRole("menuitem", { name: "Account (ada@example.org)…" }).waitFor();
+      await page.keyboard.press("Escape");
+      assertEqual(program.pins.get(trusted), rig.tls.certificateFingerprint, "(what was trusted is still trusted)");
+
+      // signed out: the server ended the token, and the program forgot it and what it trusted for the server
+      await made.choose("Account (ada@example.org)…");
+      await made.dialog().getByRole("button", { name: "Sign out of this app" }).click();
+      await made.says("Signed out");
+      assertEqual(program.secrets.size + program.pins.size, 0, "the program kept nothing: no token, no trusted certificate");
+      assertEqual(db.prepare("select count(*) as n from sessions where kind = 'app'").get().n, 0, "and the server ended the token");
+      const names = await made.menuNames();
+      assert(names.includes("Connect to an account server…"), "the menu offers to connect");
+    } finally {
+      await made?.context.close();
+      await rig.close();
+    }
+  });
+
+  await scenario("when the certificate of a server that was trusted is made again, the app is refused the server, sends it nothing, says so, and a yes (not a no) brings the account back with no new sign-in", async () => {
+    const rig = await programRig({ secure: true });
+    const { serverAt, db, program } = rig;
+    const trusted = new URL(serverAt).origin;
+    let made;
+    try {
+      made = await rig.open();
+      const { page } = made;
+      const shot = async (name) => process.env.SCREENSHOTS && (mkdirSync(process.env.SCREENSHOTS, { recursive: true }), await page.screenshot({ path: join(process.env.SCREENSHOTS, `program-${name}.png`) }));
+      const titled = (title) => page.locator("dialog.dialog", { has: page.getByRole("heading", { name: title, exact: true }) });
+      // connected over a certificate that was trusted
+      await made.choose("Connect to an account server…");
+      await made.dialog().getByRole("button", { name: "Continue in the browser" }).click();
+      await titled("Trust this server's certificate?").getByRole("button", { name: "Trust this certificate" }).click();
+      const S = await rig.browserPage();
+      await (await rig.allowInBrowser(S)).getByRole("button", { name: "Allow" }).click();
+      await made.says(`Connected to ${serverAt} as ada@example.org`);
+      const first = rig.tls.certificateFingerprint;
+      const token = program.secrets.get("account-token");
+      assertEqual(program.pins.get(trusted), first, "the first certificate is trusted");
+
+      // the server's certificate is made again; the program starts again and asks who it is: it is refused, nothing is sent, and it says so
+      await rig.makeCertificateAgain();
+      assert(rig.tls.certificateFingerprint !== first, "(the server shows another certificate now)");
+      const askedBefore = rig.asked.length;
+      await page.reload();
+      await ready(page);
+      await made.says("not the one you trusted");
+      assertEqual(rig.asked.length, askedBefore, "nothing was sent to the server that showed another certificate: the token did not leave");
+      let names = await made.menuNames();
+      assert(names.includes("The server's certificate…") && !names.includes("Connect to an account server…") && !names.some((n) => n.startsWith("Account (")), `the menu leads to the certificate (${names.join(" | ")})`);
+      assertEqual(program.pins.get(trusted), first, "and what was trusted is kept until the person decides");
+
+      // the question puts both fingerprints; a no keeps the old trust, and the app stays where it is
+      await made.choose("The server's certificate…");
+      const changed = titled("The server's certificate has changed");
+      await changed.waitFor();
+      const text = await changed.innerText();
+      assert(text.includes(rig.tls.certificateFingerprint) && text.includes(first), `the dialog shows the new fingerprint and the one that was trusted: ${text}`);
+      assert(text.includes("exactly the same") && text.includes("intercepting"), "and what it can mean, and what to do");
+      assertEqual(await page.evaluate(() => document.activeElement?.textContent), "Cancel", "Cancel has the focus");
+      await shot("trust-changed");
+      await changed.getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(page);
+      assertEqual(program.pins.get(trusted), first, "a no keeps what was trusted");
+      assertEqual(rig.asked.length, askedBefore, "and sends the server nothing");
+      names = await made.menuNames();
+      assert(names.includes("The server's certificate…"), "the menu still leads to the certificate");
+
+      // a yes: the new certificate is trusted, the account is back with the token it had, and the browser was not sent for again
+      await made.choose("The server's certificate…");
+      await changed.waitFor();
+      await changed.getByRole("button", { name: "Trust the new certificate" }).click();
+      await made.says(`Connected to ${serverAt} as ada@example.org`);
+      await noDialogs(page);
+      assertEqual(program.pins.get(trusted), rig.tls.certificateFingerprint, "the new certificate is trusted in place of the old one");
+      assertEqual(program.secrets.get("account-token"), token, "with the token that the app had");
+      assertEqual(db.prepare("select count(*) as n from sessions where kind = 'app'").get().n, 1, "no new sign-in was needed");
+      assertEqual(program.browserPages.length, 1, "the browser was not sent for again");
+      names = await made.menuNames();
+      assert(names.includes("Account (ada@example.org)…"), "the menu says who it is connected as");
+    } finally {
+      await made?.context.close();
+      await rig.close();
+    }
+  });
+
+  await scenario("an app that is connected when its server's certificate is made again is refused at once when it asks, says so, and its account dialog leads to the new certificate before anything else: a no changes nothing, a yes brings it back", async () => {
+    const rig = await programRig({ secure: true });
+    const { serverAt, db, program } = rig;
+    const trusted = new URL(serverAt).origin;
+    let made;
+    try {
+      made = await rig.open();
+      const { page } = made;
+      const shot = async (name) => process.env.SCREENSHOTS && (mkdirSync(process.env.SCREENSHOTS, { recursive: true }), await page.screenshot({ path: join(process.env.SCREENSHOTS, `program-${name}.png`) }));
+      const titled = (title) => page.locator("dialog.dialog", { has: page.getByRole("heading", { name: title, exact: true }) });
+      await made.choose("Connect to an account server…");
+      await made.dialog().getByRole("button", { name: "Continue in the browser" }).click();
+      await titled("Trust this server's certificate?").getByRole("button", { name: "Trust this certificate" }).click();
+      const S = await rig.browserPage();
+      await (await rig.allowInBrowser(S)).getByRole("button", { name: "Allow" }).click();
+      await made.says(`Connected to ${serverAt} as ada@example.org`);
+      const first = rig.tls.certificateFingerprint;
+      await rig.makeCertificateAgain();
+      const askedBefore = rig.asked.length;
+
+      // the same page, still signed in: opening the menu asks the server who it is, and is refused; nothing reaches the server, and the app says so once
+      await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+      await made.ui.openMenu();
+      await made.says("not the one you trusted");
+      await page.keyboard.press("Escape");
+      assertEqual(rig.asked.length, askedBefore, "nothing was sent to the server that showed another certificate");
+      const names = await made.menuNames();
+      assert(names.includes("Account (ada@example.org)…"), `the menu still says who it is connected as (${names.join(" | ")})`);
+
+      // the account dialog says it first, and its first button is the way to look
+      await made.choose("Account (ada@example.org)…");
+      const account = titled("Your account");
+      await account.waitFor();
+      const text = await account.innerText();
+      assert(text.includes("now shows a certificate other than the one you trusted") && text.includes("until you have looked at the new one"), `the account dialog says what is the matter: ${text}`);
+      assertEqual(await page.evaluate(() => document.activeElement?.textContent), "Look at the certificate…", "the way to look is what has the focus");
+      assertEqual(await account.getByRole("button", { name: "Cancel" }).count(), 1, "and there is a Cancel, as for any question");
+      await shot("account-refused");
+      // a no: it goes no further, and nothing is changed
+      await account.getByRole("button", { name: "Cancel" }).click();
+      await noDialogs(page);
+      assertEqual(program.pins.get(trusted), first, "what was trusted is kept");
+      // a yes: the new certificate is put to the person with the old one, and trusted; the account is as it was
+      await made.choose("Account (ada@example.org)…");
+      await titled("Your account").getByRole("button", { name: "Look at the certificate…" }).click();
+      const changed = titled("The server's certificate has changed");
+      await changed.waitFor();
+      const question = await changed.innerText();
+      assert(question.includes(rig.tls.certificateFingerprint) && question.includes(first), "the new fingerprint and the one that was trusted are on the screen");
+      await changed.getByRole("button", { name: "Trust the new certificate" }).click();
+      await made.says(`Connected to ${serverAt} as ada@example.org`);
+      await noDialogs(page);
+      assertEqual(program.pins.get(trusted), rig.tls.certificateFingerprint, "the new certificate is trusted");
+      assertEqual(db.prepare("select count(*) as n from sessions where kind = 'app'").get().n, 1, "with the token that the app had");
+      assertEqual(program.browserPages.length, 1, "and the browser was not sent for again");
+      // and it is quiet again: the dialog is the ordinary one
+      await made.choose("Account (ada@example.org)…");
+      assert(!(await made.dialog().innerText()).includes("until you have looked"), "the account dialog no longer says that something is the matter");
+      await made.dialog().getByRole("button", { name: "Close" }).click();
+    } finally {
+      await made?.context.close();
+      await rig.close();
+    }
+  });
+
+  await scenario("a program that can't keep a certificate that the person trusts refuses a server whose certificate the system does not know, with the system's words, and opens no browser", async () => {
+    const rig = await programRig({ secure: true });
+    let made;
+    try {
+      made = await rig.open({ noTrust: true });
+      await made.choose("Connect to an account server…");
+      await made.dialog().getByRole("button", { name: "Continue in the browser" }).click();
+      const error = made.dialog().locator(".dialog-error");
+      await error.waitFor({ state: "visible" });
+      const said = await error.innerText();
+      assert(said.includes("does not work as an account server") && said.includes("not one that this computer trusts"), `it says that the certificate is not trusted: ${said}`);
+      assertEqual(await made.page.locator("dialog.dialog h2", { hasText: "Trust this server" }).count(), 0, "and does not put it to the person: it could not keep what they said");
+      assertEqual(rig.program.opened.length + rig.asked.length + rig.program.pins.size, 0, "the browser was not opened, the server was asked nothing, nothing was trusted");
+    } finally {
       await made?.context.close();
       await rig.close();
     }

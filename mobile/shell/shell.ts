@@ -5,7 +5,7 @@ import { registerPlugin } from "@capacitor/core";
 import type { PluginListenerHandle } from "@capacitor/core";
 import { Directory, Filesystem } from "@capacitor/filesystem";
 import { Share } from "@capacitor/share";
-import type { AccountHooks, NetRequest, NetResponse, ShellHooks, SignInHooks, SignInResult } from "../../web/src/app/shell";
+import type { AccountHooks, CertificateInfo, NetRequest, NetResponse, ShellHooks, SignInHooks, SignInResult } from "../../web/src/app/shell";
 import { answerOf, REDIRECT_URI } from "./callback";
 
 /** The version of this app and of the web build inside it, put in by scripts/prepare.mjs. */
@@ -70,6 +70,10 @@ interface ZimNative {
   secretGet(options: { name: string }): Promise<{ value: string | null }>;
   secretSet(options: { name: string; value: string }): Promise<void>;
   secretRemove(options: { name: string }): Promise<void>;
+  trustInspect(options: { origin: string }): Promise<CertificateInfo>;
+  trustPin(options: { origin: string; fingerprint: string }): Promise<void>;
+  trustPinned(options: { origin: string }): Promise<{ fingerprint: string | null }>;
+  trustUnpin(options: { origin: string }): Promise<void>;
 }
 const ZimNative = registerPlugin<ZimNative>("ZimNative");
 
@@ -122,6 +126,13 @@ const account: AccountHooks = {
     get: async (name) => (await ZimNative.secretGet({ name })).value,
     set: (name, value) => ZimNative.secretSet({ name, value }),
     remove: (name) => ZimNative.secretRemove({ name }),
+  },
+  // a server whose certificate the system does not know, trusted by its fingerprint after the person has looked at it: what is trusted is kept by the app (ZimNativePlugin), not by the page
+  trust: {
+    inspect: (origin) => ZimNative.trustInspect({ origin }),
+    pin: (origin, fingerprint) => ZimNative.trustPin({ origin, fingerprint }),
+    pinned: async (origin) => (await ZimNative.trustPinned({ origin })).fingerprint,
+    unpin: (origin) => ZimNative.trustUnpin({ origin }),
   },
 };
 

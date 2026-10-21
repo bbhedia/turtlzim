@@ -82,9 +82,15 @@ export interface WireFile {
 
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 
-/** A request that a shell could not make, with the reason in words for a person (the certificate is not one that this device trusts, there is no route to the server). */
+/**
+ * A request that a shell could not make, with the reason in words for a person (the certificate is not one that this device trusts, there is no route to the server). A failure that the
+ * page does something about carries a `code` (the two ways that a certificate is refused: `CERTIFICATE_UNTRUSTED`, `CERTIFICATE_CHANGED` in `../app/shell`).
+ */
 export class TransportError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
     super(message);
     this.name = "TransportError";
   }
@@ -106,7 +112,7 @@ export class AccountClient {
     try {
       response = await this.doFetch(path, { method, credentials: "same-origin", cache: "no-store", headers: method === "GET" ? undefined : { "content-type": "application/json", "x-requested-with": "zim" }, body: method === "GET" ? undefined : JSON.stringify(body ?? {}) });
     } catch (error) {
-      throw new ApiError(error instanceof TransportError ? error.message : "The server can't be reached.", 0, "offline");
+      throw new ApiError(error instanceof TransportError ? error.message : "The server can't be reached.", 0, error instanceof TransportError && error.code ? error.code : "offline");
     }
     const type = response.headers.get("content-type") ?? "";
     const data = type.includes("json") ? ((await response.json().catch(() => null)) as Record<string, unknown> | null) : null;

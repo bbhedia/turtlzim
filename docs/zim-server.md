@@ -219,7 +219,23 @@ Known limit, as with every app that uses a loopback or scheme return address: a 
 - **`native.ts`**: `NativeAccount`. The address of the server (`parseServer`: only its origin; https, or http to this computer's own address for a server being tried out; no name, password or folder), PKCE (`challengeOf`, `randomToken`), and the flow (`connect`): it first asks the server whether it is one (`/api/providers`, with the shell's words if the certificate is not trusted), sends the browser with the challenge and a state, checks the state of the answer (nothing of an answer is shown but fixed text), trades the code, keeps the token in the shell's keychain and the address in the page's settings; a token that can't be kept is ended on the server at once. A `fetch` for the account client that goes through the shell to that server's `/api/` addresses only (nothing the client asks can go elsewhere), with the token; `disconnect` tells the server and forgets everything.
 - **`native-ui.ts`**: the dialogs: the address (suggested by the shell if it has one), the wait for the browser (the address that was opened is shown, for a browser that did not open; Cancel and Escape stop the wait at once), the account dialog (says that the password, the data and the other apps are dealt with in a browser). The server is asked who the app is at the start and when the menu opens; a token that it no longer knows is forgotten and the app says it was signed out. A service that needs a browser's own window (Dropbox, Google Drive) can't be connected from an app: the dialog says to do it in the web app, and lists it once connected.
 - **`ui.ts`, `app-request.ts`**: the page that the app sends the browser to (`/?app=authorize&redirect_uri=…&code_challenge=…&code_challenge_method=S256&state=…`): the person signs in as usual and is asked *Allow this app?* (what is asked, what is not given, **Cancel has the focus** so that a stray Enter does not allow it; the server's headers forbid framing the page, so it can't be clicked from another page), then the page goes to the app's return address, and shows a link to it for a phone's browser, which may only go to an app's address when a link is pressed. The request is kept in the tab (`sessionStorage`, ten minutes, once) only while signing in with a service leaves the page; a plain visit drops what was left. The account dialog has *Connected apps…*.
-- **What a shell gives** (`web/src/app/shell.ts`, `window.__zimShell.account`): `{ request, signIn: { begin, wait, cancel }, secrets: { get, set, remove }, defaultServer? }`. The desktop program: `docs/zim-desktop-shell.md`; the Android app: `docs/zim-mobile-shell.md`.
+- **What a shell gives** (`web/src/app/shell.ts`, `window.__zimShell.account`): `{ request, signIn: { begin, wait, cancel }, secrets: { get, set, remove }, trust?: { inspect, pin, pinned, unpin }, defaultServer? }`. The desktop program: `docs/zim-desktop-shell.md`; the Android app: `docs/zim-mobile-shell.md`.
+
+### A server that the apps don't know the certificate of (E17e)
+
+`scripts/run.sh … --tls` (and `web/scripts/serve.sh`) make a certificate for the server with an authority of its own (`selfSignedCertificate` in `web/scripts/serve.mjs`: the authority may vouch for
+the server's names and no others, and its key is deleted when it has signed). A browser can be asked to trust that authority (`docs/zim-pwa.md`). An **app** does not need that: it asks the person to
+trust **the server's own certificate by its SHA-256 fingerprint**, and from then on takes only that certificate for that address (`docs/zim-desktop-shell.md`, `docs/zim-mobile-shell.md`).
+For the person to have something to compare it with, the server **prints the fingerprint when it starts** (and `scripts/run.sh log` shows it):
+
+```
+The server's own certificate, SHA-256 fingerprint: 5D:28:FB:…:3C:76 (an app of a computer or a phone shows this when it is asked to trust this server, whose authority its system does not know: trust it only if it shows exactly this; it will ask again when the certificate is made again).
+```
+
+It is the fingerprint of the certificate **the server presents** (`selfSignedCertificate(...).certificateFingerprint`; `openssl x509 -in ~/.local/state/zim-web/tls/cert.pem -noout -fingerprint -sha256` says the
+same), not of the authority (*Its SHA-256* in `serve.mjs`'s own output, which is what a computer is asked to trust: a certificate that is not signed by that authority could still be sent
+with it, so the authority's fingerprint says nothing of which certificate a server presents). The certificate is made again when the server's names change or after about 300 days, and then the apps ask again
+(the fingerprint has changed): that is by design, and the line above says so. The same server over a certificate that a real authority made needs none of this.
 
 ## Run it
 
@@ -228,7 +244,7 @@ cd web && npm run build                      # the files of the app (server/ ser
 cd ../server && npm install                  # nodemailer
 ZIM_BASE_URL=https://localhost:8443 scripts/run.sh start --host :: --port 8443 --tls --name ADDRESS [--download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk]
 scripts/run.sh status | log | stop | restart
-npm test                                     # 133 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage, apps signed in
+npm test                                     # 135 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage, apps signed in, what the server says when it starts over https
 ```
 
 `ZIM_BASE_URL` is the address people **type**: the services send the browser back to it, and it decides `Secure` cookies. From your own computer to this
@@ -258,7 +274,7 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## What verifies it, and what does not
 
-- `server/test`: 133 tests with a real HTTP server, cookies, a clock the test moves, and stand-ins for Google and GitHub; mutants of the HTTP layer (a check removed, `HttpOnly` dropped, the body limit off, a session not replaced, …) are caught.
+- `server/test`: 135 tests with a real HTTP server, cookies, a clock the test moves, and stand-ins for Google and GitHub (and two that start the server as a program over https, and check the fingerprint it says against the certificate it presents); mutants of the HTTP layer (a check removed, `HttpOnly` dropped, the body limit off, a session not replaced, …) are caught.
 - The browser scenario "with an account server…" (`npm run test:browser`): the real server serves the real app; an account is made with the code read from the mailer, a wrong code and a wrong password are refused, the session survives a reload and is not readable by script, sign out and in, a GitHub round trip (stand-in service) and a failed one that echoes nothing of the address.
 - **Not verified**: a real Google or GitHub sign-in (needs your apps), real SMTP delivery, more than one process, any load. The server has had no outside review.
 

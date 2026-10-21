@@ -6,7 +6,7 @@
 import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createStaticServer, downloadOption, selfSignedCertificate, urlsFor } from "../../web/scripts/serve.mjs";
+import { createStaticServer, downloadOption, pinNote, selfSignedCertificate, urlsFor } from "../../web/scripts/serve.mjs";
 import { Accounts } from "./accounts.mjs";
 import { createApi } from "./api.mjs";
 import { loadConfig } from "./config.mjs";
@@ -76,6 +76,10 @@ function main() {
     console.log(`Serving ${options.dir} with the account API${tls ? " over https" : ""}`);
     for (const url of urlsFor(options.host, port, tls ? "https" : "http")) console.log(`  ${url}`);
     console.log(`Address people use (ZIM_BASE_URL): ${config.baseUrl}${config.baseUrl.startsWith(tls ? "https:" : "http:") ? "" : "  <- does not match the scheme this server speaks"}`);
+    if (tls) {
+      console.log(`The certificate is for ${tls.names.join(", ")}, signed by an authority that exists only for it (a browser that does not know it warns once; to trust it, get ${tls.authorityFile}, or /ca.pem on this server: SHA-256 ${tls.fingerprint}).`);
+      console.log(pinNote(tls));
+    }
     console.log(`Sign in with: e-mail${Object.keys(config.providers).map((p) => `, ${p}`).join("")}. Mail goes to ${config.mail.driver === "smtp" ? "an SMTP server" : `a file (${config.mail.outbox}): no SMTP server is set up`}.`);
     console.log(`Data: ${config.dataDir}`);
     if (options.pidFile) writeFileSync(options.pidFile, `${process.pid}\n`);

@@ -82,6 +82,47 @@ export interface SecretHooks {
 }
 
 /**
+ * The two ways that a shell can refuse a request for the sake of the server's certificate, as the `code` of the failure (`request` rejects with an error that has one, and words in its
+ * `message`): the system does not know who made it and nothing was trusted for this address, or something was trusted for this address (`TrustHooks.pin`) and the server shows another.
+ */
+export const CERTIFICATE_UNTRUSTED = "certificate-untrusted";
+export const CERTIFICATE_CHANGED = "certificate-changed";
+
+/** What a server showed as its certificate (the first of the chain that it sent), as the shell saw it in a handshake in which nothing was sent to the server. */
+export interface CertificateInfo {
+  /**
+   * The certificate's SHA-256 as 32 pairs of capital hexadecimal digits with a colon between them: what `openssl x509 -noout -fingerprint -sha256` says, what a browser's certificate viewer
+   * shows, and what the person who runs the server is told when the server starts. It is what is compared and what is kept: nothing else of the certificate counts.
+   */
+  fingerprint: string;
+  /** What the certificate says of itself, where the shell can read it (a person is shown what is there, and nothing is decided from any of it). */
+  subject?: string;
+  issuer?: string;
+  /** The names (host names and addresses) that it says it is good for. */
+  names?: string[];
+  /** When it is valid, in milliseconds since the epoch. */
+  notBefore?: number;
+  notAfter?: number;
+}
+
+/**
+ * Trusting, for a server, a certificate that the system does not know (a self-signed one, or one made by an authority of the person's own), by its fingerprint: the person looks at the
+ * fingerprint that the shell saw, compares it with the one that the server's own console shows, and says yes or no. After a yes the shell makes a request to that address only if the server
+ * shows that very certificate (the check is made in the handshake, before anything is sent: the shell never falls back to what the system trusts for that address), and a request
+ * to a server that shows another one fails with `CERTIFICATE_CHANGED`. The shell keeps what was trusted; the page keeps nothing of it. An address is an origin (`https://host:port`).
+ */
+export interface TrustHooks {
+  /** What the server at this origin shows, found out without sending it anything. Rejects, with words for a person, when it can't be reached. */
+  inspect(origin: string): Promise<CertificateInfo>;
+  /** Trust this certificate for this origin. The shell looks at what the server shows now and keeps nothing if it is not this one (it rejects, with words). It replaces what was trusted before. */
+  pin(origin: string, fingerprint: string): Promise<void>;
+  /** The fingerprint that was trusted for this origin, or null. */
+  pinned(origin: string): Promise<string | null>;
+  /** Stop trusting what was trusted for this origin (nothing trusted is not a failure). */
+  unpin(origin: string): Promise<void>;
+}
+
+/**
  * What a shell gives for an account. The page's content policy lets it ask nowhere but its own address, so in a shell the account server is reached by the shell itself
  * (`request`: no cookies, no cross-site rules to get around, and only what the shell checks), the person signs in in their own browser (`signIn`), and the token that this
  * gives lives in `secrets`, never in the page's own storage.
@@ -89,10 +130,15 @@ export interface SecretHooks {
 export interface AccountHooks {
   /** The address of the server that the shell suggests when the person connects (put there by whoever set the app up: a team's server, a test); nothing is asked of it until the person confirms. */
   defaultServer?: string | null;
-  /** An https request (or http, to this computer's own address). Rejects with words for a person when it can't be made (the certificate is not trusted, the server is not there). */
+  /**
+   * An https request (or http, to this computer's own address). Rejects with words for a person when it can't be made (the certificate is not trusted, the server is not there), and, for a
+   * failure about the certificate, with the `code` `CERTIFICATE_UNTRUSTED` or `CERTIFICATE_CHANGED` too.
+   */
   request(request: NetRequest): Promise<NetResponse>;
   signIn: SignInHooks;
   secrets: SecretHooks;
+  /** Trusting the certificate of a server that the system does not know. A shell without it refuses such a server, and says so. */
+  trust?: TrustHooks;
 }
 
 /** What a shell does for the app that a browser does itself. */

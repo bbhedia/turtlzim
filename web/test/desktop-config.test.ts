@@ -65,13 +65,17 @@ describe("the desktop program", () => {
     const script = read("../../desktop/src-tauri/shell.js");
     const program = read("../../desktop/src-tauri/src/main.rs");
     expect(script).toMatch(/window\.__zimShell = \{[^}]*account,/s);
-    for (const [hook, command] of [["request", "account_request"], ["begin", "account_sign_in_begin"], ["wait", "account_sign_in_wait"], ["cancel", "account_sign_in_cancel"], ["get", "account_secret_get"], ["set", "account_secret_set"], ["remove", "account_secret_remove"]]) {
+    for (const [hook, command] of [["request", "account_request"], ["begin", "account_sign_in_begin"], ["wait", "account_sign_in_wait"], ["cancel", "account_sign_in_cancel"], ["get", "account_secret_get"], ["set", "account_secret_set"], ["remove", "account_secret_remove"], ["inspect", "account_trust_inspect"], ["pin", "account_trust_pin"], ["pinned", "account_trust_pinned"], ["unpin", "account_trust_unpin"]]) {
       expect(script, hook).toMatch(new RegExp(`${hook}:.*invoke\\("${command}"`));
       expect(program, command).toMatch(new RegExp(`fn ${command}\\(`));
     }
     // the page asks for nothing by name that the program has not got: the address that a sign-in opens is checked by the program, and the token is kept by the program only
     expect(program).toContain("account::check_browser_url(&url)?");
     expect(program).toContain("secrets::SystemKeychain");
+    // what a request is made with, for a server that has a certificate trusted for it, is looked up by the program, from what it kept: the page never says which certificate counts
+    expect(program).toMatch(/tls::origin_of\(&request\.url\)\.and_then\(\|origin\| account\.pins\.get\(&origin\)\)/);
+    expect(program).toContain("account.net.send(request, pin.as_deref())");
+    expect(script).not.toMatch(/invoke\("account_request", \{[^}]*(pin|fingerprint)/);
     // and the page's own policy still allows no network at all: what it asks of the server goes by the program's channel
     const connect: string = config.app.security.csp.split("; ").find((directive: string) => directive.startsWith("connect-src"));
     expect(connect).toBe("connect-src 'self' ipc: http://ipc.localhost");

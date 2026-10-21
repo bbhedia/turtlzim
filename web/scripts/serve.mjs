@@ -270,8 +270,9 @@ function permitted(name) {
  * anyone, whatever happens to the server later. A browser that has it trusted shows no warning, and runs the
  * app's service worker; one that has not warns once (and then refuses the service worker).
  *
- * Returns `{ key, cert, authority, authorityFile, fingerprint, names }`: `cert` is the server's certificate
- * and the authority's, for `createStaticServer`; `fingerprint` is the authority's SHA-256.
+ * Returns `{ key, cert, authority, authorityFile, fingerprint, certificateFingerprint, names }`: `cert` is the server's
+ * certificate and the authority's, for `createStaticServer`; `fingerprint` is the authority's SHA-256 (what a computer is
+ * asked to trust), and `certificateFingerprint` is the server's own certificate's (what an app that pins it shows).
  */
 export function selfSignedCertificate(directory = defaultCertificateDirectory(), extraNames = []) {
   const files = {
@@ -325,8 +326,18 @@ export function selfSignedCertificate(directory = defaultCertificateDirectory(),
     authority,
     authorityFile: files.authority,
     fingerprint: new X509Certificate(authority).fingerprint256,
+    certificateFingerprint: new X509Certificate(readFileSync(files.cert)).fingerprint256,
     names: unique.map((n) => n.slice(n.indexOf(":") + 1)),
   };
+}
+
+/**
+ * What to tell the person who runs this server about its certificate, for the apps of a computer or a phone: they are not asked to trust an authority, they pin the server's own
+ * certificate, which their system does not know, after the person has compared the fingerprint that the app shows with this one. (Only this one counts: the authority's fingerprint,
+ * above, says nothing of which certificate a server presents.)
+ */
+export function pinNote(tls) {
+  return `The server's own certificate, SHA-256 fingerprint: ${tls.certificateFingerprint} (an app of a computer or a phone shows this when it is asked to trust this server, whose authority its system does not know: trust it only if it shows exactly this; it will ask again when the certificate is made again).`;
 }
 
 const USAGE = `Usage: node scripts/serve.mjs [options]
@@ -438,6 +449,7 @@ function main() {
       console.log(`The certificate is for ${tls.names.join(", ")}, signed by an authority that exists only for it: its key was destroyed when it had signed.`);
       console.log("A browser that does not know that authority warns once (Advanced > Proceed): the page is then secure enough for encrypted notebooks, but the browser will not run the offline app for it.");
       console.log(`To have no warning, and the offline app, trust the authority on each computer that visits: get ${tls.authorityFile} there (or open /ca.pem on this server) and import it as a trusted authority (docs/zim-pwa.md). Its SHA-256: ${tls.fingerprint}`);
+      console.log(pinNote(tls));
     }
     if (options.host === "127.0.0.1" || options.host === "::1") console.log("Listening on this machine only. For other machines: --host 0.0.0.0 (and the firewall must allow the port).");
     if (options.pidFile) writeFileSync(options.pidFile, `${process.pid}\n`);

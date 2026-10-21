@@ -3,7 +3,8 @@
 // person's own browser (where they sign in as they always do: the app never sees the password), and a place for the token that is secret. The server's end of it is `server/src/apps.mjs`
 // (RFC 8252 with PKCE): this app makes a secret and a random state, the browser says "yes, this app" and comes back to an address that only this app receives, with a code, and the app
 // trades the code and its secret for a token that it keeps in the system's keychain (never in the page's storage, where a script could read it).
-import type { AccountHooks } from "../app/shell";
+import { CERTIFICATE_CHANGED, CERTIFICATE_UNTRUSTED } from "../app/shell";
+import type { AccountHooks, CertificateInfo } from "../app/shell";
 import { AccountClient, ApiError, TransportError } from "./client";
 import type { Account, Fetcher } from "./client";
 
@@ -62,8 +63,43 @@ export async function challengeOf(verifier: string): Promise<string> {
 
 /** What a failure of the shell's request says: the shell's own words, which are written for a person (the certificate is not trusted, the name was not found), or a plain line. */
 function reasonOf(error: unknown): string {
-  const text = error instanceof Error ? error.message : typeof error === "string" ? error : "";
-  return text || "The server can't be reached.";
+  const said = typeof error === "object" && error !== null ? (error as { message?: unknown }).message : error;
+  return typeof said === "string" && said ? said : "The server can't be reached.";
+}
+
+/** The code of a failure about the server's certificate (the only codes that the page acts on), or nothing. */
+function codeOf(error: unknown): string | undefined {
+  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+  return code === CERTIFICATE_UNTRUSTED || code === CERTIFICATE_CHANGED ? code : undefined;
+}
+
+/** Why the person is asked about a certificate: the system does not know it and nothing was trusted for this server (`new`), or something was and the server shows another (`changed`). */
+export type CertificateKind = "new" | "changed";
+
+/** What the person is put to: the certificate that the server showed, what they trusted for it before (its fingerprint), the shell's own words for why it was refused, and the server. */
+export interface CertificateQuestion {
+  info: CertificateInfo;
+  kind: CertificateKind;
+  previous: string | null;
+  reason: string;
+  server: string;
+}
+
+/** Ask the person whether to trust a certificate (true: they do). */
+export type TrustAsk = (question: CertificateQuestion) => Promise<boolean>;
+
+/** The person did not trust the server's certificate: nothing was connected, and there is nothing to tell them beyond that. */
+export class CertificateRefused extends Error {
+  constructor() {
+    super("You did not trust that server's certificate, so nothing was connected.");
+    this.name = "CertificateRefused";
+  }
+}
+
+/** Whether two fingerprints are the same one, however they are written (capitals or not, colons or spaces between the pairs). */
+export function sameFingerprint(a: string, b: string): boolean {
+  const plain = (text: string): string => text.replace(/[^0-9a-f]/gi, "").toLowerCase();
+  return plain(a).length === 64 && plain(a) === plain(b);
 }
 
 export class NativeAccount {
@@ -126,7 +162,7 @@ export class NativeAccount {
       try {
         answer = await this.hooks.request({ url: url.href, method: init?.method ?? "GET", headers, ...(typeof init?.body === "string" ? { body: init.body } : {}) });
       } catch (error) {
-        throw new TransportError(reasonOf(error));
+        throw new TransportError(reasonOf(error), codeOf(error));
       }
       if (!Number.isInteger(answer.status) || answer.status < 200 || answer.status > 599) throw new TransportError("The server answered something unexpected.");
       return new Response([204, 205, 304].includes(answer.status) ? null : answer.body, { status: answer.status, headers: answer.headers });
@@ -134,24 +170,80 @@ export class NativeAccount {
   }
 
   /**
+   * Whether the shell can keep a certificate that the person trusts for a server whose certificate the system does not know (`TrustHooks`); without that such a server is refused.
+   */
+  get canTrustCertificates(): boolean {
+    return this.hooks.trust !== undefined;
+  }
+
+  /** What the server at this address shows as its certificate, found out without sending it anything. */
+  async inspect(server: string): Promise<CertificateInfo> {
+    if (!this.hooks.trust) throw new Error("This app can't look at a server's certificate.");
+    return this.hooks.trust.inspect(server);
+  }
+
+  /** The fingerprint that was trusted for this server, or null. */
+  async pinned(server: string | null = this.server): Promise<string | null> {
+    if (!server || !this.hooks.trust) return null;
+    return this.hooks.trust.pinned(server).catch(() => null);
+  }
+
+  /** Trust this certificate for this server (what the server shows now has to be it: the shell looks again). */
+  async trust(server: string, info: CertificateInfo): Promise<void> {
+    if (!this.hooks.trust) throw new Error("This app can't keep a certificate that it trusts.");
+    try {
+      await this.hooks.trust.pin(server, info.fingerprint);
+    } catch (failure) {
+      throw new Error(`The certificate could not be trusted: ${reasonOf(failure)}`);
+    }
+  }
+
+  /**
+   * Is this an account server of this app, with a certificate that this device trusts, or that the person has trusted for it? A certificate that the system does not know (or that is not the one
+   * the person trusted before) is put to the person with its fingerprint, if they can be asked (`ask`) and the shell can keep what they trust; after a yes the server is tried again, once.
+   * A failure of any other kind says that the address does not work.
+   */
+  private async reach(server: string, plain: AccountClient, ask?: TrustAsk): Promise<void> {
+    for (let round = 0; ; round++) {
+      try {
+        await plain.checkServer();
+        return;
+      } catch (error) {
+        const refused = error instanceof ApiError && (error.code === CERTIFICATE_UNTRUSTED || error.code === CERTIFICATE_CHANGED) ? error : null;
+        if (!refused || !this.hooks.trust || !ask || round > 0) throw new Error(`That address does not work as an account server: ${error instanceof ApiError ? error.message : "it did not answer."}`);
+        let info: CertificateInfo;
+        try {
+          info = await this.inspect(server);
+        } catch (failure) {
+          throw new Error(`The server's certificate could not be looked at: ${reasonOf(failure)}`);
+        }
+        const previous = await this.pinned(server);
+        if (this.cancelled) throw new SignInCancelled();
+        const yes = await ask({ info, kind: refused.code === CERTIFICATE_CHANGED ? "changed" : "new", previous, reason: refused.message, server });
+        if (this.cancelled) throw new SignInCancelled();
+        if (!yes) throw new CertificateRefused();
+        await this.trust(server, info);
+      }
+    }
+  }
+
+  /**
    * Connect to the account on the server at `address`: the person's browser is opened at the server (they sign in there, and allow this app), and the answer is waited for. `waiting` is
    * called with the address that the browser was sent to, once it has been, so that the screen can say what is being waited for (and give the address to a person whose browser did not open).
-   * Resolves with the account; rejects with `SignInCancelled` if `cancel` was called.
+   * A server whose certificate the system does not know is put to the person first (`ask`: see `reach`). Resolves with the account; rejects with `SignInCancelled` if `cancel` was called, and
+   * with `CertificateRefused` if the person did not trust the certificate.
    */
-  async connect(address: string, waiting?: (url: string) => void): Promise<Account> {
+  async connect(address: string, waiting?: (url: string) => void, ask?: TrustAsk): Promise<Account> {
     const parsed = parseServer(address);
     if ("problem" in parsed) throw new Error(parsed.problem);
     const { server } = parsed;
+    const before = this.server;
     this.cancelled = false;
     this.waiting = true;
     try {
       // (is it a Zim account server, with a certificate that this device trusts? asked before the browser is opened for nothing)
       const plain = new AccountClient(this.fetcher(() => server, async () => null));
-      try {
-        await plain.checkServer();
-      } catch (error) {
-        throw new Error(`That address does not work as an account server: ${error instanceof ApiError ? error.message : "it did not answer."}`);
-      }
+      await this.reach(server, plain, ask);
       if (this.cancelled) throw new SignInCancelled();
       const verifier = randomToken(32);
       const state = randomToken(16);
@@ -182,6 +274,8 @@ export class NativeAccount {
       }
       this.token = Promise.resolve(granted.token);
       this.settings.set(SERVER_SETTING, server);
+      // (what was trusted for the server that this one replaces is of no use any more)
+      if (before && before !== server) await this.hooks.trust?.unpin(before).catch(() => {});
       return granted.account;
     } finally {
       this.waiting = false;
@@ -201,10 +295,11 @@ export class NativeAccount {
     await this.hooks.secrets.remove(TOKEN_NAME).catch(() => {});
   }
 
-  /** Sign out: the server is told (so that the token is dead there too) and everything this app kept is forgotten. Says whether the server could be told. */
+  /** Sign out: the server is told (so that the token is dead there too) and everything this app kept is forgotten, a certificate that was trusted for the server included. Says whether the server could be told. */
   async disconnect(): Promise<boolean> {
     let told = true;
-    if (this.server && (await this.hasToken())) {
+    const server = this.server;
+    if (server && (await this.hasToken())) {
       try {
         await this.client.logout();
       } catch {
@@ -212,6 +307,7 @@ export class NativeAccount {
       }
     }
     await this.forgetToken();
+    if (server) await this.hooks.trust?.unpin(server).catch(() => {});
     this.settings.remove(SERVER_SETTING);
     return told;
   }

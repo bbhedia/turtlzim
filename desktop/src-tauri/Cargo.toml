@@ -25,6 +25,14 @@ reqwest = { version = "0.13", default-features = false, features = ["native-tls"
 tokio = { version = "1", features = ["net", "time", "sync", "io-util", "rt", "macros"] }
 url = "2"
 open = "5"
+# A server whose certificate the system does not know, and that the person trusted by its fingerprint (tls.rs): the handshake is made here, so that the certificate is looked at
+# before a byte of the request is sent, and the request itself goes over it with hyper. All of these are in the build already (reqwest uses them): none is new to it.
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+sha2 = "0.10"
 
 # (to reach the settings of the WebKitGTK view: see `linux_web_features` in main.rs; the version is the one Tauri itself uses)
 [target.'cfg(target_os = "linux")'.dependencies]

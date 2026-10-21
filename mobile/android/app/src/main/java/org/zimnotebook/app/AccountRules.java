@@ -67,6 +67,81 @@ final class AccountRules {
         return uri;
     }
 
+    /**
+     * The address of a server that a certificate can be trusted for (the page names it: `https://host:port`): https, a host, at most a port, and nothing after it. (A certificate is trusted for a
+     * server, not for a page of it; an address that is not https has no certificate to trust.)
+     */
+    static HttpUrl checkOrigin(String raw) throws Refused {
+        HttpUrl url = raw == null ? null : HttpUrl.parse(raw);
+        if (url == null) throw new Refused("That is not an address.");
+        if (!url.isHttps()) throw new Refused("A certificate can be trusted only for an https address.");
+        if (!url.encodedUsername().isEmpty() || !url.encodedPassword().isEmpty()) throw new Refused("There is no name or password in the address of the server.");
+        if (!url.encodedPath().equals("/") || url.encodedQuery() != null || url.encodedFragment() != null) throw new Refused("A certificate is trusted for a server, not for a page of it.");
+        return url;
+    }
+
+    /** The key that what is trusted for a server is kept under: `https://host:port`, the port always there (the default one written out) and an IPv6 address in brackets. */
+    static String originKey(HttpUrl url) {
+        String host = url.host();
+        return "https://" + (host.indexOf(':') >= 0 ? "[" + host + "]" : host) + ":" + url.port();
+    }
+
+    /** Whether a failure of a request was about the server's certificate (and not about getting to the server): somewhere in its causes the certificate, or its name, was what was refused. */
+    static boolean isCertificateProblem(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof java.security.cert.CertificateException || cause instanceof java.security.cert.CertPathValidatorException || cause instanceof javax.net.ssl.SSLPeerUnverifiedException) return true;
+            if (cause.getCause() == cause) break;
+        }
+        return false;
+    }
+
+    /**
+     * The reason that the system gave for refusing a certificate, as a short line for a person: the message of the deepest cause that has one, its first line, without the name of the exception
+     * that carries it and without a full stop or a colon at its end (empty when there is none).
+     */
+    static String reasonOf(Throwable failure) {
+        String reason = "";
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause.getMessage() != null && !cause.getMessage().trim().isEmpty()) reason = cause.getMessage();
+            if (cause.getCause() == cause) break;
+        }
+        int end = reason.indexOf('\n');
+        if (end >= 0) reason = reason.substring(0, end);
+        return reason.trim().replaceFirst("^[\\w.$]+(Exception|Error): ", "").replaceFirst("[.:]+$", "").trim();
+    }
+
+    /** A request that could not be made: the words for a person and, for the two ways that a certificate is refused, the code that the page acts on (else null). */
+    static final class Failure {
+        final String message;
+        final String code;
+
+        Failure(String message, String code) {
+            this.message = message;
+            this.code = code;
+        }
+    }
+
+    /**
+     * A failure of a request in words that a person can act on (a certificate that this device does not trust is the one that matters most), with the code that the page acts on when it was
+     * about the certificate: the server showed another one than the one that was trusted for it, or one that the system does not know.
+     */
+    static Failure describe(java.io.IOException failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof PinnedTrust.Mismatch) return new Failure("The server's certificate is not the one that you trusted for it.", PinnedTrust.CERTIFICATE_CHANGED);
+            if (cause.getCause() == cause) break;
+        }
+        if (isCertificateProblem(failure)) {
+            String reason = reasonOf(failure);
+            return new Failure("The server's certificate is not one that this device trusts" + (reason.isEmpty() ? "" : " (" + reason + ")") + ".", PinnedTrust.CERTIFICATE_UNTRUSTED);
+        }
+        if (failure instanceof javax.net.ssl.SSLException) return new Failure("A secure connection to the server could not be set up (" + failure.getMessage() + ").", null);
+        if (failure instanceof java.net.UnknownHostException) return new Failure("The server's name was not found: check the address, and that this device is online.", null);
+        if (failure instanceof java.net.ConnectException) return new Failure("The server did not answer: check the address, and that this device is online.", null);
+        if (failure instanceof java.net.SocketTimeoutException) return new Failure("The server took too long to answer.", null);
+        String message = failure.getMessage();
+        return new Failure(message == null || message.isEmpty() ? "The request could not be made." : message, null);
+    }
+
     /** The address that the person's browser may be sent to (an https page, or one on this device): what the page may ask the app to open. */
     static URI checkBrowserUrl(String raw) throws Refused {
         URI uri;
