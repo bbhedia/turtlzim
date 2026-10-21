@@ -94,7 +94,14 @@ jobs:
       # the system has: OpenSSL here, SChannel on Windows)
       - name: the program's tests
         working-directory: desktop/src-tauri
-        run: cargo test
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cargo test --no-fail-fast 2>&1 | tee test.log; then
+            # (a step that fails says only its exit code, and a job's log is for whoever is signed in: what failed is put where the checks' annotations show it)
+            grep -E "^test result:|^test .* \.\.\. FAILED|panicked at|^error(\[E[0-9]+\])?:|exit code|STATUS_" test.log | sed 's/%/%25/g' | head -n 9 | while IFS= read -r line; do echo "::error title=the program's tests::${line:0:900}"; done
+            exit 1
+          fi
       - name: installers
         working-directory: desktop
         shell: bash # (Windows' own would not read the retry below)
