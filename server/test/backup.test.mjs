@@ -592,6 +592,13 @@ describe("a restore", () => {
     assert.match(bad.text, /NOT whole: secret\.key/);
     assert.match(run("list").text, /NOT whole/);
     assert.equal(run("restore", folder).status, 1);
+    // a server with nobody in it yet says so (the generation of its data is not something that is in it)
+    const nobody = dataFolder({ accounts: 0, files: 0 });
+    const said_ = [];
+    const said = main(["backup"], (line) => said_.push(line), { ZIM_SERVER_DATA: nobody });
+    assert.equal(said, 0);
+    assert.match(said_.join("\n"), /\(\d+\.\d+ MiB: nothing in it yet\)/);
+    assert.doesNotMatch(said_.join("\n"), /meta/);
     // an empty folder: nothing to back up, and nothing made
     const empty = scratch();
     const none = main(["backup"], () => {}, { ZIM_SERVER_DATA: empty });

@@ -307,7 +307,7 @@ export function main(argv = process.argv.slice(2), out = console.log, env = proc
       case "backup": {
         const keep = options.keep === undefined ? KEEP : Number(options.keep);
         const made = backup({ dataDir, to, keep });
-        out(`backed up to ${made.folder} (${megabytes(made.bytes)}: ${Object.entries(made.counts).filter(([, n]) => n > 0).map(([table, n]) => `${n} ${table}`).join(", ") || "nothing in it yet"})`);
+        out(`backed up to ${made.folder} (${megabytes(made.bytes)}: ${Object.entries(made.counts).filter(([table, n]) => n > 0 && table !== "meta").map(([table, n]) => `${n} ${table}`).join(", ") || "nothing in it yet"})`);
         if (made.pruned.length) out(`removed the oldest: ${made.pruned.join(", ")}`);
         return 0;
       }
