@@ -1,4 +1,5 @@
 // The server's database: one SQLite file (the one that comes with Node), with its tables made by numbered steps, so that a newer server opens an older file.
+import { randomBytes } from "node:crypto";
 import { chmodSync, closeSync, existsSync, openSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
@@ -109,6 +110,11 @@ const STEPS = [
   );
   create index app_codes_by_user on app_codes (user_id);
   `,
+  // the generation of the data (see epochOf): made once, and made again whenever the data is put back to an older state
+  `
+  create table meta (key text primary key, value text not null);
+  insert into meta (key, value) values ('epoch', lower(hex(randomblob(16))));
+  `,
 ];
 
 /** The database holds everyone's accounts and the notebooks kept on the server: its file, and the journal files beside it, are for its owner only (SQLite would make them readable by everyone: 644). */
@@ -137,6 +143,21 @@ export function openDatabase(path) {
     }
   }
   return db;
+}
+
+/**
+ * The generation of the data in this database. A device that keeps a notebook here remembers it, and a server whose data was put back to an older state (restored from a backup) has a new one
+ * (`renewEpoch`): the device can then tell that what it finds here is not what moved on from what it left, whatever the revisions of the notebooks say (they went back too, or are the same by chance).
+ */
+export function epochOf(db) {
+  return db.prepare("select value from meta where key = 'epoch'").get().value;
+}
+
+/** Start a new generation of the data, and say it. A restore does, whatever the backup held. */
+export function renewEpoch(db) {
+  const epoch = randomBytes(16).toString("hex");
+  db.prepare("update meta set value = ? where key = 'epoch'").run(epoch);
+  return epoch;
 }
 
 /** Run `work` as one transaction. */

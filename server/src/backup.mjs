@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { dataDirOf } from "./config.mjs";
+import { openDatabase, renewEpoch } from "./db.mjs";
 
 /** What a manifest says it is: a backup of this server's files. */
 export const FORMAT = 1;
@@ -72,6 +73,20 @@ function wholeDatabase(path) {
     } catch {
       // (a file that never opened has nothing to close)
     }
+  }
+}
+
+/**
+ * Give the data of a restored database a new generation (db.mjs, `epoch`): it went back to an older state, and the devices that were in step with what it held before have to be able to tell, for
+ * their pages are not to be taken from it as if it had moved on. It is opened with the server's own code, which also brings the tables of an older backup up to date (and makes the generation of
+ * one that had none), and closed again. Gives the new generation.
+ */
+function renewedEpoch(path) {
+  const db = openDatabase(path);
+  try {
+    return renewEpoch(db);
+  } finally {
+    db.close();
   }
 }
 
@@ -207,8 +222,9 @@ export function serverRunning(dataDir) {
 
 /**
  * Put a backup back. It is checked first (a copy that is not whole is refused, and nothing is touched), the server must not be running, and what is in the data folder now is not deleted: it is moved to
- * `replaced-<time>` there. If anything goes wrong after that, what was moved is put back and this throws. `placed` is called when the files are in place and before they are checked (a seam for a test).
- * @returns {{ replaced: string, restored: string[], was: string[] }}
+ * `replaced-<time>` there. The restored data gets a new generation (`renewedEpoch`). If anything goes wrong after that, what was moved is put back and this throws. `placed` is called when the files
+ * are in place and before they are checked (a seam for a test).
+ * @returns {{ replaced: string, restored: string[], was: string[], epoch: string }}
  */
 export function restore({ dataDir, from, now = new Date(), placed = () => {} }) {
   const checked = verify(from);
@@ -229,18 +245,21 @@ export function restore({ dataDir, from, now = new Date(), placed = () => {} }) 
   // (a folder that had nothing in it, as when a copy is tried out in a new one, has nothing that was replaced: no folder is left for it)
   if (was.length === 0) rmSync(replaced, { recursive: true, force: true });
   const restored = Object.keys(checked.manifest.files);
+  let epoch;
   try {
     for (const name of restored) placeFile(join(from, name), join(dataDir, name));
     placed();
     const broken = wholeDatabase(join(dataDir, DATABASE));
     if (broken) throw new Error(`the restored ${DATABASE} is not whole: ${broken}`);
+    // (last: it opens the database for writing, which puts it in WAL mode, and closing it leaves no journal files, as a read-only look at a WAL database would)
+    epoch = renewedEpoch(join(dataDir, DATABASE));
   } catch (error) {
     for (const name of [...restored, `${DATABASE}-wal`, `${DATABASE}-shm`]) rmSync(join(dataDir, name), { force: true });
     for (const name of was) renameSync(join(replaced, name), join(dataDir, name));
     rmSync(replaced, { recursive: true, force: true });
     throw new Error(`the restore failed, and what was there is back: ${error.message}`);
   }
-  return { replaced, restored, was };
+  return { replaced, restored, was, epoch };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -296,6 +315,7 @@ export function main(argv = process.argv.slice(2), out = console.log, env = proc
         if (options.positional.length !== 1) throw new Error("restore takes the folder of a backup");
         const done = restore({ dataDir, from: resolve(options.positional[0]) });
         out(`restored ${done.restored.join(", ")} into ${dataDir}`);
+        out("its data has a new generation: the devices that were in step with what it held before will compare their pages with it, not take it as the newer copy");
         if (done.was.length) out(`what was there is kept in ${done.replaced} (${done.was.join(", ")})`);
         return 0;
       }

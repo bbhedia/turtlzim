@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { openDatabase } from "../src/db.mjs";
+import { epochOf, openDatabase, renewEpoch } from "../src/db.mjs";
 
 const folders = [];
 after(() => folders.forEach((folder) => rmSync(folder, { recursive: true, force: true })));
@@ -58,6 +58,49 @@ describe("the database file", () => {
       assert.equal(mode(file), 0o600, file);
     }
     db.close();
+  });
+
+  it("has a generation for its data (what a device remembers to tell that the data went back in time): made with the database, kept by every opening of it, new when it is renewed", () => {
+    const path = join(scratch(), "zim.sqlite");
+    const first = openDatabase(path);
+    const made = epochOf(first);
+    assert.match(made, /^[0-9a-f]{32}$/);
+    first.close();
+    const second = openDatabase(path);
+    assert.equal(epochOf(second), made, "the same one when it is opened again");
+    const renewed = renewEpoch(second);
+    assert.match(renewed, /^[0-9a-f]{32}$/);
+    assert.notEqual(renewed, made);
+    assert.equal(epochOf(second), renewed);
+    second.close();
+    const third = openDatabase(path);
+    assert.equal(epochOf(third), renewed, "and the new one is kept");
+    // every renewal is a generation of its own (a restore after a restore is another, so that a device that synced after the first one is not taken for one that did not need to)
+    const seen = new Set([made, renewed]);
+    for (let n = 0; n < 5; n++) seen.add(renewEpoch(third));
+    assert.equal(seen.size, 7, "seven generations, all different");
+    third.close();
+    // two databases are two generations
+    const other = openDatabase(join(scratch(), "zim.sqlite"));
+    assert.notEqual(epochOf(other), renewed);
+    other.close();
+  });
+
+  it("gets a generation when it is brought up to date from a version that had none, once, and keeps it after that", () => {
+    const path = join(scratch(), "zim.sqlite");
+    const db = openDatabase(path);
+    db.exec("drop table meta");
+    const version = db.prepare("pragma user_version").get().user_version;
+    db.exec(`pragma user_version = ${version - 1}`);
+    db.close();
+    const upgraded = openDatabase(path);
+    const epoch = epochOf(upgraded);
+    assert.match(epoch, /^[0-9a-f]{32}$/);
+    assert.equal(upgraded.prepare("pragma user_version").get().user_version, version);
+    upgraded.close();
+    const again = openDatabase(path);
+    assert.equal(epochOf(again), epoch);
+    again.close();
   });
 
   it("needs no file for a database that is in memory", () => {

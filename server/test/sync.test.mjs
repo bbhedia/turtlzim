@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import http from "node:http";
 import { after, before, describe, it } from "node:test";
 import { createApi } from "../src/api.mjs";
+import { epochOf, renewEpoch } from "../src/db.mjs";
 import { OAuth } from "../src/oauth.mjs";
 import { validPath } from "../src/sync.mjs";
 import { lastCode, make, PASSWORD } from "./helpers.mjs";
@@ -118,6 +119,23 @@ describe("notebooks kept on the server", () => {
       assert.equal(JSON.stringify(m.json).includes(b64("alpha")), false, "no bytes in it");
       assert.equal((await manifest("bob")).status, 404, "another account has none");
       assert.equal((await call("nobody", `/api/sync/notebooks/${NB}/manifest`)).status, 401);
+    });
+
+    it("says the generation of the server's data with it, the same for every notebook and every account, and a new one when the data was put back (what a device remembers to tell that the server went back in time)", async () => {
+      const first = (await manifest()).json;
+      assert.match(first.epoch, /^[0-9a-f]{32}$/);
+      assert.equal(first.epoch, epochOf(parts.db), "it is the database's");
+      // another notebook, and another account's, are of the same data: the same generation
+      await call("cara", "/api/sync/notebooks/second-0001", { title: "Second", baseRevision: 0, files: [{ path: "A.txt", base64: b64("a") }] }, "PUT");
+      assert.equal((await manifest("cara", "second-0001")).json.epoch, first.epoch);
+      assert.equal((await manifest()).json.epoch, first.epoch, "and it does not change when a notebook does");
+      assert.equal((await call("cara", "/api/sync/notebooks/second-0001", {}, "DELETE")).status, 200, "(the other notebook is not left for the tests after this one)");
+      // a restore renews it: what the manifest says follows
+      const renewed = renewEpoch(parts.db);
+      assert.notEqual(renewed, first.epoch);
+      assert.equal((await manifest()).json.epoch, renewed);
+      // (the list and the files do not carry it: it is asked of the manifest, which every sync begins with)
+      assert.equal((await call("cara", "/api/sync/notebooks", undefined, "GET")).json.epoch, undefined);
     });
 
     it("gives some of the files, and leaves out a path that is not there", async () => {

@@ -19,7 +19,7 @@ import type { Connection } from "./client";
 import type { Manifest, Remote, Version } from "./remote";
 import { SEALED_ID } from "./sealed";
 import { SEALED_PREFIX, SealedCopyError, SealedRemote } from "./sealed-remote";
-import { baseOf, conflictCopyPath, digestOf, fileDigests, folderNameFor, fromWire, newRemoteId, planMerge, toWire } from "./sync";
+import { baseOf, conflictCopyPath, digestOf, fileDigests, folderNameFor, fromWire, newRemoteId, planMerge, toWire, wentBack } from "./sync";
 import type { Link } from "./sync";
 import type { AccountUi } from "./ui";
 
@@ -86,6 +86,8 @@ const nameOf = (c: Connection): string => (c.label === c.service ? c.service : `
 
 /** The notebook's slug for a service's folder is made in sync.ts; this is the choice a person is given. */
 const ACCOUNT = "account";
+/** What is said when the server's data had gone back in time (it was restored from a backup): why its pages were compared one by one, not taken as the newer copy. */
+const RESTORED_NOTE = "The server had been restored from a backup, so its pages were compared, not taken as newer.";
 
 export class SyncUi {
   private running: Promise<void> | null = null;
@@ -235,7 +237,7 @@ export class SyncUi {
         manifest: async () => {
           try {
             const m = await client.getManifest(link.remoteId);
-            return { version: m.revision, marks: Object.fromEntries(m.files.map((f) => [f.path, f.mark])) };
+            return { version: m.revision, marks: Object.fromEntries(m.files.map((f) => [f.path, f.mark])), ...(m.epoch !== undefined ? { epoch: m.epoch } : {}) };
           } catch (error) {
             if (error instanceof ApiError && error.status === 404) return null;
             throw error;
@@ -367,7 +369,7 @@ export class SyncUi {
       const remote = this.remoteFor(first);
       await remote.write(notebook.title, files, [], first.revision);
       const made = await remote.manifest();
-      this.saveLink(notebook.id, { ...first, revision: made?.version ?? first.revision, files: await fileDigests(files), marks: made?.marks ?? {}, ...(remote.counter !== undefined ? { counter: remote.counter } : {}) });
+      this.saveLink(notebook.id, { ...first, revision: made?.version ?? first.revision, files: await fileDigests(files), marks: made?.marks ?? {}, ...(remote.counter !== undefined ? { counter: remote.counter } : {}), ...(made?.epoch !== undefined ? { epoch: made.epoch } : {}) });
       this.setState(notebook.id, "ok");
     } catch (error) {
       return this.explain(error);
@@ -462,11 +464,15 @@ export class SyncUi {
         this.tell(id, auto ? `“${notebook.title}” is no longer on ${remote.place}.` : `“${notebook.title}” is no longer on ${remote.place}, so it is no longer kept there. “Keep this notebook on the server…” sends it again.`);
         return;
       }
-      const base = baseOf(link, local, whole, now.version, now.marks);
+      // (a server whose data was restored from a backup has gone back in time: what was agreed with it is not what it holds, so nothing is taken from it as newer, and nothing is deleted)
+      const back = wentBack(link, now);
+      const base = baseOf(link, local, whole, now.version, now.marks, back);
       let plan = planMerge(base, local, now.marks);
       const upgraded = link.files === undefined || link.marks === undefined;
+      // (the generation of the server's data is remembered with what was agreed; a link that was made before there was one takes it up silently)
+      const generation = now.epoch !== undefined ? { epoch: now.epoch } : {};
       if (plan.length === 0) {
-        if (upgraded || (remote.counter !== undefined && remote.counter !== link.counter)) this.saveLink(notebook.id, { ...link, revision: now.version, digest: whole, files: local, marks: now.marks, ...(remote.counter !== undefined ? { counter: remote.counter } : {}) });
+        if (upgraded || now.epoch !== link.epoch || (remote.counter !== undefined && remote.counter !== link.counter)) this.saveLink(notebook.id, { ...link, revision: now.version, digest: whole, files: local, marks: now.marks, ...(remote.counter !== undefined ? { counter: remote.counter } : {}), ...generation });
         this.setState(id, "ok");
         if (!auto) this.host.say(`This notebook is up to date on ${remote.place}.`);
         return;
@@ -477,7 +483,7 @@ export class SyncUi {
         return;
       }
       // the notebook's own file (its name and home page) is this device's when both sides changed it
-      plan = plan.map((p) => (p.path === "notebook.zim" && p.action === "conflict" ? { path: p.path, action: local[p.path] === undefined ? ("pull" as const) : ("push" as const) } : p));
+      plan = plan.map((p) => (p.path === "notebook.zim" && p.action === "conflict" && now.marks[p.path] !== local[p.path] ? { path: p.path, action: local[p.path] === undefined ? ("pull" as const) : ("push" as const) } : p));
 
       // a page changed on both sides may have been changed the same way: only what really differs is asked about
       const identical = new Set<string>();
@@ -493,7 +499,7 @@ export class SyncUi {
       const asked = plan.filter((p) => p.action === "conflict" && !identical.has(p.path)).map((p) => p.path);
       let choice: "both" | "mine" | "theirs" = "both";
       if (asked.length) {
-        const answer = await this.askConflicts(notebook, remote, asked);
+        const answer = await this.askConflicts(notebook, remote, asked, back);
         if (answer === null) {
           this.held.add(notebook.id);
           this.setState(id, "conflict");
@@ -563,16 +569,18 @@ export class SyncUi {
       for (const path of pullDelete) delete known[path];
       for (const { path, action } of plan) if (action === "settled") delete known[path];
       for (const path of identical) known[path] = local[path]!;
-      this.saveLink(notebook.id, { ...link, revision: after.version, digest: await digestOf(await this.host.files()), files: known, marks: after.marks, ...(remote.counter !== undefined ? { counter: remote.counter } : {}) });
+      this.saveLink(notebook.id, { ...link, revision: after.version, digest: await digestOf(await this.host.files()), files: known, marks: after.marks, ...(remote.counter !== undefined ? { counter: remote.counter } : {}), ...generation });
       this.held.delete(notebook.id);
       this.setState(id, "ok");
 
       const sentCount = push.size + pushDelete.size + copyPaths.size;
       const broughtCount = pull.size + pullDelete.size + copies.size;
       const title = (this.host.notebook() ?? notebook).title;
-      if (sentCount && broughtCount) this.tell(id, `“${title}” was merged with ${remote.place} (${sentCount} sent, ${broughtCount} brought here${copies.size ? `; ${copies.size} other ${copies.size === 1 ? "copy was" : "copies were"} kept beside the page` : ""}).`);
-      else if (sentCount) this.tell(id, `“${title}” was sent to ${remote.place}.`);
-      else if (broughtCount) this.tell(id, `“${title}” was brought up to date from ${remote.place}.`);
+      const why = back ? ` ${RESTORED_NOTE}` : "";
+      if (sentCount && broughtCount) this.tell(id, `“${title}” was merged with ${remote.place} (${sentCount} sent, ${broughtCount} brought here${copies.size ? `; ${copies.size} other ${copies.size === 1 ? "copy was" : "copies were"} kept beside the page` : ""}).${why}`);
+      else if (sentCount) this.tell(id, `“${title}” was sent to ${remote.place}.${why}`);
+      else if (broughtCount) this.tell(id, `“${title}” was brought up to date from ${remote.place}.${why}`);
+      else if (back) this.tell(id, RESTORED_NOTE);
       else if (!auto) this.tell(id, `This notebook is up to date on ${remote.place}.`);
     } catch (error) {
       // the vault was locked while this was under way: nothing of the notebook is said or kept any more (what is on the screen after a lock names nothing)
@@ -617,7 +625,7 @@ export class SyncUi {
   }
 
   /** Pages that were changed on both sides: what to do with them, or null if the person would rather decide later. */
-  private async askConflicts(notebook: Pick<NotebookInfo, "title">, remote: Remote, paths: string[]): Promise<"both" | "mine" | "theirs" | null> {
+  private async askConflicts(notebook: Pick<NotebookInfo, "title">, remote: Remote, paths: string[], back = false): Promise<"both" | "mine" | "theirs" | null> {
     const nameOf = (path: string): string => {
       try {
         return path.endsWith(".txt") ? pathToPage(path) : path;
@@ -629,11 +637,13 @@ export class SyncUi {
     if (paths.length > 8) shown.push(h("li", { text: `… and ${paths.length - 8} more` }));
     let choice: "both" | "mine" | "theirs" | null = null;
     await showDialog({
-      title: "Some pages changed in two places",
+      title: back ? "The server went back to an earlier state" : "Some pages changed in two places",
       body: [
-        `${paths.length === 1 ? "A page" : `${paths.length} pages`} of “${notebook.title}” changed on this device and also on ${remote.place} since they last agreed. Everything else has merged by itself.`,
+        back
+          ? `The data on ${remote.place} was restored from a backup since this device last agreed with it, so its pages are not taken as the newer ones. ${paths.length === 1 ? "A page" : `${paths.length} pages`} of “${notebook.title}” ${paths.length === 1 ? "differs" : "differ"} between the two. Everything else has merged by itself.`
+          : `${paths.length === 1 ? "A page" : `${paths.length} pages`} of “${notebook.title}” changed on this device and also on ${remote.place} since they last agreed. Everything else has merged by itself.`,
         h("ul", { class: "skipped" }, ...shown),
-        "Keeping both keeps this device's version of each page and saves the other one next to it as “… (conflict copy)”, so that nothing is lost. Nothing is sent or replaced until you choose.",
+        `Keeping both keeps this device's version of each page and saves ${back ? `the version on ${remote.place}` : "the other one"} next to it as “… (conflict copy)”, so that nothing is lost. Nothing is sent or replaced until you choose.`,
       ],
       confirm: "Keep both",
       actions: [
@@ -705,7 +715,7 @@ export class SyncUi {
           const info = await this.host.store.createNotebook({ title, home, kind: "open" }, imported.pages, imported.files);
           await this.host.open(info.id);
           const local = await this.host.files();
-          this.saveLink(info.id, { ...link, revision: listed.version, digest: await digestOf(local), files: await fileDigests(local), marks: listed.marks });
+          this.saveLink(info.id, { ...link, revision: listed.version, digest: await digestOf(local), files: await fileDigests(local), marks: listed.marks, ...(listed.epoch !== undefined ? { epoch: listed.epoch } : {}) });
           this.setState(info.id, "ok");
           this.host.say(`“${title}” was copied from ${remote.place}.`);
         } catch (error) {

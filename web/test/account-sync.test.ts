@@ -49,7 +49,7 @@ describe("files on the wire", () => {
   });
 });
 
-import { baseOf, conflictCopyPath, planMerge } from "../src/account/sync";
+import { baseOf, conflictCopyPath, planMerge, wentBack } from "../src/account/sync";
 
 describe("telling what changed, page by page", () => {
   const base: { local: Record<string, string>; remote: Record<string, string> } = { local: { "A.txt": "a1", "B.txt": "b1", "C.txt": "c1", "D.txt": "d1" }, remote: { "A.txt": "ma1", "B.txt": "mb1", "C.txt": "mc1", "D.txt": "md1" } };
@@ -96,5 +96,71 @@ describe("telling what changed, page by page", () => {
     expect(conflictCopyPath("Page.txt", (p) => p === "Page_(conflict_copy).txt")).toBe("Page_(conflict_copy_2).txt");
     expect(conflictCopyPath("Folder.v2/noext", () => false)).toBe("Folder.v2/noext_(conflict_copy)");
     expect(conflictCopyPath("pic.png", () => false)).toBe("pic_(conflict_copy).png");
+  });
+});
+
+describe("a server whose data went back in time (it was restored from a backup)", () => {
+  const link = { revision: 7, epoch: "gen-one" } as const;
+
+  it("is told by another generation of its data than the one that was agreed with, or, from a server that says none, by a lower revision", () => {
+    expect(wentBack(link, { version: 7, epoch: "gen-one" })).toBe(false);
+    expect(wentBack(link, { version: 9, epoch: "gen-one" })).toBe(false);
+    expect(wentBack(link, { version: 7, epoch: "gen-two" })).toBe(true);
+    // (a higher revision is no sign that it did not: the other generation says so)
+    expect(wentBack(link, { version: 12, epoch: "gen-two" })).toBe(true);
+    // a lower one is, with or without a generation (a server that was put back by hand, or one that does not say)
+    expect(wentBack(link, { version: 5, epoch: "gen-one" })).toBe(true);
+    expect(wentBack({ revision: 7 }, { version: 5 })).toBe(true);
+    expect(wentBack({ revision: 7 }, { version: 7 })).toBe(false);
+    expect(wentBack({ revision: 7 }, { version: 8 })).toBe(false);
+  });
+
+  it("is not told where nothing was agreed with it before, or where it does not say: a link that has no generation yet takes the server's, silently", () => {
+    expect(wentBack({ revision: 7 }, { version: 7, epoch: "gen-one" })).toBe(false);
+    expect(wentBack(link, { version: 7 })).toBe(false);
+    expect(wentBack({ revision: 0 }, { version: 1, epoch: "x" })).toBe(false);
+  });
+
+  it("is only a matter of the account's own space: a service's copy (a mark, a string) and a sealed copy (it refuses what is older than it has seen) are not told", () => {
+    expect(wentBack({ revision: "v9", epoch: "a", target: { kind: "connector", connectorId: 1, dir: "d" } }, { version: "v3", epoch: "b" })).toBe(false);
+    expect(wentBack({ revision: 7, epoch: "a", sealed: true }, { version: 3, epoch: "b" })).toBe(false);
+    expect(wentBack({ revision: "5" }, { version: 3 })).toBe(false);
+  });
+
+  it("has no base that can be trusted on either side, and tells every page from nothing: what only one side has is sent or brought, what differs is asked about, nothing is deleted", () => {
+    const remembered = { digest: "whole", revision: 7, files: { "Kept.txt": "k1", "Mine.txt": "m1", "Gone.txt": "g1" }, marks: { "Kept.txt": "mk1", "Mine.txt": "mm1", "Gone.txt": "mg1" } };
+    // what this device has: it changed Kept, made New, deleted Gone since; what the restored server has: an older Kept, and a page that this device never had
+    const local = { "Kept.txt": "k2", "Mine.txt": "m1", "New.txt": "n1" };
+    const remote = { "Kept.txt": "k0", "Mine.txt": "m1", "Older.txt": "o0", "Gone.txt": "g1" };
+    const back = baseOf(remembered, local, "other", 3, remote, true);
+    expect(back).toEqual({ local: {}, remote: {} });
+    const plan = Object.fromEntries(planMerge(back, local, remote).map((p) => [p.path, p.action]));
+    expect(plan).toEqual({ "Kept.txt": "conflict", "Mine.txt": "conflict", "New.txt": "push", "Older.txt": "pull", "Gone.txt": "pull" });
+    // (a page that both have the same is a "conflict" for the plan and nothing for the app: its mark is the page's own digest, so it is settled at once)
+  });
+
+  it("is what keeps a device from taking the older pages for newer ones: with the base that was agreed, a restored server's older page is brought here over this device's, and a page made since is deleted here", () => {
+    const remembered = { digest: "whole", revision: 7, files: { "Home.txt": "h2", "Made.txt": "m1" }, marks: { "Home.txt": "h2", "Made.txt": "m1" } };
+    const local = { "Home.txt": "h2", "Made.txt": "m1" }; // as agreed: this device has not changed anything since
+    const remote = { "Home.txt": "h1" }; // the server went back: an older home page, and not the page that was made since
+    const actions = (back: boolean) => Object.fromEntries(planMerge(baseOf(remembered, local, "whole", 3, remote, back), local, remote).map((p) => [p.path, p.action]));
+    expect(actions(false)).toEqual({ "Home.txt": "pull", "Made.txt": "pullDelete" }); // what a restore did to a device before it was told apart
+    expect(actions(true)).toEqual({ "Home.txt": "conflict", "Made.txt": "push" }); // and what it does now: asks, and sends the page again
+  });
+
+  it("never plans a deletion, whatever the two sides hold (every small case of presence and content on each side)", () => {
+    const contents = [undefined, "a", "b"] as const;
+    for (const mine of contents) {
+      for (const theirs of contents) {
+        const local: Record<string, string> = mine === undefined ? {} : { "P.txt": mine };
+        const remote: Record<string, string> = theirs === undefined ? {} : { "P.txt": theirs };
+        const actions = planMerge(baseOf({ digest: "d", revision: 1, files: { "P.txt": "old" }, marks: { "P.txt": "old" } }, local, "x", 1, remote, true), local, remote).map((p) => p.action);
+        expect(actions.filter((a) => a === "pushDelete" || a === "pullDelete" || a === "settled"), `${mine} / ${theirs}`).toEqual([]);
+        // a page on one side only goes to the other
+        if (mine !== undefined && theirs === undefined) expect(actions).toEqual(["push"]);
+        if (mine === undefined && theirs !== undefined) expect(actions).toEqual(["pull"]);
+        if (mine === undefined && theirs === undefined) expect(actions).toEqual([]);
+      }
+    }
   });
 });

@@ -10,7 +10,7 @@ import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { backup, backupsIn, DATABASE, FORMAT, main, prune, restore, serverRunning, verify } from "../src/backup.mjs";
-import { openDatabase } from "../src/db.mjs";
+import { epochOf, openDatabase } from "../src/db.mjs";
 
 const cli = fileURLToPath(new URL("../src/backup.mjs", import.meta.url));
 const folders = [];
@@ -23,6 +23,24 @@ const scratch = () => {
   const folder = mkdtempSync(join(tmpdir(), "zim-backup-test-"));
   folders.push(folder);
   return folder;
+};
+/** The version of the tables that this server makes (a backup made by it says so). */
+const SCHEMA = (() => {
+  const db = openDatabase(":memory:");
+  try {
+    return db.prepare("pragma user_version").get().user_version;
+  } finally {
+    db.close();
+  }
+})();
+/** The generation of the data of a database file (db.mjs): what a restore makes new. */
+const epochIn = (path) => {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    return epochOf(db);
+  } finally {
+    db.close();
+  }
 };
 const sha = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 
@@ -61,7 +79,7 @@ describe("a backup", () => {
     const manifest = JSON.parse(readFileSync(join(made.folder, "manifest.json"), "utf8"));
     assert.equal(manifest.format, FORMAT);
     assert.equal(manifest.created, "2026-10-22T09:30:15.000Z");
-    assert.equal(manifest.schema, 6);
+    assert.equal(manifest.schema, SCHEMA);
     assert.equal(manifest.counts.users, 3);
     for (const name of ["zim.sqlite", "secret.key", "config.json"]) {
       assert.equal(manifest.files[name].bytes, statSync(join(made.folder, name)).size, name);
@@ -225,7 +243,7 @@ describe("a copy that is checked", () => {
   it("is not whole when the manifest says other things of the database than it holds: its version, what the tables hold", () => {
     let { folder } = made();
     rewriteManifest(folder, (m) => (m.schema = 5));
-    assert.match(verify(folder).problems.join(), /is at version 6, the manifest says 5/);
+    assert.match(verify(folder).problems.join(), new RegExp(`is at version ${SCHEMA}, the manifest says 5`));
     ({ folder } = made());
     rewriteManifest(folder, (m) => (m.counts.users = 99));
     assert.match(verify(folder).problems.join(), /does not hold what the manifest counted/);
@@ -343,7 +361,7 @@ describe("a restore", () => {
     const done = restore({ dataDir, from: folder, now: new Date("2026-10-22T10:00:00Z") });
     assert.deepEqual(done.restored.sort(), ["config.json", "secret.key", DATABASE]);
     assert.equal(sha(join(dataDir, "secret.key")), manifest.files["secret.key"].sha256);
-    assert.equal(sha(join(dataDir, DATABASE)), manifest.files[DATABASE].sha256);
+    // (the database is the backup's, with a new generation: not byte for byte the file of the backup, which the next test is about)
     assert.deepEqual(counts(join(dataDir, DATABASE)), { users: 2, notebooks: 2, notebook_files: 4 });
     // what was there is not deleted: it is in a folder beside, with the key of state B
     assert.equal(done.replaced, join(dataDir, "replaced-20261022T100000Z"));
@@ -356,6 +374,60 @@ describe("a restore", () => {
     const db = openDatabase(join(dataDir, DATABASE));
     assert.equal(db.prepare("select email from users order by id").all().map((row) => row.email).join(), "user1@example.org,user2@example.org");
     db.close();
+  });
+
+  it("gives the restored data a new generation, which no copy of it had, so that the devices that were in step with what it held before can tell that it went back in time", () => {
+    const { dataDir, folder } = twoStates();
+    const done = restore({ dataDir, from: folder, now: new Date("2026-10-22T10:00:00Z") });
+    // nothing but the database was opened for writing, and closed: no journal file is left beside it (a read-only look at a WAL database, below, does leave some)
+    assert.deepEqual(readdirSync(dataDir).filter((name) => name.startsWith(`${DATABASE}-`)), []);
+    const replacedEpoch = epochIn(join(done.replaced, DATABASE));
+    const backupEpoch = epochIn(join(folder, DATABASE));
+    const now = epochIn(join(dataDir, DATABASE));
+    assert.equal(replacedEpoch, backupEpoch, "what was replaced and the backup are of the same data, so of the same generation");
+    assert.match(now, /^[0-9a-f]{32}$/);
+    assert.notEqual(now, backupEpoch);
+    assert.equal(done.epoch, now, "and the restore says which");
+    // the backup itself is not touched (it can be restored again, and is still whole), and a second restore makes yet another generation
+    assert.ok(verify(folder).ok);
+    assert.equal(epochIn(join(folder, DATABASE)), backupEpoch);
+    const again = restore({ dataDir, from: folder, now: new Date("2026-10-22T10:05:00Z") });
+    assert.notEqual(again.epoch, done.epoch);
+    assert.equal(epochIn(join(dataDir, DATABASE)), again.epoch);
+  });
+
+  it("brings the tables of a backup made by an older server up to date (it is opened with the server's own code), with a generation of its own", () => {
+    const dataDir = dataFolder({ accounts: 2, files: 1 });
+    // a database as the server before this one left it: no table of generations, and the version of its tables one less
+    const old = new DatabaseSync(join(dataDir, DATABASE));
+    old.exec(`drop table meta; pragma user_version = ${SCHEMA - 1}`);
+    old.close();
+    const made = backup({ dataDir, now: new Date("2026-10-22T09:30:15Z") });
+    assert.equal(made.counts.meta, undefined, "the backup has no table of generations");
+    const fresh = scratch();
+    const done = restore({ dataDir: fresh, from: made.folder, now: new Date("2026-10-22T10:00:00Z") });
+    const db = new DatabaseSync(join(fresh, DATABASE), { readOnly: true });
+    try {
+      assert.equal(db.prepare("pragma user_version").get().user_version, SCHEMA);
+      assert.equal(epochOf(db), done.epoch);
+      assert.equal(db.prepare("select count(*) as n from users").get().n, 2, "and what it held is there");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("is refused, and puts back what it moved, when the backup was made by a newer server than this one (its tables can't be brought to a version that this server does not know)", () => {
+    const { dataDir } = twoStates();
+    const future = dataFolder({ accounts: 1, files: 1 });
+    const db = new DatabaseSync(join(future, DATABASE));
+    db.exec("pragma user_version = 99");
+    db.close();
+    const made = backup({ dataDir: future, now: new Date("2026-10-22T09:30:15Z") });
+    const before = Object.fromEntries(readdirSync(dataDir).filter((name) => statSync(join(dataDir, name)).isFile()).map((name) => [name, sha(join(dataDir, name))]));
+    assert.throws(() => restore({ dataDir, from: made.folder }), /the restore failed, and what was there is back: the database was made by a newer server \(version 99\)/);
+    const after = Object.fromEntries(readdirSync(dataDir).filter((name) => statSync(join(dataDir, name)).isFile()).map((name) => [name, sha(join(dataDir, name))]));
+    assert.deepEqual(after, before, "every file is as it was");
+    assert.deepEqual(readdirSync(dataDir).filter((name) => name.startsWith("replaced-")), []);
   });
 
   it("takes away the files that the backup does not have (a state in which the settings were not there) and keeps them aside", () => {

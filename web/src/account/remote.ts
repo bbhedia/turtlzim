@@ -9,6 +9,8 @@ export type Version = string | number;
 export interface Manifest {
   version: Version;
   marks: Record<string, string>;
+  /** The generation of the server's data (only the account's own space says it): a server whose data was put back to an older state, restored from a backup, has a new one. */
+  epoch?: string;
 }
 
 export interface Remote {

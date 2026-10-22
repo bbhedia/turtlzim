@@ -176,7 +176,7 @@ export class AccountClient {
   getNotebook(id: string): Promise<RemoteNotebook & { files: WireFile[] }> {
     return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}`);
   }
-  getManifest(id: string): Promise<{ id: string; title: string; revision: number; files: Array<{ path: string; size: number; mark: string }> }> {
+  getManifest(id: string): Promise<{ id: string; title: string; revision: number; epoch?: string; files: Array<{ path: string; size: number; mark: string }> }> {
     return this.call(`/api/sync/notebooks/${encodeURIComponent(id)}/manifest`);
   }
   readNotebookFiles(id: string, paths: string[]): Promise<{ title: string; revision: number; files: WireFile[] }> {

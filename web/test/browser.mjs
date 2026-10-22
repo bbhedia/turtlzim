@@ -5276,6 +5276,253 @@ try {
     }
   });
 
+  // --- a server that is restored from a backup older than what the devices hold: what a restore must not do to the people's pages ---
+  /**
+   * A server on a data folder of its own (its database is a file, as the program's is), two devices of one account that keep a notebook in step with it, and what it takes to make a backup, lose
+   * the server and put the backup back (with the program's own code). `lose` stops the server, puts the backup back and starts it again on the same port.
+   */
+  async function restoreRig(folder) {
+    const { Accounts } = await import("../../server/src/accounts.mjs");
+    const { createApi } = await import("../../server/src/api.mjs");
+    const { openDatabase } = await import("../../server/src/db.mjs");
+    const { backup, restore } = await import("../../server/src/backup.mjs");
+    const { OutboxMailer } = await import("../../server/src/mail.mjs");
+    const { OAuth } = await import("../../server/src/oauth.mjs");
+    const { randomBytes } = await import("node:crypto");
+    const dataDir = join(work, folder);
+    mkdirSync(dataDir, { recursive: true });
+    const config = { baseUrl: "http://127.0.0.1", secure: false, trustProxy: false, sessionDays: 30, quotaBytes: 1024 * 1024, secret: randomBytes(32), providers: {} };
+    const rig = { dataDir, running: null, devices: [] };
+    rig.start = async (port = 0) => {
+      const db = openDatabase(join(dataDir, "zim.sqlite"));
+      const mailer = new OutboxMailer();
+      const accounts = new Accounts({ db, mailer, config });
+      const api = createApi({ accounts, oauth: new OAuth({ db, accounts, config }), config });
+      const web = createStaticServer({ dir: dist, api });
+      await new Promise((resolve) => web.listen(port, "127.0.0.1", resolve));
+      rig.running = { db, mailer, accounts, web };
+      return web.address().port;
+    };
+    rig.stop = () => {
+      rig.running.web.closeAllConnections?.();
+      rig.running.web.close();
+      rig.running.db.close();
+      rig.running = null;
+    };
+    rig.backup = (now) => backup({ dataDir, now: new Date(now) });
+    rig.lose = async (made, now) => {
+      rig.stop();
+      restore({ dataDir, from: made.folder, now: new Date(now) });
+      await rig.start(rig.port);
+    };
+    rig.port = await rig.start();
+    rig.at = `http://127.0.0.1:${rig.port}`;
+    config.baseUrl = rig.at;
+    await rig.running.accounts.register("ada@example.org", "correct horse battery");
+    rig.running.accounts.verify("ada@example.org", /\b(\d{6})\b/.exec(rig.running.mailer.sent.at(-1).text)[1]);
+    rig.generation = () => rig.running.db.prepare("select value from meta where key = 'epoch'").get().value;
+    rig.revision = (title) => rig.running.db.prepare("select revision from notebooks where title = ?").get(title)?.revision ?? null;
+    rig.file = (path) => {
+      const row = rig.running.db.prepare("select bytes from notebook_files where path = ?").get(path);
+      return row ? Buffer.from(row.bytes).toString("utf8") : null;
+    };
+    rig.device = async () => {
+      const made = await openApp({ at: rig.at });
+      rig.devices.push(made);
+      const { page } = made.ui;
+      const d = { ...made, page, dialog: () => topDialog(page) };
+      d.says = (text, timeout = 20_000) =>
+        page.waitForFunction((t) => document.querySelector("#status")?.textContent?.includes(t), text, { timeout }).catch(async () => {
+          throw new Error(`the status line never said ${JSON.stringify(text)}: it says ${JSON.stringify(await page.locator("#status").innerText())}`);
+        });
+      d.choose = async (name) => {
+        await page.evaluate(() => (document.querySelector("#status").textContent = ""));
+        await made.ui.openMenu();
+        await made.ui.menu().getByRole("menuitem", { name }).click();
+      };
+      d.signIn = async () => {
+        await d.choose("Sign in or create an account…");
+        await d.dialog().getByLabel("E-mail address", { exact: true }).fill("ada@example.org");
+        await d.dialog().getByLabel("Password", { exact: true }).fill("correct horse battery");
+        await d.dialog().getByRole("button", { name: "Sign in" }).click();
+        await d.says("Signed in as ada@example.org");
+      };
+      d.write = async (text) => {
+        await made.ui.typeAtEnd(text);
+        await made.ui.flush();
+      };
+      d.sync = async (expected) => {
+        await d.choose("Sync this notebook now");
+        if (expected) await d.says(expected);
+      };
+      d.hasPage = (name) => page.evaluate((n) => window.__zim.app.session.has(n), name);
+      d.makePage = (name, body) => page.evaluate(([n, b]) => window.__zim.app.session.save(n, `Content-Type: text/x-zim-wiki\nWiki-Format: zim 0.6\n\n====== ${n} ======\n${b}\n`), [name, body]);
+      d.open = async (title) => {
+        await made.ui.openMenu();
+        await made.ui.menu().getByRole("menuitemradio", { name: title }).click();
+        await page.waitForFunction((t) => document.querySelector(".notebook-title")?.textContent === t, title);
+      };
+      /** What the open notebook remembers of its agreement with the server, and a change to it (null takes a field away): a link as an older app left it. */
+      d.link = () => page.evaluate(() => JSON.parse(localStorage.getItem(`zim:sync:${window.__zim.app.session.info.id}`)));
+      d.changeLink = (patch) =>
+        page.evaluate((p) => {
+          const key = `zim:sync:${window.__zim.app.session.info.id}`;
+          const stored = JSON.parse(localStorage.getItem(key));
+          for (const [name, value] of Object.entries(p)) value === null ? delete stored[name] : (stored[name] = value);
+          localStorage.setItem(key, JSON.stringify(stored));
+        }, patch);
+      /** The question about pages that differ after a restore is open: wait for it, or say what the device did instead. */
+      d.asksAboutARestore = () =>
+        page.getByRole("heading", { name: "The server went back to an earlier state" }).waitFor().catch(async () => {
+          throw new Error(`no question was asked: the device now has the pages ${JSON.stringify(await made.ui.names())}, its status says ${JSON.stringify(await made.ui.status())}, and its page ends with ${JSON.stringify((await made.ui.text()).slice(-120))}`);
+        });
+      return d;
+    };
+    /** Two devices that keep the sample notebook in step: A made the copy on the server, B opened it. */
+    rig.pair = async () => {
+      const A = await rig.device();
+      await A.signIn();
+      await A.write("written on A\n");
+      await A.choose("Keep this notebook on the server…");
+      await A.dialog().getByRole("button", { name: "Keep it there" }).click();
+      await A.says("is kept on the server");
+      assertEqual((await A.link()).epoch, rig.generation(), "the link remembers the generation of the server's data from the first send");
+      const B = await rig.device();
+      await B.signIn();
+      await B.choose("Open a notebook from the server…");
+      await B.dialog().getByRole("button", { name: "Open" }).click();
+      await B.says("was copied from the server");
+      assertEqual((await B.link()).epoch, rig.generation(), "and from the copy");
+      return { A, B };
+    };
+    rig.close = async () => {
+      for (const d of rig.devices) await d.context.close();
+      if (rig.running) rig.stop();
+    };
+    return rig;
+  }
+
+  await scenario("with an account server that is restored from a backup older than the devices' copies, no page is lost: pages made since are sent again, pages changed since are asked about, devices that were in step end in step, and a notebook the backup never had is no longer kept but stays", async () => {
+    const rig = await restoreRig("restore-data-one");
+    try {
+      const { A, B } = await rig.pair();
+      // the night's backup, made while the server runs, as scripts/run.sh makes it
+      const made = rig.backup("2026-10-22T03:00:00Z");
+
+      // the next day: A writes on the home page and makes a page, and B brings itself up to date; A also makes a notebook that is kept on the server
+      await A.write("written after the backup\n");
+      await A.makePage("Made after the backup", "this page is not in the backup");
+      await A.sync("was sent to the server");
+      await B.sync("was brought up to date from the server");
+      assert((await B.hasPage("Made after the backup")) && (await B.ui.text()).includes("written after the backup"), "B has what A did");
+      await A.ui.openMenu();
+      await A.ui.menu().getByRole("menuitem", { name: "New notebook…" }).click();
+      await A.dialog().waitFor();
+      await A.dialog().locator("#field-title").fill("Made after the backup too");
+      await A.dialog().locator("#choice-where").selectOption({ index: 1 });
+      await A.dialog().getByRole("button", { name: "Create", exact: true }).click();
+      await A.says("“Made after the backup too” is kept on the server");
+      assertEqual(rig.running.db.prepare("select count(*) as n from notebooks").get().n, 2, "the server has two notebooks");
+
+      // the disaster: the disk of the server is lost, and the backup is put back. The server has gone back in time, with a new generation of its data
+      const before = rig.generation();
+      await rig.lose(made, "2026-10-22T10:00:00Z");
+      assert(rig.generation() !== before, "the restore gave the data a generation of its own");
+      assertEqual(rig.running.db.prepare("select count(*) as n from notebooks").get().n, 1, "the server has only the notebook that the backup had");
+      assertEqual(rig.file("Made_after_the_backup.txt"), null, "and not the page made after it");
+      assert(!(rig.file("Home.txt") ?? "").includes("written after the backup"), "and the home page as it was");
+
+      // A, whose copy is newer than the server's, is not made to lose anything: what the server lacks is sent again, and what differs is asked about (the question says why)
+      await A.open("Sample notebook");
+      await A.choose("Sync this notebook now");
+      await A.asksAboutARestore();
+      const asked = await A.dialog().innerText();
+      assert(asked.includes("restored from a backup"), `the question says that the server was restored (${asked.slice(0, 200)})`);
+      assert(asked.includes("Home") && !asked.includes("Made after the backup"), "it names the page that differs, and not the page that only this device has (that one is sent again, with nothing to decide)");
+      if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, "sync-restored-question.png") });
+      assert((await A.hasPage("Made after the backup")) && (await A.ui.text()).includes("written after the backup"), "nothing was taken from A while the question is open");
+      await A.dialog().getByRole("button", { name: "Use this device's versions" }).click();
+      await A.says("restored from a backup");
+      if (process.env.SCREENSHOTS) await A.page.screenshot({ path: join(process.env.SCREENSHOTS, "sync-restored-done.png") });
+      assert((await A.hasPage("Made after the backup")) && (await A.ui.text()).includes("written after the backup"), "A has all that it had");
+      assert((rig.file("Made_after_the_backup.txt") ?? "").includes("this page is not in the backup"), `the server has the page again (its files: ${rig.running.db.prepare("select path from notebook_files order by path").all().map((f) => f.path).join(", ")})`);
+      assert((rig.file("Home.txt") ?? "").includes("written after the backup"), "and the home page of A");
+      assertEqual((await A.link()).epoch, rig.generation(), "A remembers the new generation");
+
+      // B, which was in step with A before the disaster, finds the same thing on the server as it has: nothing to ask, nothing to send, nothing lost
+      const revision = rig.revision("Sample notebook");
+      await B.sync("restored from a backup");
+      assertEqual(await B.page.locator("dialog.dialog[open]").count(), 0, "B is asked nothing");
+      assertEqual(rig.revision("Sample notebook"), revision, "and sends nothing: the pages are the same, so the server's notebook did not change");
+      assert((await B.hasPage("Made after the backup")) && (await B.ui.text()).includes("written after the backup"), "B has all that it had");
+
+      // a device that syncs again finds nothing new to say about the restore
+      await A.sync("up to date on the server");
+      await B.sync("up to date on the server");
+
+      // a link that was made before there were generations (it remembers none) takes the server's at its next sync, and says nothing of a restore; and a server that says no generation is told
+      // to have gone back by a revision that is lower than the one remembered (a server put back by hand)
+      await A.changeLink({ epoch: null });
+      await A.sync("up to date on the server");
+      assertEqual((await A.link()).epoch, rig.generation(), "a link with none takes the server's");
+      await B.changeLink({ epoch: null, revision: 999 });
+      await B.sync("restored from a backup");
+      assert((await B.link()).revision < 999 && (await B.link()).epoch === rig.generation(), "a revision higher than the server's is a server that went back, and the link is up to date after it");
+      assert((await B.hasPage("Made after the backup")) && (await B.ui.text()).includes("written after the backup"), "and B lost nothing");
+
+      // the notebook that the backup never had: no longer on the server, so no longer kept there (as for a copy that was deleted), and nothing of it leaves the device
+      await A.open("Made after the backup too");
+      await A.sync("is no longer on the server");
+      assertEqual(await A.page.locator(".notebook-title").innerText(), "Made after the backup too", "the notebook is still open on A");
+      await A.ui.openMenu();
+      const lines = await A.ui.menu().getByRole("menuitem").allInnerTexts();
+      assert(lines.includes("Keep this notebook on the server…") && !lines.includes("Sync this notebook now"), `it can be kept on the server again (${lines.join(" | ")})`);
+      await A.page.keyboard.press("Escape");
+      // (the browser logs the one refusal that this scenario asked for: the server has no such notebook; anything else it logged still fails the scenario)
+      const refusals = problems.filter((p) => /Failed to load resource: the server responded with a status of 404/.test(p));
+      assertEqual(refusals.length, 1, `one refusal was asked for (${problems.join(" | ")})`);
+      problems = problems.filter((p) => !refusals.includes(p));
+    } finally {
+      await rig.close();
+    }
+  });
+
+  await scenario("with an account server that is restored from a backup, a device that finds the server's revision as high as its own (others wrote since) is still told that the data went back: the generation says so, and its pages are compared, not taken", async () => {
+    const rig = await restoreRig("restore-data-two");
+    try {
+      const { A, B } = await rig.pair();
+      const made = rig.backup("2026-10-22T03:00:00Z");
+      await A.write("written after the backup\n");
+      await A.sync("was sent to the server");
+      await B.sync("was brought up to date from the server");
+      await rig.lose(made, "2026-10-22T10:00:00Z");
+
+      // B is the first to sync: it holds what A wrote, which the server has not, so it is asked about the home page and sends its own
+      await B.sync();
+      await B.asksAboutARestore();
+      await B.dialog().getByRole("button", { name: "Use this device's versions" }).click();
+      await B.says("restored from a backup");
+      // and writes more, so that the revision of the server's notebook is as high as A remembers, and higher
+      const remembered = (await A.link()).revision;
+      for (let n = 1; rig.revision("Sample notebook") <= remembered; n++) {
+        assert(n < 10, "the server's revision never caught up");
+        await B.write(`B writes again ${n}\n`);
+        await B.sync("was sent to the server");
+      }
+      assert(rig.revision("Sample notebook") >= remembered, "the server's revision is not lower than the one A remembers");
+
+      // A has not synced since the restore: its link says another generation, though the revision is not lower. It is asked about the page that differs (and takes the server's, which has B's lines)
+      await A.sync();
+      await A.asksAboutARestore();
+      await A.dialog().getByRole("button", { name: "Use the other versions" }).click();
+      await A.says("restored from a backup");
+      assert((await A.ui.text()).includes("written after the backup") && (await A.ui.text()).includes("B writes again 1"), "A has its own lines and B's");
+      assertEqual((await A.link()).epoch, rig.generation(), "and remembers the generation");
+    } finally {
+      await rig.close();
+    }
+  });
+
   // --- the encrypted notebooks kept on the account server, sealed: the server must hold nothing that can be read ---
   await scenario("with an account server the encrypted notebooks are sent sealed (nothing readable leaves the browser or reaches the server), restored on another browser with the passphrase, replaced, and deleted", async () => {
     const { Accounts } = await import("../../server/src/accounts.mjs");

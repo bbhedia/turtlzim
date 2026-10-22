@@ -1,7 +1,7 @@
 // Notebooks kept on the server, for a person who has an account: whole notebooks, as the files they are (clear: nothing here encrypts them yet), within the account's
 // quota. A write says which revision it was made from; if another device wrote since, it is refused (409) with the current revision, and nothing is overwritten.
 import { createHash } from "node:crypto";
-import { transaction } from "./db.mjs";
+import { epochOf, transaction } from "./db.mjs";
 import { AccountError } from "./accounts.mjs";
 
 const ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -72,12 +72,15 @@ export class Sync {
     });
   }
 
-  /** What a notebook holds, without the bytes: each file's path, size and a mark that changes when its content does (the SHA-256 of the bytes, the same one the app makes of its own files). */
+  /**
+   * What a notebook holds, without the bytes: each file's path, size and a mark that changes when its content does (the SHA-256 of the bytes, the same one the app makes of its own files),
+   * and the generation of the server's data (`epoch`, from db.mjs): a device that remembers another one knows that the data was put back to an older state since it was here.
+   */
   manifest(userId, id) {
     const notebook = this.db.prepare("select id, title, revision, updated_at as updatedAt from notebooks where user_id = ? and id = ?").get(userId, id);
     if (!notebook) throw new AccountError("No such notebook.", 404, { code: "not-found" });
     const files = this.db.prepare("select path, bytes from notebook_files where user_id = ? and notebook_id = ? order by path").all(userId, id).map((f) => ({ path: f.path, size: f.bytes.length, mark: createHash("sha256").update(f.bytes).digest("hex") }));
-    return { ...notebook, files };
+    return { ...notebook, epoch: epochOf(this.db), files };
   }
 
   /** Some of a notebook's files (the paths that it has; a path it does not have is left out). */

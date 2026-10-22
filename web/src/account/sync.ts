@@ -20,6 +20,8 @@ export interface Link {
   sealed?: boolean;
   /** For a sealed copy: the highest counter of its index that this device has seen, so that an old copy put back is noticed. */
   counter?: number;
+  /** The generation of the server's data then (only for a copy in the account's own space, and only from a server that says it): see `wentBack`. */
+  epoch?: string;
   /** The digest of the notebook's files then. */
   digest: string;
   /** Whose account (the e-mail address): a link made under another account is not this person's. */
@@ -59,10 +61,24 @@ export function planMerge(base: MergeBase, local: Record<string, string>, remote
 }
 
 /**
+ * Whether the other copy has gone back in time since this device last agreed with it: the server's data was put back to an older state (restored from a backup). That shows as another
+ * generation of its data than the one remembered (the server makes a new one at a restore), or, from a server that does not say, as a revision lower than the one remembered. Only a copy in
+ * the account's own space can: a service's copy is not the server's data, and a sealed copy checks its own counter (sealed-remote.ts) and refuses what is older than it has seen.
+ */
+export function wentBack(link: Pick<Link, "revision" | "epoch" | "sealed" | "target">, now: { version: number | string; epoch?: string }): boolean {
+  if (link.sealed || link.target) return false;
+  if (link.epoch !== undefined && now.epoch !== undefined && now.epoch !== link.epoch) return true;
+  return typeof link.revision === "number" && typeof now.version === "number" && now.version < link.revision;
+}
+
+/**
  * The base for a link: what was remembered at the last agreement; for a link made before pages were told apart, what can be worked out. A copy that has not changed since (this side:
  * the whole digest is the one remembered; the other: its version is) is its own base; one that has changed has no known base, so every file that differs is then a conflict, which is asked about.
+ * A copy that went back in time (`wentBack`) has no base that can be trusted either, on either side: what was agreed is not what it holds now, so every page is told from nothing. A page that
+ * only one side has is sent or brought, a page that both have and that differs is asked about, a page that both have the same is left alone, and **nothing is deleted** by either side.
  */
-export function baseOf(link: Pick<Link, "files" | "marks" | "digest" | "revision">, local: Record<string, string>, whole: string, version: number | string, marks: Record<string, string>): MergeBase {
+export function baseOf(link: Pick<Link, "files" | "marks" | "digest" | "revision">, local: Record<string, string>, whole: string, version: number | string, marks: Record<string, string>, back = false): MergeBase {
+  if (back) return { local: {}, remote: {} };
   return {
     local: link.files ?? (whole === link.digest ? local : {}),
     remote: link.marks ?? (version === link.revision ? marks : {}),
