@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { dataDirOf, loadConfig } from "../src/config.mjs";
+import { dataDirOf, loadConfig, privateFolder } from "../src/config.mjs";
 
 const folders = [];
 after(() => folders.forEach((folder) => rmSync(folder, { recursive: true, force: true })));
@@ -32,6 +32,26 @@ describe("the data folder", () => {
     chmodSync(before, 0o775);
     loadConfig({ ZIM_SERVER_DATA: before });
     assert.equal(statSync(before).mode & 0o777, 0o700);
+  });
+});
+
+describe("a folder made private", () => {
+  it("is made, and made 700 whatever mode it had; one that is not ours to change is left as it is, without an error (the backups of a folder that someone else owns, a data folder that a service owns)", () => {
+    const made = join(scratch(), "a", "b");
+    privateFolder(made);
+    assert.equal(statSync(made).mode & 0o777, 0o700);
+    chmodSync(made, 0o755);
+    privateFolder(made);
+    assert.equal(statSync(made).mode & 0o777, 0o700);
+    // (the change of mode is refused, as it is for a folder of another user: nothing is thrown, and the folder is there)
+    const other = join(scratch(), "other");
+    const tried = [];
+    privateFolder(other, (path, mode) => {
+      tried.push([path, mode]);
+      throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+    });
+    assert.deepEqual(tried, [[other, 0o700]]);
+    assert.ok(statSync(other).isDirectory());
   });
 });
 

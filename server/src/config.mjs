@@ -18,6 +18,20 @@ export function dataDirOf(env = process.env) {
   return env.ZIM_SERVER_DATA ?? join(env.XDG_STATE_HOME ?? join(homedir(), ".local/state"), "zim-server");
 }
 
+/**
+ * Make a folder for its owner only, whether it is made now or was made before (by `scripts/run.sh` or by hand, with the mode of its maker's umask: 775 here, which lets every other user of the
+ * computer read what is in it). A folder that is not ours to change is left as it is: whoever put it there has the say over who can read it, and what is made inside it is made private on its own.
+ * `change` is the call that changes the mode (a seam for a test).
+ */
+export function privateFolder(path, change = chmodSync) {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  try {
+    change(path, 0o700);
+  } catch {
+    // (not ours to change)
+  }
+}
+
 /** A setting that is a whole number of at least one, or nothing at all (then the code's own default stands). A wrong one stops the server at its start, saying which. */
 function wholeNumber(value, name) {
   if (value === undefined || value === "") return undefined;
@@ -42,13 +56,7 @@ function secretFor(dataDir) {
  */
 export function loadConfig(env = process.env, given = {}) {
   const dataDir = given.dataDir ?? dataDirOf(env);
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  try {
-    // (a folder that was made before, by `scripts/run.sh` or by hand, has the mode of its maker's umask: 775 here, which lets every other user of the computer read the database)
-    chmodSync(dataDir, 0o700);
-  } catch {
-    // (not ours to change: whoever put the server there has the say over who can read it)
-  }
+  privateFolder(dataDir);
   const file = { ...readJson(join(dataDir, "config.json")) };
   const oauth = readJson(join(dataDir, "oauth.json"));
   const baseUrl = (given.baseUrl ?? env.ZIM_BASE_URL ?? file.baseUrl ?? "http://localhost:8080").replace(/\/+$/, "");

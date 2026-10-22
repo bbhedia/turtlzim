@@ -125,7 +125,6 @@ async function main() {
     note(name, took, status >= 200 && status < 300, `${method} ${path.replace(/notebook-[\w-]+/, "notebook-…")} answered ${status}: ${JSON.stringify(json)?.slice(0, 160)}`);
     return { status, json };
   };
-  let outboxRead = 0;
   const codeFor = async (email) => {
     for (let tries = 0; tries < 200; tries++) {
       const text = existsSync(join(data, "outbox.jsonl")) ? readFileSync(join(data, "outbox.jsonl"), "utf8") : "";
@@ -136,7 +135,6 @@ async function main() {
     }
     throw new Error(`no code was mailed to ${email}`);
   };
-  void outboxRead;
 
   const serverPid = child.pid;
   const serverBefore = cpuSeconds(serverPid);

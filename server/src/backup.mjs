@@ -10,11 +10,11 @@
 // The database is copied while the server runs: `VACUUM INTO` reads it in one transaction (a snapshot that no write can half change), and a copy that was made that way is checked before it counts.
 // A backup holds the server's key and what it was told, so it is as secret as the data folder is: its folders are made for their owner only.
 import { createHash } from "node:crypto";
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { dataDirOf } from "./config.mjs";
+import { dataDirOf, privateFolder } from "./config.mjs";
 import { openDatabase, renewEpoch } from "./db.mjs";
 
 /** What a manifest says it is: a backup of this server's files. */
@@ -90,10 +90,11 @@ function renewedEpoch(path) {
   }
 }
 
-/** Make a folder for its owner only. */
-function privateFolder(path) {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  chmodSync(path, 0o700);
+/** The name of a new folder in `dir`: `prefix` and the time, in UTC, a second later for as long as that name is taken (two in one second are two). Gives the name and the time it is for. */
+function freshName(dir, prefix, now) {
+  let when = new Date(Math.floor(now.getTime() / 1000) * 1000);
+  while (existsSync(join(dir, `${prefix}${stamp(when)}`))) when = new Date(when.getTime() + 1000);
+  return { when, name: `${prefix}${stamp(when)}` };
 }
 
 /** Write a file beside its place and put it there: a copy that is cut short never has the name of a whole one. */
@@ -177,9 +178,8 @@ export function backup({ dataDir, to = join(dataDir, "backups"), keep = KEEP, no
   if (!Number.isInteger(keep) || keep < 1) throw new Error("at least one backup has to be kept");
   privateFolder(to);
   // (two backups in the same second: the second one is a second later)
-  let when = new Date(Math.floor(now.getTime() / 1000) * 1000);
-  while (existsSync(join(to, `zim-backup-${stamp(when)}`))) when = new Date(when.getTime() + 1000);
-  const folder = join(to, `zim-backup-${stamp(when)}`);
+  const { when, name } = freshName(to, "zim-backup-", now);
+  const folder = join(to, name);
   privateFolder(folder);
   try {
     // the database: read in one transaction, whatever the server writes meanwhile
@@ -231,9 +231,7 @@ export function restore({ dataDir, from, now = new Date(), placed = () => {} }) 
   if (!checked.ok) throw new Error(`that backup can't be used: ${checked.problems.join("; ")}`);
   if (serverRunning(dataDir)) throw new Error("the server is running: stop it first (scripts/run.sh restore does)");
   privateFolder(dataDir);
-  let when = new Date(Math.floor(now.getTime() / 1000) * 1000);
-  while (existsSync(join(dataDir, `replaced-${stamp(when)}`))) when = new Date(when.getTime() + 1000);
-  const replaced = join(dataDir, `replaced-${stamp(when)}`);
+  const replaced = join(dataDir, freshName(dataDir, "replaced-", now).name);
   privateFolder(replaced);
   const was = [];
   for (const name of [DATABASE, `${DATABASE}-wal`, `${DATABASE}-shm`, ...SETTINGS]) {
