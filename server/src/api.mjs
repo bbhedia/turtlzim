@@ -141,7 +141,15 @@ export function createApi({ accounts, oauth, config, log = () => {}, apps = new 
       const get = method === "GET" || method === "HEAD";
 
       // ------------------------------------------------------------------ what can be asked with a GET
-      if (route === "/api/health" && get) return void send(res, 200, { ok: true });
+      // (what a check from outside asks: not only that the server answers, but that its database does)
+      if (route === "/api/health" && get) {
+        try {
+          accounts.db.prepare("select 1 as up").get();
+        } catch {
+          return void send(res, 503, { ok: false });
+        }
+        return void send(res, 200, { ok: true });
+      }
       if (route === "/api/providers" && get) return void send(res, 200, { providers: oauth.providers(), email: true });
       if (route === "/api/me" && get) {
         const found = sessionOf(req);

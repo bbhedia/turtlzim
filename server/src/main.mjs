@@ -10,6 +10,7 @@ import { createStaticServer, downloadOption, pinNote, selfSignedCertificate, url
 import { Accounts } from "./accounts.mjs";
 import { createApi } from "./api.mjs";
 import { loadConfig } from "./config.mjs";
+import { hashingLimits, limitHashing } from "./passwords.mjs";
 import { openDatabase } from "./db.mjs";
 import { sweep } from "./limits.mjs";
 import { createMailer } from "./mail.mjs";
@@ -48,7 +49,14 @@ function main() {
     process.exit(2);
   }
   const log = (line) => console.log(`${new Date().toISOString()} ${line}`);
-  const config = loadConfig(process.env);
+  let config;
+  try {
+    config = loadConfig(process.env);
+  } catch (error) {
+    console.error(`server: ${error.message}`);
+    process.exit(2);
+  }
+  limitHashing({ slots: config.hashSlots, waiting: config.hashQueue });
   const db = openDatabase(config.dbPath);
   const mailer = createMailer(config.mail);
   const accounts = new Accounts({ db, mailer, config });
@@ -81,6 +89,7 @@ function main() {
       console.log(pinNote(tls));
     }
     console.log(`Sign in with: e-mail${Object.keys(config.providers).map((p) => `, ${p}`).join("")}. Mail goes to ${config.mail.driver === "smtp" ? "an SMTP server" : `a file (${config.mail.outbox}): no SMTP server is set up`}.`);
+    console.log(`Passwords are hashed ${hashingLimits().slots} at a time, and ${hashingLimits().waiting} may wait for their turn (ZIM_HASH_SLOTS, ZIM_HASH_QUEUE).`);
     console.log(`Data: ${config.dataDir}`);
     if (options.pidFile) writeFileSync(options.pidFile, `${process.pid}\n`);
   });

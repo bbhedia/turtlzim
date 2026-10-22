@@ -4,16 +4,10 @@ import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from 
 import { transaction } from "./db.mjs";
 import { hit } from "./limits.mjs";
 import { messages } from "./mail.mjs";
+import { AccountError } from "./errors.mjs";
 import { hashPassword, normalizeEmail, passwordProblem, verifyPassword } from "./passwords.mjs";
 
-/** An error whose message may be shown to the person, with the HTTP status that goes with it. */
-export class AccountError extends Error {
-  constructor(message, status = 400, extra = {}) {
-    super(message);
-    this.status = status;
-    this.extra = extra;
-  }
-}
+export { AccountError };
 
 export const CODE_MINUTES = 10;
 const CODE_TRIES = 5;

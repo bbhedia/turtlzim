@@ -40,6 +40,29 @@ describe("the HTTP API", () => {
     assert.deepEqual(json, { providers: ["github"], email: true });
   });
 
+  it("says that it is up only while its database answers (what a check from outside asks)", async () => {
+    const up = await call("/api/health", { method: "GET" });
+    assert.equal(up.status, 200);
+    assert.deepEqual(up.json, { ok: true });
+    // a server whose database does not answer (here, one that was closed) is not up, and says so with a status that a monitor reads
+    const dead = make({ baseUrl: "http://localhost", secure: false, trustProxy: false, providers: {} });
+    const deadApi = createApi({ accounts: dead.accounts, oauth: new OAuth({ db: dead.db, accounts: dead.accounts, config: dead.config, now: () => dead.clock.t }), config: dead.config });
+    const other = http.createServer(async (req, res) => {
+      if (!(await deadApi(req, res))) res.writeHead(404).end();
+    });
+    await new Promise((resolve) => other.listen(0, "127.0.0.1", resolve));
+    try {
+      const url = `http://127.0.0.1:${other.address().port}/api/health`;
+      assert.equal((await fetch(url)).status, 200);
+      dead.db.close();
+      const down = await fetch(url);
+      assert.equal(down.status, 503);
+      assert.deepEqual(await down.json(), { ok: false });
+    } finally {
+      other.close();
+    }
+  });
+
   it("registers, confirms with the code mailed, and signs in with an HttpOnly cookie", async () => {
     assert.deepEqual((await call("/api/me", { method: "GET" })).json, { user: null, signIns: [] });
     const registered = await call("/api/register", { body: { email: "Ada@Example.org", password: PASSWORD } });

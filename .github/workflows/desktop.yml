@@ -1,12 +1,13 @@
 # The installers for Windows and Linux, built from the web app on every change to it. One job builds the web app (the wasm of the core, the
 # editor, the service worker's list of files) and keeps web/dist; one job per system packs that same web/dist in the Tauri program:
 # Linux .deb, .rpm and .AppImage, Windows .exe (NSIS) and .msi. A tag `v*` also makes a draft release with them. See docs/zim-desktop-shell.md.
+# A third job runs the account server's own tests (server/, docs/zim-server.md) on that same web/dist, since the server serves it.
 name: desktop
 
 on:
   push:
     branches: [master]
-    paths: ["web/**", "core/**", "desktop/**", ".github/workflows/desktop.yml"]
+    paths: ["web/**", "core/**", "desktop/**", "server/**", ".github/workflows/desktop.yml"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -62,6 +63,34 @@ jobs:
           name: web-dist
           path: web/dist
           if-no-files-found: error
+
+  # The account server (server/): accounts, the HTTP layer, the sync and the connectors against stand-ins, what it says when it starts over https, the backups and the hashing limiter,
+  # and scripts/run.sh as a person uses it (it starts the server, backs it up while it runs, restores it, moves its log aside). Node 24: the server uses its SQLite.
+  server:
+    needs: web
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: the server's tests
+        working-directory: server
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci
+          if ! npm test 2>&1 | tee test.log; then
+            # (a job's log is for whoever is signed in: what failed is put where the checks' annotations show it)
+            grep -E "^ℹ (tests|pass|fail) |^✖|^\s+✖|failureType|AssertionError|Error:" test.log | sed 's/%/%25/g' | head -n 12 | while IFS= read -r line; do echo "::error title=the server's tests::${line:0:900}"; done
+            exit 1
+          fi
 
   desktop:
     needs: web

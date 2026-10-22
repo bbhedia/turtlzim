@@ -1,5 +1,7 @@
 // Passwords and e-mail addresses: what is accepted, and how a password is kept (scrypt with a salt of its own: nothing here can be turned back into the password).
 import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import { availableParallelism } from "node:os";
+import { AccountError } from "./errors.mjs";
 
 const N = 32768;
 const R = 8;
@@ -7,8 +9,54 @@ const P = 1;
 const KEY = 32;
 const MEMORY = 128 * N * R * 2;
 
-const derive = (password, salt, n = N, r = R, p = P) =>
+const scryptOf = (password, salt, n, r, p) =>
   new Promise((resolve, reject) => scrypt(password.normalize("NFKC"), salt, KEY, { N: n, r, p, maxmem: Math.max(MEMORY, 128 * n * r * 2) }, (error, key) => (error ? reject(error) : resolve(key))));
+
+// How many passwords are hashed at the same time. A hash is made costly on purpose (32 MiB and tens of milliseconds each), and a crowd of strangers signing in with passwords that are wrong still has the
+// server pay for every one: left to Node's thread pool (four at a time), that fills every processor, and the people who are only keeping their notebooks in step wait behind it (measured: a storm of
+// sign-ins made the answer to a request that costs nothing four times slower, scripts/load.mjs --storm). So half of the processors do it (one at least), the next ones wait in turn, and when too many wait
+// the next is turned away at once with a time to come back in, instead of being answered a long time late.
+let slots;
+let waitingMax;
+let hashing;
+let running = 0;
+const waiting = [];
+
+/** How many at once, how many may wait, and what does the hashing. Called with nothing it sets what a server has (and the module does so when it is loaded: a server never calls it); a test says other things. */
+export function limitHashing({ slots: at = Math.max(1, Math.floor(availableParallelism() / 2)), waiting: queued = 64, run = scryptOf } = {}) {
+  slots = at;
+  waitingMax = queued;
+  hashing = run;
+}
+limitHashing();
+
+/** How many places there are now, and how many may wait for one (a test says what the defaults are). */
+export const hashingLimits = () => ({ slots, waiting: waitingMax });
+
+function acquire() {
+  if (running < slots) {
+    running++;
+    return Promise.resolve();
+  }
+  if (waiting.length >= waitingMax) return Promise.reject(new AccountError("The server is busy: try again in a moment.", 503, { code: "busy", retryAfter: 5 }));
+  // (the place is handed over when it is let go: `running` does not change in between)
+  return new Promise((resolve) => waiting.push(resolve));
+}
+
+function release() {
+  const next = waiting.shift();
+  if (next) next();
+  else running--;
+}
+
+const derive = async (password, salt, n = N, r = R, p = P) => {
+  await acquire();
+  try {
+    return await hashing(password, salt, n, r, p);
+  } finally {
+    release();
+  }
+};
 
 export async function hashPassword(password) {
   const salt = randomBytes(16);
@@ -28,7 +76,9 @@ export async function verifyPassword(password, stored) {
     const expected = Buffer.from(hash, "base64");
     const actual = await derive(password, Buffer.from(salt, "base64"), Number(n), Number(r), Number(p));
     return expected.length === actual.length && timingSafeEqual(expected, actual);
-  } catch {
+  } catch (error) {
+    // (a server that is too busy to hash says so: it is not a password that is wrong)
+    if (error instanceof AccountError) throw error;
     return false;
   }
 }

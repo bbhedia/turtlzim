@@ -13,6 +13,19 @@ function readJson(file) {
   }
 }
 
+/** Where the server keeps what it keeps (a folder that is made when it is first needed): `ZIM_SERVER_DATA`, else a folder of the user's state. */
+export function dataDirOf(env = process.env) {
+  return env.ZIM_SERVER_DATA ?? join(env.XDG_STATE_HOME ?? join(homedir(), ".local/state"), "zim-server");
+}
+
+/** A setting that is a whole number of at least one, or nothing at all (then the code's own default stands). A wrong one stops the server at its start, saying which. */
+function wholeNumber(value, name) {
+  if (value === undefined || value === "") return undefined;
+  const n = typeof value === "string" || typeof value === "number" ? Number(value) : NaN;
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${name} must be a whole number of at least 1 (it is ${JSON.stringify(value)})`);
+  return n;
+}
+
 /** The key that the server's codes are made with: made once, kept in the data folder, readable by its owner only. */
 function secretFor(dataDir) {
   const file = join(dataDir, "secret.key");
@@ -28,7 +41,7 @@ function secretFor(dataDir) {
  * @param {object} [given] values that win over everything (tests)
  */
 export function loadConfig(env = process.env, given = {}) {
-  const dataDir = given.dataDir ?? env.ZIM_SERVER_DATA ?? join(env.XDG_STATE_HOME ?? join(homedir(), ".local/state"), "zim-server");
+  const dataDir = given.dataDir ?? dataDirOf(env);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const file = { ...readJson(join(dataDir, "config.json")) };
   const oauth = readJson(join(dataDir, "oauth.json"));
@@ -58,6 +71,9 @@ export function loadConfig(env = process.env, given = {}) {
     secret: given.secret ?? secretFor(dataDir),
     /** Whether the address of the client can be taken from X-Forwarded-For (only behind a proxy that sets it). */
     trustProxy: given.trustProxy ?? (env.ZIM_TRUST_PROXY === "1" || file.trustProxy === true),
+    /** How many passwords are hashed at once, and how many may wait for a place (src/passwords.mjs); unset, the code's own defaults. */
+    hashSlots: given.hashSlots ?? wholeNumber(env.ZIM_HASH_SLOTS ?? file.hashSlots, "ZIM_HASH_SLOTS"),
+    hashQueue: given.hashQueue ?? wholeNumber(env.ZIM_HASH_QUEUE ?? file.hashQueue, "ZIM_HASH_QUEUE"),
     sessionDays: given.sessionDays ?? 30,
     /** How long a program or an app that was signed in stays so without being used. */
     appSessionDays: given.appSessionDays ?? 180,

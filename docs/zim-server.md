@@ -244,12 +244,15 @@ cd web && npm run build                      # the files of the app (server/ ser
 cd ../server && npm install                  # nodemailer
 ZIM_BASE_URL=https://localhost:8443 scripts/run.sh start --host :: --port 8443 --tls --name ADDRESS [--download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk]
 scripts/run.sh status | log | stop | restart
-npm test                                     # 135 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage, apps signed in, what the server says when it starts over https
+scripts/run.sh check                         # does it answer, and does its database (exit 0), else why not (1; 3 if it is not running)
+scripts/run.sh backup | backups | verify BACKUP | restore BACKUP   # E20a: copies of what it keeps, and the way back (docs/zim-operations.md)
+node scripts/load.mjs --users 20 [--storm 100]   # the server on a data folder of its own, driven by virtual people (what it costs: docs/zim-operations.md)
+npm test                                     # 183 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage, apps signed in, what the server says when it starts, backups and restore, the hashing limiter, scripts/run.sh
 ```
 
 `ZIM_BASE_URL` is the address people **type**: the services send the browser back to it, and it decides `Secure` cookies. From your own computer to this
 server, use an SSH tunnel (`ssh -L 8443:127.0.0.1:8443 you@this-server`, then `https://localhost:8443`): Google accepts `localhost` as a redirect address,
-a bare IP it does not. The data (SQLite file, the key for codes, `outbox.jsonl`) is in `~/.local/state/zim-server` (`ZIM_SERVER_DATA`).
+a bare IP it does not. The data (SQLite file, the key for codes, `outbox.jsonl`) is in `~/.local/state/zim-server` (`ZIM_SERVER_DATA`). **Backups, restoring, updating, the log and what to do when the data leaks: `docs/zim-operations.md`.**
 
 ### Mail
 
@@ -274,9 +277,9 @@ A button appears in the sign-in dialog only for a service that is set up.
 
 ## What verifies it, and what does not
 
-- `server/test`: 135 tests with a real HTTP server, cookies, a clock the test moves, and stand-ins for Google and GitHub (and two that start the server as a program over https, and check the fingerprint it says against the certificate it presents); mutants of the HTTP layer (a check removed, `HttpOnly` dropped, the body limit off, a session not replaced, …) are caught.
+- `server/test`: 183 tests with a real HTTP server, cookies, a clock the test moves, and stand-ins for Google and GitHub (and some that start the server as a program, over https, and check the fingerprint it says against the certificate it presents, or with settings for the hashing); mutants of the HTTP layer (a check removed, `HttpOnly` dropped, the body limit off, a session not replaced, …) are caught. The operations side (E20a: backups, restore, the hashing limiter, the health route, `scripts/run.sh`, the load tool) has its own 68 mutants, all caught (`docs/zim-operations.md`). CI runs the whole suite on Linux with Node 24 (`.github/workflows/desktop.yml`, job `server`).
 - The browser scenario "with an account server…" (`npm run test:browser`): the real server serves the real app; an account is made with the code read from the mailer, a wrong code and a wrong password are refused, the session survives a reload and is not readable by script, sign out and in, a GitHub round trip (stand-in service) and a failed one that echoes nothing of the address.
-- **Not verified**: a real Google or GitHub sign-in (needs your apps), real SMTP delivery, more than one process, any load. The server has had no outside review.
+- **Not verified**: a real Google or GitHub sign-in (needs your apps), real SMTP delivery, more than one process, load on the real host (it was measured on a 2-processor machine with the load tool on the same processors: `docs/zim-operations.md`), a restore on the real host, alerts. The server has had no outside review.
 
 ## Not yet
 
