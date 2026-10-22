@@ -226,6 +226,8 @@ export function restore({ dataDir, from, now = new Date(), placed = () => {} }) 
       was.push(name);
     }
   }
+  // (a folder that had nothing in it, as when a copy is tried out in a new one, has nothing that was replaced: no folder is left for it)
+  if (was.length === 0) rmSync(replaced, { recursive: true, force: true });
   const restored = Object.keys(checked.manifest.files);
   try {
     for (const name of restored) placeFile(join(from, name), join(dataDir, name));

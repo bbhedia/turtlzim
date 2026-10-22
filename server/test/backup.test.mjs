@@ -376,6 +376,16 @@ describe("a restore", () => {
     assert.deepEqual(readdirSync(dataDir).filter((name) => name.startsWith(`${DATABASE}-`)), [], "no journal of the old database is beside the restored one");
   });
 
+  it("leaves no folder of what it replaced when there was nothing to replace (a copy tried out in a new folder)", () => {
+    const { folder } = twoStates();
+    const fresh = scratch();
+    const done = restore({ dataDir: fresh, from: folder, now: new Date("2026-10-22T10:00:00Z") });
+    assert.deepEqual(done.was, []);
+    assert.deepEqual(done.restored.sort(), ["config.json", "secret.key", DATABASE]);
+    assert.deepEqual(readdirSync(fresh).sort(), ["config.json", "secret.key", DATABASE], "only what the copy has, and no empty folder of what was replaced");
+    assert.deepEqual(counts(join(fresh, DATABASE)), { users: 2, notebooks: 2, notebook_files: 4 });
+  });
+
   it("keeps what each restore replaces: two restores in the same second do not write over each other's", () => {
     const { dataDir, folder } = twoStates();
     const now = new Date("2026-10-22T10:00:00Z");
