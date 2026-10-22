@@ -1,6 +1,6 @@
 # Running the account server: backups, checks, load, and what to do when it goes wrong
 
-(E20a. The server itself, its API and its connectors are in `docs/zim-server.md`; this is what a person who *runs* it needs. Everything here is in `server/`.)
+(E20a to E20c. The server itself, its API and its connectors are in `docs/zim-server.md`; this is what a person who *runs* it needs. Everything here is in `server/`.)
 
 ## What the server keeps
 
@@ -42,7 +42,7 @@ To make it happen every night, a cron line (`scripts/run.sh` finds Node itself w
 17 3 * * *  cd /home/USER/projects/turtlzim/server && scripts/run.sh backup >> ~/.local/state/zim-server/backup.log 2>&1
 ```
 
-A backup in the data folder's own disk is **not** a backup against losing the disk: copy `backups/` somewhere else, and read the next section before doing it. (Not set up: that copy, a scheduler that tells someone when `backup` exits 1. Both are yours to add; nothing here does them.)
+A backup in the data folder's own disk is **not** a backup against losing the disk: copy `backups/` somewhere else, and read the next section before doing it. (Not set up: that copy, and a scheduler that tells someone when `backup` exits 1. Both are yours to add; nothing here does them.)
 
 ### What a backup holds, and so how secret it is
 
@@ -94,7 +94,32 @@ Three limits. **Put a backup back with `scripts/run.sh restore`**, not by copyin
 scripts/run.sh check      # exit 0: it answers, and so does its database; 1: it does not (and the end of the log); 3: it is not running
 ```
 
-`check` asks `/api/health` at the first address that the server printed when it started (`curl -k`: the question is whether it answers, not whether its certificate is trusted). `/api/health` answers `200 {"ok":true}` only if the database answers a query, and `503 {"ok":false}` if it does not: that is what a monitor outside should ask (it does not ask for a session and says nothing about anyone). It does not say that the database is *sound* (that is what `verify` says of a copy). **Nothing watches it yet**: a monitor that calls `check` or the address and tells someone is not set up.
+`check` asks `/api/health` at the first address that the server printed when it started (`curl -k`: the question is whether it answers, not whether its certificate is trusted). `/api/health` answers `200 {"ok":true}` only if the database answers a query, and `503 {"ok":false}` if it does not: that is what a monitor outside should ask (it does not ask for a session and says nothing about anyone). It does not say that the database is *sound* (that is what `verify` says of a copy). Something has to ask it: `scripts/run.sh ensure` below does, once a minute, if it is put in `cron` (**nothing runs it yet**: that is yours to install).
+
+## Keeping it up, and being told
+
+The live server was once found not running, with nothing in its log (20 October): nothing noticed. `scripts/run.sh ensure` is what `cron` runs every minute to keep it up:
+
+- **not running** → started again with the options it had (`serve.args`), and said;
+- **running but not answering twice in a row** (`check`'s question, once may be a moment of load) → restarted, and said;
+- **stopped on purpose** (`scripts/run.sh stop` leaves a mark) → left alone, until a `start` by hand;
+- **being changed by another command** (`stop`, `start`, `restart` and `restore` hold a lock that `ensure` must be able to take) → nothing is done, so a cron that fires in the middle of a restore never starts the server on half-restored data;
+- **3 restarts in 10 minutes** → it gives up (a server that can't stay up is not helped by a new start every minute), says so once, and does nothing more until `scripts/run.sh start` by hand.
+
+"Said" means three things: a line in `watch.log` (in the data folder), the output of the command (cron mails what a job prints, if it is set up to), and **your own command**, `ZIM_ALERT_COMMAND`, which bash runs with the message as its first argument and in `ZIM_ALERT_MESSAGE`. **Nothing is sent anywhere unless you set it.** Some examples, yours to choose (the second sends the text off this machine, to a service you have picked):
+
+```bash
+ZIM_ALERT_COMMAND='mail -s "zim server" you@example.org <<<"$ZIM_ALERT_MESSAGE"'      # needs a mail program that works on this machine
+ZIM_ALERT_COMMAND='curl -s -d "$ZIM_ALERT_MESSAGE" https://ntfy.sh/a-topic-only-you-know'
+```
+
+```cron
+* * * * *  cd /home/USER/projects/turtlzim/server && ZIM_ALERT_COMMAND='…' scripts/run.sh ensure
+```
+
+What `cron` does not have is your environment: a server that it starts has no `ZIM_BASE_URL`, and falls back to `http://localhost:8080` as the address that people type (the banner in `watch.log` says so). Put `"baseUrl": "https://…"` in `config.json` in the data folder (the server reads it, and then whoever starts it makes no difference), or set `ZIM_BASE_URL` in the cron line. `ZIM_CHECK_TIMEOUT` (10 seconds) is how long `check` and `ensure` wait for an answer, and `ZIM_LOCK_WAIT` (120 seconds) how long `stop`, `start`, `restart` and `restore` wait for another change of the server to be over.
+
+No cron job was installed by this: it is a change to your machine, and yours to make.
 
 ## Updating, and going back
 
@@ -170,10 +195,10 @@ A plan on paper: **it was never rehearsed**, and there is no admin view to do it
 ## What verifies it, and what does not
 
 - `server/test/backup.test.mjs` (27 tests): a copy that opens and says what the original says while a second process writes; every way of not being whole (a byte changed, cut short, a file gone, a manifest that is not what it was or names a path, a table and its index that disagree, a row that points at nothing); only a backup's own folders are removed; a restore keeps what it replaces, refuses while the server runs, and puts back what it moved when it fails; **a restore renews the generation of the data** (every restore its own, nothing else left behind), brings the tables of an older backup up to date and refuses a newer one; the command line.
-- `server/test/run-script.test.mjs`: `scripts/run.sh` as a person uses it, on a state folder of its own: start, `check`, a backup while it runs, a restore that stops and starts it (and one that refuses a copy that is not whole before stopping anything), and the log moved aside.
+- `server/test/run-script.test.mjs`: `scripts/run.sh` as a person uses it, on a state folder of its own: start, `check`, a backup while it runs, a restore that stops and starts it (and one that refuses a copy that is not whole before stopping anything), and the log moved aside; and **`ensure`**: nothing said while the server is well, a killed server started again and said, one stopped on purpose left alone, a server that does not answer (a process that is stopped) restarted only the second time in a row, the giving up after 3 restarts (with a node that fails at once, and restarts of long ago not counted) said once, and the lock that `ensure` and the commands that change the server share.
 - `server/test/hashing.test.mjs`: at most the places, in order, a failed hashing gives its place back, the turned-away request is answered 503 with its time and takes no place, the defaults are what a server has when it starts (a process of its own), and the API says so. `config.test.mjs` and `startup.test.mjs`: the settings (a wrong one stops the start and says which) and the line the server prints.
 - `server/test/load.test.mjs`: the load tool runs a small round and reports, and lets people in a few at a time.
 - `server/test/db.test.mjs`: the data has a generation (made with the database, kept, renewed); the database file and its journal files are 600, new or found at 644 (with the journal of a server that was killed, which holds rows that are not in the file yet); the data folder and the state folder of `scripts/run.sh` are 700 (in `config.test.mjs` and `run-script.test.mjs`).
 - Two **browser scenarios** (`web/test/browser.mjs`, Chromium and WebKit): two devices of one account, the real server on a data folder of its own, and the real backup and restore: pages made since the backup are sent again, pages changed since are asked about, the device that syncs second is asked nothing and sends nothing, a device whose server revision has caught up is still told by the generation, a link that remembers none, a revision that is too high, and a notebook that the backup never had.
-- **Mutants** (98, each a small change to the code that a test has to notice): 32 in the backup code, 12 in the limiter, 2 in the health route, 9 in `scripts/run.sh`, 14 in the settings, the start and the load tool, 6 in the modes of the files, and 23 in the generation of the data and what a device does with it (6 on the server, 6 in the client's rules, 11 in its sync, checked by the scenarios). **All are caught.** The first runs found four that were not (the database's own check, a folder that only looks like a backup, a folder of backups that was there before and not private, and a default written in two places of which the test reached one); each is now a test or one definition.
-- **Not verified**: a restore on the real OVH host; a backup copied off the machine and restored from there; a restore seen from the desktop program, the Android app or a sealed copy (the sync code is the browser's, and was tried with browsers); the busy answer in the desktop program and the Android app; any real traffic; alerts; an outside review of the server (still to do before other people are given accounts).
+- **Mutants** (116, each a small change to the code that a test has to notice): 32 in the backup code, 12 in the limiter, 2 in the health route, 9 in `scripts/run.sh`, 14 in the settings, the start and the load tool, 6 in the modes of the files, 23 in the generation of the data and what a device does with it (6 on the server, 6 in the client's rules, 11 in its sync, checked by the scenarios), and 18 in `ensure` and the lock. **All are caught.** The first runs found four that were not (the database's own check, a folder that only looks like a backup, a folder of backups that was there before and not private, and a default written in two places of which the test reached one); each is now a test or one definition.
+- **Not verified**: `ensure` run by a real `cron` (it was tried by the tests, which call it as cron would, and not installed on this machine); a restore on the real OVH host; a backup copied off the machine and restored from there; a restore seen from the desktop program, the Android app or a sealed copy (the sync code is the browser's, and was tried with browsers); the busy answer in the desktop program and the Android app; any real traffic; alerts; an outside review of the server (still to do before other people are given accounts).

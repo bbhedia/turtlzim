@@ -1,7 +1,7 @@
 // scripts/run.sh as a person uses it, on a server of its own (its state in a folder of the test's): it starts and says where it is, `check` says whether it answers, a backup is made while it runs and is
 // listed and checked, a restore stops it, puts the copy back and starts it again (and a copy that is not whole is refused before anything is stopped), and the log is moved aside when it has grown.
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -156,5 +156,173 @@ describe("scripts/run.sh", { skip: !existsSync(dist) && "web/dist is not built" 
     assert.ok(readFileSync(`${log}.2`, "utf8").startsWith("fourth"));
     assert.ok(readFileSync(`${log}.3`, "utf8").startsWith("third"));
     assert.ok(!existsSync(`${log}.4`), "three old logs, no more");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// ensure: what cron runs every minute to keep the server up (on a state folder of its own, and a command that is given what has to be told, which writes it down)
+
+describe("scripts/run.sh ensure", { skip: !existsSync(dist) && "web/dist is not built" }, () => {
+  const folder = mkdtempSync(join(tmpdir(), "zim-ensure-test-"));
+  const mine = join(folder, "zim-server");
+  const alertsFile = join(folder, "alerts.txt");
+  const settings = { ...env, XDG_STATE_HOME: folder, ZIM_CHECK_TIMEOUT: "2", ZIM_LOCK_WAIT: "8", ZIM_ALERT_FILE: alertsFile, ZIM_ALERT_COMMAND: 'printf "%s\\n" "$1" >>"$ZIM_ALERT_FILE"' };
+  const runWith = (given, ...args) => {
+    const done = spawnSync("bash", [script, ...args], { env: given, encoding: "utf8", timeout: 120_000 });
+    return { status: done.status, out: done.stdout + done.stderr, said: done.stdout };
+  };
+  const ensure = (...args) => runWith(settings, ...args);
+  const watchLog = () => (existsSync(join(mine, "watch.log")) ? readFileSync(join(mine, "watch.log"), "utf8") : "");
+  const alerts = () => (existsSync(alertsFile) ? readFileSync(alertsFile, "utf8").trim().split("\n") : []);
+  const pidOf = () => Number(readFileSync(join(mine, "serve.pid"), "utf8"));
+  const gone = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  const waitFor = async (condition, what) => {
+    for (let waited = 0; !condition(); waited += 100) {
+      assert.ok(waited < 15_000, `never: ${what}`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
+  const killAndWait = async (pid) => {
+    process.kill(pid, "SIGKILL");
+    await waitFor(() => gone(pid), "the process ended");
+  };
+  after(() => {
+    ensure("stop");
+    rmSync(folder, { recursive: true, force: true });
+  });
+
+  it("does nothing, and says nothing, while the server answers", () => {
+    assert.equal(ensure("start", "--host", "127.0.0.1", "--port", "0").status, 0);
+    const done = ensure("ensure");
+    assert.equal(done.status, 0, done.out);
+    assert.equal(done.out, "");
+    assert.equal(watchLog(), "", "nothing is written down for a server that is well");
+    assert.deepEqual(alerts(), []);
+  });
+
+  it("starts the server again when it is not running, says so (output, log, and the command that was given), and then it answers", async () => {
+    const before = pidOf();
+    await killAndWait(before);
+    const done = ensure("ensure");
+    assert.equal(done.status, 0, done.out);
+    assert.match(done.said, /^the server was not running: it was started again \(pid \d+\)\n$/);
+    assert.notEqual(pidOf(), before);
+    assert.equal(ensure("check").status, 0, "it answers");
+    assert.match(watchLog(), /Z the server was not running: it was started again \(pid \d+\)/);
+    assert.equal(alerts().length, 1);
+    assert.match(alerts()[0], /the server was not running: it was started again/);
+    assert.equal(ensure("ensure").out, "", "and the next one has nothing to say");
+  });
+
+  it("leaves alone a server that was stopped on purpose, and watches again once it is started by hand", () => {
+    assert.match(ensure("stop").out, /stopped \(was pid \d+\)/);
+    assert.equal(existsSync(join(mine, "stopped")), true);
+    const done = ensure("ensure");
+    assert.equal(done.out, "");
+    assert.equal(ensure("status").status, 3, "it was not started");
+    assert.equal(alerts().length, 1, "and nothing was told");
+    assert.equal(ensure("start", "--host", "127.0.0.1", "--port", "0").status, 0);
+    assert.equal(existsSync(join(mine, "stopped")), false);
+    assert.equal(ensure("ensure").out, "");
+  });
+
+  it("restarts a server that does not answer, but only the second time in a row (once may be a moment of load), and a good answer between starts the count again", async () => {
+    const stuck = pidOf();
+    process.kill(stuck, "SIGSTOP");
+    const asked = Date.now();
+    const first = ensure("ensure");
+    assert.ok(Date.now() - asked < 8000, `it waits ZIM_CHECK_TIMEOUT (2 s) for an answer, not longer (${Date.now() - asked} ms)`);
+    assert.equal(first.out, "", "once is not enough");
+    assert.equal(pidOf(), stuck);
+    assert.match(watchLog(), /did not answer: once/);
+    assert.equal(existsSync(join(mine, "watch.failures")), true);
+    // it answers again: the count is gone
+    process.kill(stuck, "SIGCONT");
+    await waitFor(() => ensure("check").status === 0, "the server answered again");
+    assert.equal(ensure("ensure").out, "");
+    assert.equal(existsSync(join(mine, "watch.failures")), false, "a good answer clears the count");
+    // once more, and once again: that is twice in a row only if nothing good came between
+    process.kill(stuck, "SIGSTOP");
+    assert.equal(ensure("ensure").out, "", "once, again");
+    assert.equal(pidOf(), stuck);
+    const second = ensure("ensure");
+    assert.match(second.said, /^the server \(pid \d+\) did not answer twice in a row: it was started again \(pid \d+\)\n$/);
+    assert.notEqual(pidOf(), stuck);
+    assert.equal(ensure("check").status, 0, "the new one answers");
+    await waitFor(() => gone(stuck), "the one that did not answer is gone");
+    assert.equal(alerts().length, 2);
+    assert.match(alerts()[1], /did not answer twice in a row/);
+  });
+
+  it("gives up after three restarts in ten minutes (not counting older ones), says so once, does nothing more, and tries again after a start by hand", async () => {
+    // a server that can't start: a node that ends at once, first on the path
+    const fake = mkdtempSync(join(tmpdir(), "zim-fake-node-"));
+    writeFileSync(join(fake, "node"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const broken = { ...settings, PATH: `${fake}:${process.env.PATH}` };
+    await killAndWait(pidOf());
+    // restarts that were made long ago are not counted
+    const longAgo = Math.floor(Date.now() / 1000) - 3600;
+    writeFileSync(join(mine, "watch.restarts"), `${longAgo}\n${longAgo}\n${longAgo}\n`);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const done = runWith(broken, "ensure");
+      assert.match(done.said, /the server was not running, and it could not be started again/, `attempt ${attempt}`);
+    }
+    const gave = runWith(broken, "ensure");
+    assert.match(gave.said, /the server was not running, and it has been restarted 3 times in the last 10 minutes: giving up/);
+    assert.equal(existsSync(join(mine, "watch.gaveup")), true);
+    assert.equal(runWith(broken, "ensure").out, "", "and nothing more is said");
+    assert.equal(alerts().filter((line) => /giving up/.test(line)).length, 1, "the person was told once");
+    assert.equal(ensure("ensure").out, "", "(not even with a node that works: it gave up)");
+    assert.equal(ensure("status").status, 3);
+    // started by hand, with the node that works: the watch begins again, and the count with it
+    assert.equal(ensure("start", "--host", "127.0.0.1", "--port", "0").status, 0);
+    assert.equal(existsSync(join(mine, "watch.gaveup")), false);
+    assert.equal(existsSync(join(mine, "watch.restarts")), false);
+    await killAndWait(pidOf());
+    assert.match(ensure("ensure").said, /it was started again/);
+    rmSync(fake, { recursive: true, force: true });
+  });
+
+  it("does nothing while the server is being changed by another command (they hold a lock), and the commands that change it wait for it", async () => {
+    await killAndWait(pidOf());
+    const hold = (seconds) => spawn("flock", ["-w", "10", join(mine, "watch.lock"), "sleep", String(seconds)], { stdio: "ignore" });
+    let holder = hold(4);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.equal(ensure("ensure").out, "", "ensure left the server as it was");
+    assert.equal(ensure("status").status, 3, "and did not start it");
+    // (a restart of a server that is not running starts it: it waits for the lock first)
+    const began = Date.now();
+    const restarted = ensure("restart", "--host", "127.0.0.1", "--port", "0");
+    assert.equal(restarted.status, 0, restarted.out);
+    assert.ok(Date.now() - began >= 2500, `restart waited for the lock (${Date.now() - began} ms)`);
+    // a stop waits too, and so does a restore (which looks at its copy first, and then waits)
+    holder.kill();
+    await new Promise((resolve) => holder.once("close", resolve));
+    const made = ensure("backup");
+    const copy = /backed up to (\S+)/.exec(made.out)?.[1];
+    assert.ok(copy, made.out);
+    holder = hold(4);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const stopStart = Date.now();
+    assert.equal(ensure("stop").status, 0);
+    assert.ok(Date.now() - stopStart >= 2500, `stop waited for the lock (${Date.now() - stopStart} ms)`);
+    holder.kill();
+    await new Promise((resolve) => holder.once("close", resolve));
+    holder = hold(4);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const restoreStart = Date.now();
+    assert.equal(ensure("restore", copy).status, 0);
+    assert.ok(Date.now() - restoreStart >= 2500, `restore waited for the lock (${Date.now() - restoreStart} ms)`);
+    holder.kill();
+    // what was stopped on purpose is still stopped after a restore of a stopped server, and ensure does not start it in the middle of anything
+    assert.equal(ensure("ensure").out, "");
+    assert.equal(ensure("status").status, 3);
   });
 });
