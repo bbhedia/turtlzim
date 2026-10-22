@@ -223,10 +223,10 @@ export function serverRunning(dataDir) {
 /**
  * Put a backup back. It is checked first (a copy that is not whole is refused, and nothing is touched), the server must not be running, and what is in the data folder now is not deleted: it is moved to
  * `replaced-<time>` there. The restored data gets a new generation (`renewedEpoch`). If anything goes wrong after that, what was moved is put back and this throws. `placed` is called when the files
- * are in place and before they are checked (a seam for a test).
+ * are in place and before they are checked, and `moving` before each file is moved aside (seams for a test).
  * @returns {{ replaced: string, restored: string[], was: string[], epoch: string }}
  */
-export function restore({ dataDir, from, now = new Date(), placed = () => {} }) {
+export function restore({ dataDir, from, now = new Date(), placed = () => {}, moving = () => {} }) {
   const checked = verify(from);
   if (!checked.ok) throw new Error(`that backup can't be used: ${checked.problems.join("; ")}`);
   if (serverRunning(dataDir)) throw new Error("the server is running: stop it first (scripts/run.sh restore does)");
@@ -234,11 +234,19 @@ export function restore({ dataDir, from, now = new Date(), placed = () => {} }) 
   const replaced = join(dataDir, freshName(dataDir, "replaced-", now).name);
   privateFolder(replaced);
   const was = [];
-  for (const name of [DATABASE, `${DATABASE}-wal`, `${DATABASE}-shm`, ...SETTINGS]) {
-    if (existsSync(join(dataDir, name))) {
-      renameSync(join(dataDir, name), join(replaced, name));
-      was.push(name);
+  try {
+    for (const name of [DATABASE, `${DATABASE}-wal`, `${DATABASE}-shm`, ...SETTINGS]) {
+      if (existsSync(join(dataDir, name))) {
+        moving(name);
+        renameSync(join(dataDir, name), join(replaced, name));
+        was.push(name);
+      }
     }
+  } catch (error) {
+    // (nothing has been placed yet: what was moved is put back, and the folder is as it was)
+    for (const name of was) renameSync(join(replaced, name), join(dataDir, name));
+    rmSync(replaced, { recursive: true, force: true });
+    throw new Error(`the restore could not begin, and what was there is as it was: ${error.message}`);
   }
   // (a folder that had nothing in it, as when a copy is tried out in a new one, has nothing that was replaced: no folder is left for it)
   if (was.length === 0) rmSync(replaced, { recursive: true, force: true });

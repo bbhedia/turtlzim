@@ -505,6 +505,25 @@ describe("a restore", () => {
     fake.kill("SIGKILL");
   });
 
+  it("puts back what it had moved aside when it can't move the rest, and leaves the folder as it was (nothing was placed yet)", () => {
+    const { dataDir, folder } = twoStates();
+    const before = Object.fromEntries(readdirSync(dataDir).filter((name) => statSync(join(dataDir, name)).isFile()).map((name) => [name, sha(join(dataDir, name))]));
+    assert.throws(
+      () =>
+        restore({
+          dataDir,
+          from: folder,
+          moving: (name) => {
+            if (name === "secret.key") throw new Error("the disk went away");
+          },
+        }),
+      /the restore could not begin, and what was there is as it was: the disk went away/,
+    );
+    const after = Object.fromEntries(readdirSync(dataDir).filter((name) => statSync(join(dataDir, name)).isFile()).map((name) => [name, sha(join(dataDir, name))]));
+    assert.deepEqual(after, before, "every file is as it was, the database too (it had been moved when the key could not be)");
+    assert.deepEqual(readdirSync(dataDir).filter((name) => name.startsWith("replaced-")), []);
+  });
+
   it("puts back what it moved aside when it fails after that, and leaves nothing of what it began", () => {
     const { dataDir, folder } = twoStates();
     // (a file that the copy has and the data folder has not: the restore places it, and when it fails it is not left there)

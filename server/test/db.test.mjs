@@ -86,6 +86,18 @@ describe("the database file", () => {
     other.close();
   });
 
+  it("gets a generation again when the row of it was deleted by hand, instead of failing (and keeps that one)", () => {
+    const db = openDatabase(join(scratch(), "zim.sqlite"));
+    db.exec("delete from meta");
+    const healed = epochOf(db);
+    assert.match(healed, /^[0-9a-f]{32}$/);
+    assert.equal(epochOf(db), healed);
+    db.exec("delete from meta");
+    const renewed = renewEpoch(db);
+    assert.equal(epochOf(db), renewed, "a renewal with no row stores the new one");
+    db.close();
+  });
+
   it("gets a generation when it is brought up to date from a version that had none, once, and keeps it after that", () => {
     const path = join(scratch(), "zim.sqlite");
     const db = openDatabase(path);

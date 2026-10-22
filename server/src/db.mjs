@@ -150,13 +150,15 @@ export function openDatabase(path) {
  * (`renewEpoch`): the device can then tell that what it finds here is not what moved on from what it left, whatever the revisions of the notebooks say (they went back too, or are the same by chance).
  */
 export function epochOf(db) {
-  return db.prepare("select value from meta where key = 'epoch'").get().value;
+  const row = db.prepare("select value from meta where key = 'epoch'").get();
+  // (a database whose generation was deleted by hand gets one, rather than answering every manifest with an error)
+  return row ? row.value : renewEpoch(db);
 }
 
 /** Start a new generation of the data, and say it. A restore does, whatever the backup held. */
 export function renewEpoch(db) {
   const epoch = randomBytes(16).toString("hex");
-  db.prepare("update meta set value = ? where key = 'epoch'").run(epoch);
+  db.prepare("insert or replace into meta (key, value) values ('epoch', ?)").run(epoch);
   return epoch;
 }
 
