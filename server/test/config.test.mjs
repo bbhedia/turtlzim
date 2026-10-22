@@ -1,6 +1,6 @@
 // What the server is told (src/config.mjs): where its data is, and how many passwords it hashes at once.
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -20,6 +20,18 @@ describe("where the data is", () => {
     assert.equal(dataDirOf({ ZIM_SERVER_DATA: "/srv/zim", XDG_STATE_HOME: "/state" }), "/srv/zim");
     assert.equal(dataDirOf({ XDG_STATE_HOME: "/state" }), "/state/zim-server");
     assert.equal(dataDirOf({}), join(homedir(), ".local/state", "zim-server"));
+  });
+});
+
+describe("the data folder", () => {
+  it("is for its owner only: made so, or made so when it was there before with a mode that others can read", () => {
+    const made = join(scratch(), "data");
+    loadConfig({ ZIM_SERVER_DATA: made });
+    assert.equal(statSync(made).mode & 0o777, 0o700);
+    const before = scratch();
+    chmodSync(before, 0o775);
+    loadConfig({ ZIM_SERVER_DATA: before });
+    assert.equal(statSync(before).mode & 0o777, 0o700);
   });
 });
 

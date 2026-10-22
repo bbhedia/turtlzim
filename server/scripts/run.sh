@@ -23,6 +23,8 @@ pidfile="$state/serve.pid"
 logfile="$state/serve.log"
 argsfile="$state/serve.args"
 mkdir -p "$state"
+# (for its owner only: it holds the data by default, and always the log, which has the addresses that people come from)
+chmod 700 "$state" 2>/dev/null || true
 
 # Node: on the PATH if this shell has it, else the newest one nvm installed (a non-interactive shell,
 # such as `ssh host command` or cron, doesn't load nvm).

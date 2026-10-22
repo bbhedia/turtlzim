@@ -1,4 +1,5 @@
 // The server's database: one SQLite file (the one that comes with Node), with its tables made by numbered steps, so that a newer server opens an older file.
+import { chmodSync, closeSync, existsSync, openSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
 const STEPS = [
@@ -110,8 +111,15 @@ const STEPS = [
   `,
 ];
 
+/** The database holds everyone's accounts and the notebooks kept on the server: its file, and the journal files beside it, are for its owner only (SQLite would make them readable by everyone: 644). */
+function keepPrivate(path) {
+  if (!existsSync(path)) closeSync(openSync(path, "a", 0o600));
+  for (const file of [path, `${path}-wal`, `${path}-shm`]) if (existsSync(file)) chmodSync(file, 0o600);
+}
+
 /** Open (and make or bring up to date) the database at `path` (`:memory:` for a test). */
 export function openDatabase(path) {
+  if (path !== ":memory:") keepPrivate(path); // (SQLite gives the journal files that it makes the mode of the database's own file)
   const db = new DatabaseSync(path);
   db.exec("pragma foreign_keys = on");
   if (path !== ":memory:") db.exec("pragma journal_mode = wal");

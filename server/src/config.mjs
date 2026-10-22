@@ -43,6 +43,12 @@ function secretFor(dataDir) {
 export function loadConfig(env = process.env, given = {}) {
   const dataDir = given.dataDir ?? dataDirOf(env);
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  try {
+    // (a folder that was made before, by `scripts/run.sh` or by hand, has the mode of its maker's umask: 775 here, which lets every other user of the computer read the database)
+    chmodSync(dataDir, 0o700);
+  } catch {
+    // (not ours to change: whoever put the server there has the say over who can read it)
+  }
   const file = { ...readJson(join(dataDir, "config.json")) };
   const oauth = readJson(join(dataDir, "oauth.json"));
   const baseUrl = (given.baseUrl ?? env.ZIM_BASE_URL ?? file.baseUrl ?? "http://localhost:8080").replace(/\/+$/, "");

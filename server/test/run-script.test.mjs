@@ -2,7 +2,7 @@
 // listed and checked, a restore stops it, puts the copy back and starts it again (and a copy that is not whole is refused before anything is stopped), and the log is moved aside when it has grown.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -15,6 +15,9 @@ const state = mkdtempSync(join(tmpdir(), "zim-run-test-"));
 const data = join(state, "zim-server");
 const env = { ...process.env, XDG_STATE_HOME: state, ZIM_BASE_URL: "http://127.0.0.1", ZIM_LOG_MAX_BYTES: "100000", PATH: process.env.PATH };
 delete env.ZIM_SERVER_DATA;
+// (a state folder that was there before, with the mode that a umask of 002 gives: the script makes it private)
+mkdirSync(data, { recursive: true });
+chmodSync(data, 0o775);
 const run = (...args) => {
   const done = spawnSync("bash", [script, ...args], { env, encoding: "utf8", timeout: 60_000 });
   return { status: done.status, out: done.stdout + done.stderr };
@@ -49,6 +52,7 @@ describe("scripts/run.sh", { skip: !existsSync(dist) && "web/dist is not built" 
     assert.equal(check.status, 3);
     assert.match(check.out, /not running/);
     assert.equal(run("restore").status, 2, "a restore says which copy it wants");
+    assert.equal(statSync(data).mode & 0o777, 0o700, "its state folder (the log has the addresses that people come from) is for its owner only");
   });
 
   it("starts, answers a check, and is backed up while it runs", () => {
