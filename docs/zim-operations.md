@@ -98,7 +98,7 @@ One server process per data folder. Two on the same folder is not supported (it 
 
 ## The log
 
-`serve.log`: one line per request (the time, the address the request came from, the method, the path, the status) and what the server says when it starts and when something fails (a stack for an error that was not the person's). For `/api/` requests **the query is not logged** (a sign-in's return carries a code and a state), and the names of pages are in the *bodies* of the sync's requests, not its addresses (`/api/sync/notebooks/<id>/…`), so they are not in the log; the log does hold the addresses that people come from, which is personal data (`docs/zim-cloud-feasibility.md`, on what a public service has to say about it). Behind a proxy it is the proxy's address (the log does not read the proxy's header; the limits do, with `ZIM_TRUST_PROXY`).
+`serve.log`: one line per request (the time, the address the request came from, the method, the path, the status) and what the server says when it starts and when something fails (a stack for an error that was not the person's). For `/api/` requests **the query is not logged** (a sign-in's return carries a code and a state), and the names of pages are in the *bodies* of the sync's requests, not its addresses (`/api/sync/notebooks/<id>/…`), so they are not in the log; the log does hold the addresses that people come from, which is personal data (the study in `docs/zim-cloud-feasibility.md` puts a retention period for the logs among what the privacy policy has to say: E19, not written yet). Behind a proxy it is the proxy's address (the log does not read the proxy's header; the limits do, with `ZIM_TRUST_PROXY`).
 
 At every start of `scripts/run.sh`, a log over 5 MiB (`ZIM_LOG_MAX_BYTES`) is moved to `serve.log.1`, the older ones to `.2` and `.3`, and the oldest is dropped: about 20 MiB at most. (Only at a start: the running server holds the file open. A server that runs for months grows its log until the next start.)
 
@@ -129,7 +129,7 @@ The numbers below were taken on 22 October 2026 (a request is one of the five in
 | 20 (60 files each) | 176 | 10 to 11.5 ms | 24 to 27 ms | 114 MiB |
 | 100 (20 files each) | 229 (about 1,150 requests per second: the server's one processor is full) | 66 to 68 ms | 124 to 134 ms | 103 MiB |
 
-People who never rest for more than 50 ms are far more than 100 real ones. **Signing up and signing in cost one password each, and that is the slow part**: about 7 per second here (one place; each is about 135 ms of a processor), and the first request of a person that follows it is as quick as any other.
+People who never rest for more than 50 ms are far more than 100 real ones. **Signing up and signing in cost one password each, and that is the slow part**: about 7 per second here (one place; each is about 135 ms of a processor); every other request is a few milliseconds.
 
 **A storm** (`--storm 100`: a hundred strangers sign in at the same moment, each from an address of their own and with a password that is wrong; twenty people are keeping notebooks in step meanwhile). The request that is watched is *who am I*, from the people who were there:
 
