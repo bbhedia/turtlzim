@@ -43,6 +43,10 @@ const addUser = (id, email) => {
 };
 
 describe("scripts/run.sh", { skip: !existsSync(dist) && "web/dist is not built" }, () => {
+  it("can be run as the documents say (scripts/run.sh ...): it is executable", () => {
+    assert.ok((statSync(script).mode & 0o111) !== 0, "scripts/run.sh has lost its executable bit");
+  });
+
   it("says what it does when it is asked wrong, and that it is not running when it is not", () => {
     const help = run("nonsense");
     assert.equal(help.status, 2);
