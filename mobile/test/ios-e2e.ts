@@ -9,6 +9,7 @@
 // In a browser (`npm run test:e2e-local`) it runs the same way and leaves its result in `window.__e2e`.
 import { Capacitor } from "@capacitor/core";
 import { Directory, Encoding, Filesystem } from "@capacitor/filesystem";
+import type { AccountHooks } from "../../web/src/app/shell";
 
 const PASSPHRASE = "a long passphrase for the test of the app";
 const LINE = "e2e line one";
@@ -34,6 +35,7 @@ declare global {
     __zim?: Zim;
     __e2e?: unknown;
     __e2eErrors?: string[];
+    __zimShell?: { account?: AccountHooks };
   }
 }
 
@@ -197,6 +199,62 @@ async function unlock(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
+// what the app's own code (ZimNativePlugin) does for an account, asked through the hooks that the shell gives the page, as the page asks; where the app has none (a browser) this is left out
+
+/** What a hook said when it refused: the words (and, for a certificate, the code). */
+async function refusal(work: Promise<unknown>): Promise<{ message: string; code?: string }> {
+  try {
+    await work;
+  } catch (failure) {
+    const error = failure as { message?: string; code?: string };
+    return { message: String(error.message ?? failure), ...(error.code ? { code: error.code } : {}) };
+  }
+  throw new Error("it was not refused");
+}
+
+function expectIncludes(what: string, text: string, part: string): void {
+  if (!text.includes(part)) throw new Error(`${what}: ${JSON.stringify(text)} does not say ${JSON.stringify(part)}`);
+}
+
+async function accountSteps(account: AccountHooks): Promise<void> {
+  if (phase === 1) {
+    await step("the keychain keeps a secret, gives it back, and forgets it", async () => {
+      await account.secrets.set("e2e-secret", "value one");
+      if ((await account.secrets.get("e2e-secret")) !== "value one") throw new Error("the secret was not given back");
+      await account.secrets.set("e2e-secret", "value two");
+      if ((await account.secrets.get("e2e-secret")) !== "value two") throw new Error("the secret was not replaced");
+      await account.secrets.remove("e2e-secret");
+      if ((await account.secrets.get("e2e-secret")) !== null) throw new Error("the secret was not forgotten");
+      expectIncludes("a name that is a path", (await refusal(account.secrets.set("a/b", "x"))).message, "not a name");
+      await account.secrets.set("e2e-kept", "kept over a restart");
+    });
+    await step("a request is made only to an account server: the rules refuse the rest, in words", async () => {
+      const get = (url: string) => account.request({ url, method: "GET", headers: {} });
+      expectIncludes("plain http to another server", (await refusal(get("http://example.org/api/me"))).message, "has to be reached over https");
+      expectIncludes("another path", (await refusal(get("https://example.org/other"))).message, "not a request to the account server");
+      expectIncludes("a dot segment", (await refusal(get("https://example.org/api/%2e%2e/x"))).message, "not a request to the account server");
+      expectIncludes("a name and password", (await refusal(get("https://ada:secret@example.org/api/me"))).message, "no name or password");
+      expectIncludes("another kind of address", (await refusal(get("file:///etc/passwd"))).message, "not an address");
+    });
+    await step("the hooks for a certificate refuse what they should, and say so when nothing answers", async () => {
+      const trust = account.trust;
+      if (!trust) throw new Error("the shell gave no hooks for a certificate");
+      expectIncludes("an address that is not https", (await refusal(trust.inspect("http://127.0.0.1:1"))).message, "only for an https address");
+      expectIncludes("a page of a server", (await refusal(trust.inspect("https://127.0.0.1:1/api/me"))).message, "not for a page");
+      expectIncludes("what is not a fingerprint", (await refusal(trust.pin("https://127.0.0.1:1", "zz"))).message, "not a fingerprint");
+      if ((await trust.pinned("https://127.0.0.1:1")) !== null) throw new Error("something was trusted that never was");
+      await trust.unpin("https://127.0.0.1:1");
+      expectIncludes("a server that is not there", (await refusal(trust.inspect("https://127.0.0.1:1"))).message, "did not answer");
+    });
+  } else {
+    await step("the secret kept before the app was closed is there, in the keychain", async () => {
+      if ((await account.secrets.get("e2e-kept")) !== "kept over a restart") throw new Error("the secret did not survive the restart");
+      await account.secrets.remove("e2e-kept");
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   if (Capacitor.isNativePlatform()) {
@@ -229,6 +287,7 @@ async function main(): Promise<void> {
       await until("the secret back", () => pageText().includes(SECRET));
     });
     await step("and lock again, as an app that goes away does", lock);
+    if (window.__zimShell?.account) await accountSteps(window.__zimShell.account);
   } else {
     await step("what was typed before the app was closed is there", async () => {
       await until("the line", () => pageText().includes(LINE));
@@ -238,6 +297,7 @@ async function main(): Promise<void> {
       await until("the secret", () => pageText().includes(SECRET));
     });
     await step("and locks", lock);
+    if (window.__zimShell?.account) await accountSteps(window.__zimShell.account);
   }
   await report(true);
 }

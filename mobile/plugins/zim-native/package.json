@@ -1,0 +1,16 @@
+{
+  "name": "zim-native",
+  "version": "0.1.0",
+  "private": true,
+  "description": "What the iPhone app does for an account that a WebView does not: the requests to the account server, a place for the token (the keychain), trusting a certificate by its fingerprint, and the person's browser. See ../../../docs/zim-mobile-shell.md.",
+  "license": "GPL-3.0-or-later",
+  "files": ["ios", "zim-native-rules", "Package.swift"],
+  "capacitor": {
+    "ios": {
+      "src": "ios"
+    }
+  },
+  "peerDependencies": {
+    "@capacitor/core": ">=8.0.0"
+  }
+}

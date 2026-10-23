@@ -11,5 +11,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["shell", "scripts"]
+  "include": ["shell", "scripts", "test/ios-e2e.ts"]
 }

@@ -117,6 +117,15 @@ jobs:
           npm run typecheck
           ZIM_E2E=1 npm run prepare:web
           npx cap sync ios
+      - name: the rules of the Swift plugin (what the app may ask of the network, fingerprints), on this Mac
+        working-directory: mobile/plugins/zim-native/zim-native-rules
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! swift test 2>&1 | tee "$RUNNER_TEMP/rules.log" | tail -n 12; then
+            grep -E "error:|failed|Fatal" "$RUNNER_TEMP/rules.log" | sed 's/%/%25/g' | head -n 9 | while IFS= read -r line; do echo "::error title=the Swift rules::${line:0:900}"; done
+            exit 1
+          fi
       - name: build the app for the simulator
         working-directory: mobile/ios/App
         shell: bash
