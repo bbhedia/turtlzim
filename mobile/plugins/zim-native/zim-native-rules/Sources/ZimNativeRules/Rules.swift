@@ -14,7 +14,7 @@ public struct Refused: Error, Equatable, CustomStringConvertible {
 }
 
 /// A request that could not be made: the words for a person and, for the two ways that a certificate is refused, the code that the page acts on (else nil).
-public struct Failure: Equatable {
+public struct Failure: Error, Equatable {
     public let message: String
     public let code: String?
     public init(message: String, code: String?) {

@@ -32,7 +32,8 @@ public class ZimNativePlugin: CAPPlugin, CAPBridgedPlugin {
         call.reject(failure.message, failure.code)
     }
 
-    private func reject(_ call: CAPPluginCall, _ error: Error) {
+    /// A refusal or a failure that came as an error: said in words, and with its code if it was about a certificate.
+    private func refuse(_ call: CAPPluginCall, _ error: Error) {
         reject(call, Rules.describe(error))
     }
 
@@ -45,7 +46,7 @@ public class ZimNativePlugin: CAPPlugin, CAPBridgedPlugin {
         do {
             url = try Rules.checkUrl(call.getString("url"))
         } catch {
-            return reject(call, error)
+            return refuse(call, error)
         }
         let method = (call.getString("method") ?? "GET").uppercased()
         guard Rules.methods.contains(method) else { return call.reject("That is not a request that this app makes.") }
@@ -96,7 +97,7 @@ public class ZimNativePlugin: CAPPlugin, CAPBridgedPlugin {
         do {
             found = try origin(call)
         } catch {
-            return reject(call, error)
+            return refuse(call, error)
         }
         Look.at(host: found.host, port: found.port) { [weak self] result in
             switch result {
@@ -114,7 +115,7 @@ public class ZimNativePlugin: CAPPlugin, CAPBridgedPlugin {
         do {
             found = try origin(call)
         } catch {
-            return reject(call, error)
+            return refuse(call, error)
         }
         guard let wanted = Rules.parse(call.getString("fingerprint")) else { return call.reject("That is not a fingerprint.") }
         Look.at(host: found.host, port: found.port) { [weak self] result in
@@ -143,7 +144,7 @@ public class ZimNativePlugin: CAPPlugin, CAPBridgedPlugin {
                 call.resolve(["fingerprint": NSNull()])
             }
         } catch {
-            reject(call, error)
+            refuse(call, error)
         }
     }
 
@@ -153,7 +154,7 @@ public class ZimNativePlugin: CAPPlugin, CAPBridgedPlugin {
             pins.remove(try origin(call).key)
             call.resolve()
         } catch {
-            reject(call, error)
+            refuse(call, error)
         }
     }
 
@@ -166,7 +167,7 @@ public class ZimNativePlugin: CAPPlugin, CAPBridgedPlugin {
         do {
             url = try Rules.checkBrowserUrl(call.getString("url"))
         } catch {
-            return reject(call, error)
+            return refuse(call, error)
         }
         DispatchQueue.main.async {
             UIApplication.shared.open(url, options: [:]) { opened in
