@@ -164,6 +164,11 @@ if [ "$failed" = 0 ]; then
         xcrun simctl io "$udid" screenshot "$out/run-1-screen.png" >/dev/null 2>&1
         cp "$results/run-1.json" "$out/run-1.json"
         kept=1
+        # (a step of the run that failed may be about the system's sign-in sheet: what the system said of it is told, to be read with that step)
+        if grep -q '"ok":false' "$results/run-1.json"; then
+            xcrun simctl spawn "$udid" log show --last 10m --style compact --predicate 'process == "SafariViewService" OR eventMessage CONTAINS[c] "ASWebAuthenticationSession" OR eventMessage CONTAINS[c] "AuthenticationServices"' 2>/dev/null | tail -n 12 | cut -c1-200 >"$out/safari.log"
+            annotate warning "iOS system log about the sign-in sheet" "$(tr '\n' '|' <"$out/safari.log")"
+        fi
     else
         failed=1
     fi

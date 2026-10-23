@@ -430,16 +430,18 @@ async function serverSteps(account: AccountHooks, server: ServerConfig): Promise
         if (redirectUri !== RETURN_URI) throw new Error(`the return address was ${redirectUri}`);
         const before = (await serverState()).seen.length;
         const waiting = refusal(hooks.wait(`${server.http}/?app=authorize&redirect_uri=${encodeURIComponent(RETURN_URI)}&code_challenge=${"A".repeat(43)}&code_challenge_method=S256&state=${state}`));
-        // (the page of the server loads in the sheet and asks the server who is there: a browser, not the app, which is how it is known that the sheet opened)
+        // (the page of the server loads in the sheet and asks the server who is there: a browser, not the app, which is how it is known that the sheet opened. The first sheet that a simulator
+        // shows starts Safari's services, which a runner takes long over: the first run of this step on a CI Mac saw nothing in twenty seconds, and the one before it, on a simulator that had
+        // shown some, saw the page at once)
         let loaded: Seen | undefined;
-        for (let waited = 0; !loaded && waited < 20_000; waited += 500) {
+        for (let waited = 0; !loaded && waited < 90_000; waited += 500) {
           await sleep(500);
           loaded = (await serverState()).seen.slice(before).find((entry) => /Safari/.test(entry.userAgent ?? "") && entry.userAgent !== "ZimNotebook-iOS");
         }
         hooks.cancel();
         const cancelled = await Promise.race([waiting, sleep(10_000).then((): never => { throw new Error("the wait for the sign-in did not end when it was cancelled"); })]);
         expectIncludes("the wait", cancelled.message, "cancelled");
-        if (!loaded) throw new Error("the sheet did not load the server's page in twenty seconds");
+        if (!loaded) throw new Error("the sheet did not load the server's page in ninety seconds");
         if (loaded.cookie) throw new Error("the sheet went with a cookie: it was not a session of its own");
       },
       true,
