@@ -7,8 +7,7 @@
 # With ZIM_E2E_SERVER=1 a real account server (scripts/ios-server.mjs: the server's own code, https with a certificate that no system knows, and a few doors for the test) is started first, and the
 # app is told where it is (Documents/e2e/server.json), so that its test also tries what its own code does for an account against it.
 #
-# An app that is not signed with a keychain group has no keychain (error -34018), and what the simulator takes for one is learned here, not guessed: the first run is made with the app as the build gave
-# it, then, if its keychain did not work, with copies of it signed ad hoc in other ways, until one works. What each did is told as annotations, and only the one that was kept counts.
+# An app that is not signed with a keychain group has no keychain (error -34018): the build signs it ad hoc with the group of App.entitlements, as Xcode does for a simulator.
 #
 #   scripts/ios-ci.sh APP.app [OUT-FOLDER]          (macOS, Xcode, Node 24 for the server; bash 3.2 is enough)
 set -uo pipefail
@@ -146,84 +145,31 @@ diagnose() {
 run_app() {
     local n="$1" limit="${2:-180}" label="${3:-iOS app run $1}"
     if ! xcrun simctl launch "$udid" "$bundle" >"$out/launch-$n.log" 2>&1; then
-        annotate warning "$label" "it did not start: $(tail -n 3 "$out/launch-$n.log" | tr '\n' ' ') $(crash_summary | tr '\n' ' ')"
+        annotate error "$label" "it did not start: $(tail -n 3 "$out/launch-$n.log" | tr '\n' ' ') $(crash_summary | tr '\n' ' ')"
         return 1
     fi
     if ! wait_for_run "$n" "$limit"; then
-        diagnose "$n" warning "$label"
+        diagnose "$n" error "$label"
         return 1
     fi
     return 0
 }
 
-# Whether the keychain step of a run's result went well.
-keychain_ok() {
-    python3 - "$1" <<'PY'
-import json, sys
-try:
-    steps = json.load(open(sys.argv[1])).get("steps", [])
-except Exception:
-    sys.exit(1)
-sys.exit(0 if any(s["name"].startswith("the keychain keeps a secret") and s["ok"] for s in steps) else 1)
-PY
-}
-
-# The ways that the app may be signed, in the order that they are tried: the build's own, then ad hoc with the keychain group alone, with an identifier of the app too, and with a team's prefix on both.
-write_entitlements() {
-    local name="$1" body="$2"
-    printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n%s\n</dict></plist>\n' "$body" >"$out/$name.entitlements"
-}
-write_entitlements ad-hoc-group '<key>keychain-access-groups</key><array><string>org.zimnotebook.app</string></array>'
-write_entitlements ad-hoc-group-and-id '<key>application-identifier</key><string>org.zimnotebook.app</string><key>keychain-access-groups</key><array><string>org.zimnotebook.app</string></array>'
-write_entitlements ad-hoc-team '<key>application-identifier</key><string>ZIMTEAM000.org.zimnotebook.app</string><key>com.apple.developer.team-identifier</key><string>ZIMTEAM000</string><key>keychain-access-groups</key><array><string>ZIMTEAM000.org.zimnotebook.app</string></array>'
-
-signed_copy() {
-    local name="$1"
-    rm -rf "$out/variants/$name"
-    mkdir -p "$out/variants/$name"
-    cp -R "$app" "$out/variants/$name/App.app"
-    if ! codesign --force --sign - --entitlements "$out/$name.entitlements" --timestamp=none "$out/variants/$name/App.app" >"$out/codesign-$name.log" 2>&1; then
-        annotate warning "iOS app signature: $name" "signing it did not work: $(tail -n 3 "$out/codesign-$name.log" | tr '\n' ' ')"
-        return 1
-    fi
-    echo "$out/variants/$name/App.app"
-}
-
-# Run 1, with each way of signing the app until its keychain works. The result of the way that is kept is run-1.json (the others are probe-NAME.json): what counts is the app that is kept.
+# Run 1: the app as the build made it. (It is signed ad hoc, as Xcode signs for a simulator, with the keychain group of `App.entitlements` put into the binary, which is what lets its keychain work:
+# a signature made afterwards with such entitlements is refused by the system, "Code Signature Invalid", because a restricted entitlement needs a provisioning profile that a simulator build has not.)
 kept=""
-signing_log=""
-all_ways="as-built ad-hoc-group ad-hoc-group-and-id ad-hoc-team"
-last_way=${all_ways##* }
 if [ "$failed" = 0 ]; then
-    for way in $all_ways; do
-        if [ "$way" = as-built ]; then
-            candidate="$app"
-        else
-            candidate=$(signed_copy "$way") || continue
-        fi
-        signing_log="$signing_log[$way: $(codesign -d --entitlements :- "$candidate" 2>/dev/null | tr -d '\n' | sed 's/<?xml[^>]*>//; s/<!DOCTYPE[^>]*>//; s/<\/*plist[^>]*>//g; s/<\/*dict>//g' | cut -c1-170)] "
-        install_fresh "$candidate" || { failed=1; break; }
-        limit=100
-        [ "$way" = "$last_way" ] && limit=180
-        if run_app 1 "$limit" "iOS app run 1 ($way)"; then
-            xcrun simctl io "$udid" screenshot "$out/run-1-screen.png" >/dev/null 2>&1
-            if keychain_ok "$results/run-1.json" || [ "$way" = "$last_way" ]; then
-                cp "$results/run-1.json" "$out/run-1.json"
-                kept="$way"
-                break
-            fi
-            cp "$results/run-1.json" "$out/probe-$way.json"
-            annotate warning "iOS app signature: $way" "the app ran, but its keychain did not work with this signature"
-        else
-            annotate warning "iOS app signature: $way" "the app did not run with this signature"
-        fi
-        xcrun simctl terminate "$udid" "$bundle" >/dev/null 2>&1
-    done
-    if [ -z "$kept" ]; then failed=1; fi
+    annotate notice "iOS app signature" "as built: $(codesign -dvv "$app" 2>&1 | grep -E "^(Signature|Authority|TeamIdentifier|Identifier)" | tr '\n' ' ' | cut -c1-300) $(codesign -d --entitlements :- "$app" 2>/dev/null | tr -d '\n' | cut -c1-200)"
+    if install_fresh "$app" && run_app 1 180 "iOS app run 1"; then
+        xcrun simctl io "$udid" screenshot "$out/run-1-screen.png" >/dev/null 2>&1
+        cp "$results/run-1.json" "$out/run-1.json"
+        kept=1
+    else
+        failed=1
+    fi
 fi
 
 # Run 2: the app is closed, as a person closes it (what it kept is what the next start finds), and started again.
-annotate notice "iOS app signature" "kept: ${kept:-none}. Tried with these entitlements: $signing_log"
 if [ -n "$kept" ]; then
     xcrun simctl terminate "$udid" "$bundle" >/dev/null 2>&1
     sleep 3
@@ -285,14 +231,6 @@ for path in runs:
 if len(runs) < 2:
     say("error", "the iOS app", "the second run did not happen or wrote nothing")
     bad = True
-probes = []
-for path in sorted(glob.glob(os.path.join(sys.argv[1], "probe-*.json"))):
-    probe = json.load(open(path))
-    way = os.path.basename(path)[len("probe-"):-len(".json")]
-    failed_steps = "; ".join(s["name"][:40] + ": " + str(s.get("error"))[:90] for s in probe.get("steps", []) if not s["ok"])
-    probes.append(f"[{way}: {failed_steps or 'all ok'}]")
-if probes:
-    say("notice", "iOS app signatures that were not kept", " ".join(probes))
 seen_path = os.path.join(sys.argv[1], "server", "seen.jsonl")
 if os.path.exists(seen_path):
     entries = [json.loads(line) for line in open(seen_path) if line.strip()]

@@ -244,7 +244,8 @@ public class ZimNativePlugin: CAPPlugin, CAPBridgedPlugin {
 
     /// Keep a secret under a name: in the keychain, for this device only.
     @objc func secretSet(_ call: CAPPluginCall) {
-        guard let name = call.getString("name"), Rules.validSecretName(name), let value = call.getString("value") else { return call.reject("That is not a secret that can be kept.") }
+        guard let name = call.getString("name"), Rules.validSecretName(name) else { return call.reject("That is not a name that a secret can have.") }
+        guard let value = call.getString("value") else { return call.reject("That is not a secret that can be kept.") }
         let status = secrets.set(name, value)
         if status == errSecSuccess {
             call.resolve()
