@@ -131,10 +131,17 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          if ! xcodebuild -project App.xcodeproj -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/derived" CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/build.log" | tail -n 6; then
-            # (a step that fails says only its exit code: what failed is put where the checks' annotations show it)
-            grep -E "error:|BUILD FAILED|fatal error|Could not resolve|xcodebuild:" "$RUNNER_TEMP/build.log" | sed 's/%/%25/g' | head -n 9 | while IFS= read -r line; do echo "::error title=the iOS build::${line:0:900}"; done
-            exit 1
+          build() {
+            xcodebuild -project App.xcodeproj -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/derived" "$@" build 2>&1 | tee "$RUNNER_TEMP/build.log" | tail -n 6
+          }
+          # signed ad hoc, as Xcode signs for a simulator (with the app's keychain group, which is what lets its keychain work); else, as a build that was not signed (ios-ci.sh then tries other ways)
+          if ! build CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO DEVELOPMENT_TEAM=; then
+            grep -E "error:|BUILD FAILED|fatal error|Could not resolve|xcodebuild:" "$RUNNER_TEMP/build.log" | sed 's/%/%25/g' | head -n 4 | while IFS= read -r line; do echo "::warning title=the iOS build (signed ad hoc)::${line:0:900}"; done
+            if ! build CODE_SIGNING_ALLOWED=NO; then
+              # (a step that fails says only its exit code: what failed is put where the checks' annotations show it)
+              grep -E "error:|BUILD FAILED|fatal error|Could not resolve|xcodebuild:" "$RUNNER_TEMP/build.log" | sed 's/%/%25/g' | head -n 9 | while IFS= read -r line; do echo "::error title=the iOS build::${line:0:900}"; done
+              exit 1
+            fi
           fi
       # a real account server (the server's own code, on this Mac, over https with a certificate that no system knows) for the app to try itself against: Node 24, and an openssl that has what the certificate needs
       - uses: actions/setup-node@v4

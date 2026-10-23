@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The keychain group of the app's own: ZimNativePlugin keeps the account's token there. A build for the simulator is signed with it (ad hoc), which is what lets its keychain work. -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)org.zimnotebook.app</string>
+	</array>
+</dict>
+</plist>
