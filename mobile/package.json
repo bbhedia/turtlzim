@@ -10,13 +10,15 @@
     "sync": "node scripts/prepare.mjs && cap sync android",
     "apk": "node scripts/apk.mjs",
     "typecheck": "tsc --noEmit",
-    "test:device": "node test/device.mjs"
+    "test:device": "node test/device.mjs",
+    "test:e2e-local": "node test/ios-e2e-local.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
     "@capacitor/app": "^8.1.2",
     "@capacitor/core": "^8.5.3",
     "@capacitor/filesystem": "^8.1.4",
+    "@capacitor/ios": "^8.5.3",
     "@capacitor/share": "^8.0.3"
   },
   "devDependencies": {

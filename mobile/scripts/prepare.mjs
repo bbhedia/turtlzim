@@ -8,6 +8,22 @@ import { versionOf } from "../../web/scripts/pwa.mjs";
 import { CONTENT_SECURITY_POLICY } from "../../web/scripts/serve.mjs";
 import { shellPage } from "./page.mjs";
 
+/** What a build for the test of the app from the inside has before the app: the flag that gives the app to a test, and a note of what goes wrong before the test can see it. */
+const E2E_FLAG = `window.__ZIM_TEST__ = true;
+window.__e2eErrors = [];
+const note = (kind, text) => {
+  if (window.__e2eErrors.length < 50) window.__e2eErrors.push(kind + ": " + String(text).slice(0, 300));
+};
+window.addEventListener("error", (e) => note("error", e.message + (e.filename ? " (" + e.filename + ":" + e.lineno + ")" : "")));
+window.addEventListener("unhandledrejection", (e) => note("rejection", (e.reason && e.reason.message) || e.reason));
+document.addEventListener("securitypolicyviolation", (e) => note("csp", e.violatedDirective + " " + e.blockedURI));
+const original = console.error;
+console.error = (...args) => {
+  note("console.error", args.map(String).join(" "));
+  original.apply(console, args);
+};
+`;
+
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 const dist = resolve(root, "../web/dist");
@@ -39,5 +55,14 @@ await build({
   logLevel: "warning",
 });
 
-writeFileSync(join(www, "index.html"), shellPage(readFileSync(join(www, "index.html"), "utf8"), CONTENT_SECURITY_POLICY));
+let page = shellPage(readFileSync(join(www, "index.html"), "utf8"), CONTENT_SECURITY_POLICY);
+if (process.env.ZIM_E2E === "1") {
+  // a build made to be tried from the inside (test/ios-e2e.ts): the app is given to the test (before the app's own scripts, with a note of the errors that come), and the test runs after the app
+  writeFileSync(join(www, "e2e-flag.js"), E2E_FLAG);
+  await build({ entryPoints: [join(root, "test/ios-e2e.ts")], outfile: join(www, "e2e.js"), bundle: true, format: "esm", target: "es2022", logLevel: "warning" });
+  const shellScript = '<script type="module" src="./shell.js"></script>';
+  if (!page.includes(shellScript) || !page.includes("</body>")) throw new Error("The page of the shell has no place for the test.");
+  page = page.replace(shellScript, `<script src="./e2e-flag.js"></script>\n    ${shellScript}`).replace("</body>", '  <script type="module" src="./e2e.js"></script>\n  </body>');
+}
+writeFileSync(join(www, "index.html"), page);
 console.log(`www/ made from the web build ${web.id} (${app.version})`);

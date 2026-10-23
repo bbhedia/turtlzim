@@ -1,7 +1,7 @@
 // The shell's script. It runs in the WebView before the web app starts, and gives the app the things that a WebView does not do by
 // itself (web/src/app/shell.ts says which hooks there are and what a shell without one is). The web app depends on none of this.
 import { App } from "@capacitor/app";
-import { registerPlugin } from "@capacitor/core";
+import { Capacitor, registerPlugin } from "@capacitor/core";
 import type { PluginListenerHandle } from "@capacitor/core";
 import { Directory, Filesystem } from "@capacitor/filesystem";
 import { Share } from "@capacitor/share";
@@ -136,5 +136,6 @@ const account: AccountHooks = {
   },
 };
 
-const hooks: ShellHooks = { version: __SHELL_VERSION__, saveFile, account };
+// (an account needs the app's own code to make the requests, keep the token and open the browser: where the app has none, as on an iPhone for now, the page is given no account, and shows none)
+const hooks: ShellHooks = { version: __SHELL_VERSION__, saveFile, ...(Capacitor.isPluginAvailable("ZimNative") ? { account } : {}) };
 (window as unknown as { __zimShell?: ShellHooks }).__zimShell = hooks;

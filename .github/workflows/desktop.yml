@@ -1,13 +1,14 @@
 # The installers for Windows and Linux, built from the web app on every change to it. One job builds the web app (the wasm of the core, the
 # editor, the service worker's list of files) and keeps web/dist; one job per system packs that same web/dist in the Tauri program:
 # Linux .deb, .rpm and .AppImage, Windows .exe (NSIS) and .msi. A tag `v*` also makes a draft release with them. See docs/zim-desktop-shell.md.
-# A third job runs the account server's own tests (server/, docs/zim-server.md) on that same web/dist, since the server serves it.
+# A third job runs the account server's own tests (server/, docs/zim-server.md) on that same web/dist, since the server serves it. A fourth builds the iPhone app (mobile/ios, docs/zim-mobile-shell.md)
+# from that same web/dist, on a macOS runner (free for a public repository), starts it in a simulator and tries it from the inside.
 name: desktop
 
 on:
   push:
     branches: [master]
-    paths: ["web/**", "core/**", "desktop/**", "server/**", ".github/workflows/desktop.yml"]
+    paths: ["web/**", "core/**", "desktop/**", "server/**", "mobile/**", ".github/workflows/desktop.yml"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -91,6 +92,53 @@ jobs:
             grep -E "^ℹ (tests|pass|fail) |^✖|^\s+✖|failureType|AssertionError|Error:" test.log | sed 's/%/%25/g' | head -n 12 | while IFS= read -r line; do echo "::error title=the server's tests::${line:0:900}"; done
             exit 1
           fi
+
+  # The app in an iPhone's WebView (D4a): the web build in Capacitor's iOS project, built for the simulator, started, and tried from the inside (mobile/test/ios-e2e.ts): typing that is saved, an
+  # encrypted notebook (the vault: a Worker, WebAssembly, the file system), locked and unlocked, and all of it again after the app was closed and started. What happens is said as annotations.
+  ios:
+    needs: web
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - name: the web files of the app, with its test in them
+        working-directory: mobile
+        run: |
+          npm ci
+          npm run typecheck
+          ZIM_E2E=1 npm run prepare:web
+          npx cap sync ios
+      - name: build the app for the simulator
+        working-directory: mobile/ios/App
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! xcodebuild -project App.xcodeproj -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/derived" CODE_SIGNING_ALLOWED=NO build 2>&1 | tee "$RUNNER_TEMP/build.log" | tail -n 6; then
+            # (a step that fails says only its exit code: what failed is put where the checks' annotations show it)
+            grep -E "error:|BUILD FAILED|fatal error|Could not resolve|xcodebuild:" "$RUNNER_TEMP/build.log" | sed 's/%/%25/g' | head -n 9 | while IFS= read -r line; do echo "::error title=the iOS build::${line:0:900}"; done
+            exit 1
+          fi
+      - name: the app in a simulator, twice
+        shell: bash
+        run: |
+          app=$(find "$RUNNER_TEMP/derived/Build/Products" -maxdepth 3 -name App.app | head -n 1)
+          [ -n "$app" ] || { echo "::error title=the iOS build::no App.app was built"; exit 1; }
+          mobile/scripts/ios-ci.sh "$app" "$RUNNER_TEMP/ios-e2e"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-e2e
+          path: ${{ runner.temp }}/ios-e2e
+          if-no-files-found: ignore
 
   desktop:
     needs: web

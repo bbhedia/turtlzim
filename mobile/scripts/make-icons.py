@@ -29,6 +29,16 @@ for name, scale in densities.items():
     layer = round(108 * scale)
     maskable.resize((layer, layer), Image.LANCZOS).save(folder / "ic_launcher_foreground.png")
 
+# iOS: one 1024 px icon (the system rounds it: the full-bleed one, with no transparency), and the picture of the launch screen (the icon on the same colour, in the three sizes of its set)
+ios = root / "ios/App/App/Assets.xcassets"
+if ios.exists():
+    maskable.resize((1024, 1024), Image.LANCZOS).convert("RGB").save(ios / "AppIcon.appiconset/AppIcon-512@2x.png")
+    splash = Image.new("RGB", (2732, 2732), background)
+    icon = square.resize((640, 640), Image.LANCZOS)
+    splash.paste(icon, ((2732 - 640) // 2, (2732 - 640) // 2), icon)
+    for name in ("splash-2732x2732.png", "splash-2732x2732-1.png", "splash-2732x2732-2.png"):
+        splash.save(ios / "Splash.imageset" / name, optimize=True)
+
 (res / "values/ic_launcher_background.xml").write_text(
     '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#%02X%02X%02X</color>\n</resources>\n' % background
 )
