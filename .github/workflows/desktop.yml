@@ -136,8 +136,20 @@ jobs:
             grep -E "error:|BUILD FAILED|fatal error|Could not resolve|xcodebuild:" "$RUNNER_TEMP/build.log" | sed 's/%/%25/g' | head -n 9 | while IFS= read -r line; do echo "::error title=the iOS build::${line:0:900}"; done
             exit 1
           fi
-      - name: the app in a simulator, twice
+      # a real account server (the server's own code, on this Mac, over https with a certificate that no system knows) for the app to try itself against: Node 24, and an openssl that has what the certificate needs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: an account server for the app to try itself against
         shell: bash
+        run: |
+          (cd server && npm ci)
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          node --version
+      - name: the app in a simulator (twice, and a third time for its return address), against that server
+        shell: bash
+        env:
+          ZIM_E2E_SERVER: "1"
         run: |
           app=$(find "$RUNNER_TEMP/derived/Build/Products" -maxdepth 3 -name App.app | head -n 1)
           [ -n "$app" ] || { echo "::error title=the iOS build::no App.app was built"; exit 1; }
