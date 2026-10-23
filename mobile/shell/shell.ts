@@ -61,12 +61,17 @@ void App.addListener("backButton", () => {
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // an account on a server (web/src/account/native.ts is the page's side). The page's content policy lets it ask nowhere but its own address, so the app's own code makes
-// the requests and keeps the token (android/app/src/main/java/org/zimnotebook/app/ZimNativePlugin.java), and the person signs in in their own browser, which sends them
-// back to this app by an address of its own that Android hands to it (`appUrlOpen`).
+// the requests and keeps the token (android/app/src/main/java/org/zimnotebook/app/ZimNativePlugin.java, plugins/zim-native for the iPhone), and the person signs in away from the page:
+// on Android in their own browser, which sends them back to this app by an address of its own that Android hands to it (`appUrlOpen`); on an iPhone in the system's own sign-in sheet,
+// which takes the address itself when the server sends the browser there, and gives it to the app (nothing is handed `appUrlOpen`: the app registers no scheme).
 
 interface ZimNative {
   request(options: NetRequest): Promise<NetResponse>;
+  /** Android: open the person's browser at `url`. */
   openBrowser(options: { url: string }): Promise<void>;
+  /** iPhone: the system's sign-in sheet at `url`, until the server sends it to the app's own address, which comes back as `url`. Rejects, with the code `cancelled`, when it is closed. */
+  authenticate(options: { url: string }): Promise<{ url: string }>;
+  cancelAuthentication(): Promise<void>;
   secretGet(options: { name: string }): Promise<{ value: string | null }>;
   secretSet(options: { name: string; value: string }): Promise<void>;
   secretRemove(options: { name: string }): Promise<void>;
@@ -85,6 +90,41 @@ const REDIRECT_URI = redirectFor(Capacitor.getPlatform());
 let expectedState: string | null = null;
 let stopWaiting: ((reason: Error) => void) | null = null;
 
+/** What a plugin rejected with, as an error (a plugin's rejection is a plain object with a message and perhaps a code), whatever it was. */
+function asError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  const known = error as { message?: unknown; code?: unknown } | null;
+  return Object.assign(new Error(typeof known?.message === "string" && known.message ? known.message : String(error)), typeof known?.code === "string" ? { code: known.code } : {});
+}
+
+/** On an iPhone: the system's sign-in sheet, which gives back the address that the server sent the browser to (the answer is taken only if it is to this sign-in). */
+function waitInSheet(url: string): Promise<SignInResult> {
+  const state = expectedState;
+  return new Promise<SignInResult>((resolve, reject) => {
+    let finished = false;
+    const end = (finish: () => void) => {
+      if (finished) return;
+      finished = true;
+      stopWaiting = null;
+      expectedState = null;
+      finish();
+    };
+    stopWaiting = (reason) => {
+      void ZimNative.cancelAuthentication().catch(() => undefined);
+      end(() => reject(reason));
+    };
+    ZimNative.authenticate({ url }).then(
+      (back) =>
+        end(() => {
+          const answer = answerOf(back.url, state, REDIRECT_URI);
+          if (answer) resolve(answer);
+          else reject(new Error("The sign-in came back with an address that is not the answer to this request."));
+        }),
+      (error: unknown) => end(() => reject(asError(error))),
+    );
+  });
+}
+
 const signIn: SignInHooks = {
   async begin(state) {
     stopWaiting?.(new Error("Another sign-in was begun."));
@@ -92,6 +132,7 @@ const signIn: SignInHooks = {
     return { redirectUri: REDIRECT_URI };
   },
   wait(url) {
+    if (Capacitor.getPlatform() === "ios") return waitInSheet(url);
     return new Promise<SignInResult>((resolve, reject) => {
       let finished = false;
       let listener: PluginListenerHandle | undefined;
@@ -113,7 +154,7 @@ const signIn: SignInHooks = {
         listener = handle;
         if (finished) void handle.remove();
       });
-      ZimNative.openBrowser({ url }).catch((error: unknown) => end(() => reject(error instanceof Error ? error : new Error(String(error)))));
+      ZimNative.openBrowser({ url }).catch((error: unknown) => end(() => reject(asError(error))));
     });
   },
   cancel() {

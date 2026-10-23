@@ -5,8 +5,9 @@
 # the folder that is given, which the workflow uploads.
 #
 # With ZIM_E2E_SERVER=1 a real account server (scripts/ios-server.mjs: the server's own code, https with a certificate that no system knows, and a few doors for the test) is started first, and the
-# app is told where it is (Documents/e2e/server.json), so that its test also tries what its own code does for an account against it. After the two runs there is a third start, only to see how the
-# system hands the app an address of its own scheme (the browser's return after a sign-in): what is learned there is told as warnings and notices, and does not fail the job.
+# app is told where it is (Documents/e2e/server.json), so that its test also tries what its own code does for an account against it.
+#
+# The app is signed here, ad hoc, with the entitlement of its keychain group if the build did not (an app that is not signed has no keychain: error -34018).
 #
 #   scripts/ios-ci.sh APP.app [OUT-FOLDER]          (macOS, Xcode, Node 24 for the server; bash 3.2 is enough)
 set -uo pipefail
@@ -54,6 +55,23 @@ if ! xcrun simctl bootstatus "$udid" -b >"$out/boot.log" 2>&1; then
     annotate error "the iOS simulator" "it did not boot: $(tail -n 3 "$out/boot.log" | tr '\n' ' ')"
     exit 1
 fi
+# (what the build gave the app: its entitlements are told, and if the keychain group is not among them the app is signed ad hoc with it)
+if ! codesign -d --entitlements :- "$app" 2>/dev/null | grep -q "keychain-access-groups"; then
+    cat >"$out/signing.entitlements" <<'ENTITLEMENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>application-identifier</key><string>org.zimnotebook.app</string>
+<key>keychain-access-groups</key><array><string>org.zimnotebook.app</string></array>
+</dict></plist>
+ENTITLEMENTS
+    if codesign --force --sign - --entitlements "$out/signing.entitlements" --timestamp=none "$app" >"$out/codesign.log" 2>&1; then
+        annotate notice "the iOS app's signature" "the build had no keychain group: the app was signed ad hoc with one"
+    else
+        annotate warning "the iOS app's signature" "the build had no keychain group and signing it did not work: $(tail -n 3 "$out/codesign.log" | tr '\n' ' ')"
+    fi
+fi
+annotate notice "the iOS app's entitlements" "$(codesign -d --entitlements :- "$app" 2>&1 | tr '\n' ' ' | cut -c1-500)"
 if ! xcrun simctl install "$udid" "$app" 2>&1 | tee "$out/install.log"; then
     annotate error "the iOS app" "it could not be installed: $(tail -n 3 "$out/install.log" | tr '\n' ' ')"
     exit 1
@@ -117,34 +135,11 @@ for n in 1 2; do
     sleep 3
 done
 
-# A third start, only to see how the system hands the app an address of its own scheme (what the browser's return after a sign-in is): the app says when it listens (url-ready.json), the address
-# is opened from here, and the app says what it was handed (url-seen.json). Then the app itself tries a link to that address. What is learned is told as notices and warnings.
-if [ "$failed" = 0 ]; then
-    echo '{}' >"$results/return-test.json"
-    xcrun simctl launch "$udid" "$bundle" >"$out/launch-3.log" 2>&1 || annotate warning "iOS app run 3" "it did not start: $(tail -n 3 "$out/launch-3.log" | tr '\n' ' ')"
-    for i in $(seq 1 90); do
-        [ -f "$results/url-ready.json" ] && break
-        sleep 2
-    done
-    if [ -f "$results/url-ready.json" ]; then
-        xcrun simctl openurl "$udid" "org.zimnotebook.app.ios:/callback?code=from-the-system&state=ci" >"$out/openurl.log" 2>&1 || annotate warning "iOS return address" "openurl said: $(tail -n 3 "$out/openurl.log" | tr '\n' ' ')"
-    else
-        annotate warning "iOS return address" "the app was not listening within three minutes"
-    fi
-    if wait_for_run 3; then
-        xcrun simctl io "$udid" screenshot "$out/run-3-screen.png" >/dev/null 2>&1
-        cp "$results/run-3.json" "$out/" 2>/dev/null
-        [ -f "$results/url-seen.json" ] && cp "$results/url-seen.json" "$out/"
-    else
-        diagnose 3 warning
-    fi
-    xcrun simctl terminate "$udid" "$bundle" >/dev/null 2>&1
-fi
 if [ -n "$server_pid" ]; then
     kill "$server_pid" 2>/dev/null
 fi
 
-# What each run says, as annotations; the exit status is whether the first two were well (the first with nothing before it, the second with what the first wrote). The third only tells what it found.
+# What each run says, as annotations; the exit status is whether both were well (the first with nothing before it, the second with what the first wrote).
 ZIM_E2E_SERVER_STARTED=$([ -n "$server_pid" ] && echo 1 || echo 0) python3 - "$out" <<'PY' || failed=1
 import glob, json, os, sys
 
@@ -160,8 +155,7 @@ if not runs:
 for path in runs:
     run = json.load(open(path))
     label = f"iOS app run {run.get('run')}"
-    # (the third run only looks at how an address of the app's own scheme is handed over: what it finds is told, and is not a failure)
-    level = "warning" if run.get("run") == 3 else "error"
+    level = "error"
     steps = ", ".join(("ok " if s["ok"] else "FAILED ") + s["name"] for s in run.get("steps", []))
     say("notice", label, f"phase {run.get('phase')}, {run.get('seconds')} s, ok={run.get('ok')}: {steps}")
     say("notice", label + " WebView", json.dumps(run.get("environment", {}), separators=(",", ":")))
@@ -177,7 +171,7 @@ for path in runs:
     if not run.get("ok") and level == "error":
         bad = True
     # (with a server started, the app has to have tried itself against it: a shell that gave the page no account would leave all of that out, and say nothing)
-    if os.environ.get("ZIM_E2E_SERVER_STARTED") == "1" and run.get("run") in (1, 2) and not any("plain http" in s["name"] or "certificate that was trusted" in s["name"] for s in run.get("steps", [])):
+    if os.environ.get("ZIM_E2E_SERVER_STARTED") == "1" and not any("plain http" in s["name"] or "certificate that was trusted" in s["name"] for s in run.get("steps", [])):
         say("error", label, "the app did not try itself against the account server (no account steps ran)")
         bad = True
     if run.get("run") == 1 and run.get("phase") != 1:
@@ -186,7 +180,7 @@ for path in runs:
     if run.get("run") == 2 and run.get("phase") != 2:
         say("error", label, "what the first run wrote was not there after the app was closed and started again")
         bad = True
-if len([r for r in runs if "run-3" not in r]) < 2:
+if len(runs) < 2:
     say("error", "the iOS app", "the second run did not happen or wrote nothing")
     bad = True
 seen_path = os.path.join(sys.argv[1], "server", "seen.jsonl")
@@ -194,9 +188,7 @@ if os.path.exists(seen_path):
     entries = [json.loads(line) for line in open(seen_path) if line.strip()]
     secure = [e for e in entries if e.get("secure")]
     say("notice", "the account server", f"it was asked {len(entries)} times by the app ({len(secure)} over https): " + ", ".join(f"{e['method']} {e['url']}" for e in entries[:30]))
-url_path = os.path.join(sys.argv[1], "url-seen.json")
-if os.path.exists(url_path):
-    say("notice", "iOS return address", "handed to the app: " + open(url_path).read()[:600])
+
 sys.exit(1 if bad else 0)
 PY
 

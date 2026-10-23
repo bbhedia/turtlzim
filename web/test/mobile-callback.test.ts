@@ -59,14 +59,25 @@ describe("the browser's return to the iPhone app", () => {
     expect(answerOf(`${IOS_REDIRECT_URI}?code=C0DE&state=${state}`, null, IOS_REDIRECT_URI)).toBeNull();
   });
 
-  it("is the address that the server, the page and the app's property list all know the app by", () => {
+  it("is the address that the server, the page, the shell and the Swift plugin all know the app by", () => {
+    const scheme = IOS_REDIRECT_URI.split(":")[0]!;
     expect(IOS_REDIRECT_URI).toBe("org.zimnotebook.app.ios:/callback");
     expect(read("../../server/src/apps.mjs")).toContain(`export const IOS_REDIRECT = "${IOS_REDIRECT_URI}";`);
     expect(read("../src/account/app-request.ts")).toContain(`redirectUri === "${IOS_REDIRECT_URI}"`);
-    const plist = read("../../mobile/ios/App/App/Info.plist");
-    expect(plist).toMatch(new RegExp(`<key>CFBundleURLSchemes</key>\\s*<array>\\s*<string>${IOS_REDIRECT_URI.split(":")[0]!.replace(/\\./g, "\\\\.")}</string>`));
+    // (the system's sign-in sheet is told the scheme, and takes the address itself)
+    expect(read("../../mobile/plugins/zim-native/zim-native-rules/Sources/ZimNativeRules/Rules.swift")).toContain(`public static let callbackScheme = "${scheme}"`);
     // (the scheme is the reverse of the app's id, with the platform after it: the server names an app by its address)
-    expect(IOS_REDIRECT_URI.split(":")[0]).toBe(`${JSON.parse(read("../../mobile/capacitor.config.json")).appId}.ios`);
+    expect(scheme).toBe(`${JSON.parse(read("../../mobile/capacitor.config.json")).appId}.ios`);
+  });
+
+  it("is not registered by the iPhone app: the sheet takes it, so no other app and no link can hand the app an address of that kind", () => {
+    const plist = read("../../mobile/ios/App/App/Info.plist");
+    expect(plist).not.toContain("CFBundleURLTypes");
+    expect(plist).not.toContain(IOS_REDIRECT_URI.split(":")[0]!);
+    // (and the plugin has no way to open an address in the browser: it signs in in the sheet, where the app sees nothing of the page)
+    const plugin = read("../../mobile/plugins/zim-native/ios/Sources/ZimNativePlugin/ZimNativePlugin.swift");
+    expect(plugin).toContain("ASWebAuthenticationSession(url: url, callbackURLScheme: Rules.callbackScheme)");
+    expect(plugin).not.toContain("UIApplication.shared.open");
   });
 });
 

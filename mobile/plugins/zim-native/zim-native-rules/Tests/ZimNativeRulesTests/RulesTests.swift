@@ -87,6 +87,12 @@ final class RulesTests: XCTestCase {
         XCTAssertEqual(Rules.originKey(of: URL(string: "https://notes.example.org:8443/api/sync/x?y=1")!), "https://notes.example.org:8443")
     }
 
+    func testTheSignInSheetIsToldTheSchemeOfTheAppsReturnAddress() {
+        // (the server, the page and the shell know the address by the same words: web/test/mobile-callback.test.ts reads them all)
+        XCTAssertEqual(Rules.callbackScheme, "org.zimnotebook.app.ios")
+        XCTAssertEqual(URL(string: "\(Rules.callbackScheme):/callback")?.scheme, Rules.callbackScheme)
+    }
+
     func testTheBrowserIsSentOnlyWhereAPersonWouldGo() throws {
         for good in ["https://notes.example.org/?app=authorize&state=x", "http://127.0.0.1:8080/?app=authorize", "http://localhost:3000/"] {
             XCTAssertNoThrow(try Rules.checkBrowserUrl(good), good)

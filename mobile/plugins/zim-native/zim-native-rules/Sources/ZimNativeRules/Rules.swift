@@ -34,6 +34,9 @@ public enum Rules {
     /// The codes of a refusal for the sake of a certificate: the page acts on these two (`web/src/app/shell.ts` has them too).
     public static let certificateUntrusted = "certificate-untrusted"
     public static let certificateChanged = "certificate-changed"
+    /// The scheme of the address that the server sends the person back to (`org.zimnotebook.app.ios:/callback`). The system's sign-in sheet is told it and takes the address itself when the
+    /// server sends the browser there: the app registers no scheme of its own, so no other app (and no link) can hand it an address of that kind.
+    public static let callbackScheme = "org.zimnotebook.app.ios"
 
     // MARK: - addresses
 

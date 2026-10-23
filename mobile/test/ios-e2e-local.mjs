@@ -199,6 +199,20 @@ async function standInPlugin(browserContext, accountServerAt) {
     pins.delete(checked.origin);
     return { ok: null };
   });
+  /** The system's sign-in sheet, as far as it can be stood in for: the rule about what it is sent to, and the server's page loading in it (a Safari asks the server who is there). */
+  await browserContext.exposeFunction("__native_sheet", async (raw) => {
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      return refuse("A browser is only sent to an https address (or to one on this device).");
+    }
+    if (!(url.protocol === "https:" || (url.protocol === "http:" && loopback(url.hostname)))) return refuse("A browser is only sent to an https address (or to one on this device).");
+    if (url.protocol === "http:") {
+      void fetch(`${url.origin}/api/providers`, { headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.7 Mobile/15E148 Safari/604.1" } }).catch(() => undefined);
+    }
+    return { ok: null };
+  });
   const name = (value) => /^[A-Za-z0-9-]{1,64}$/.test(String(value));
   await browserContext.exposeFunction("__native_secret_get", async (n) => (name(n) ? { ok: secrets.get(n) ?? null } : refuse("That is not a name that a secret can have.")));
   await browserContext.exposeFunction("__native_secret_set", async (n, value) => (name(n) ? (secrets.set(n, value), { ok: null }) : refuse("That is not a name that a secret can have.")));
@@ -213,7 +227,20 @@ async function standInPlugin(browserContext, accountServerAt) {
     };
     const account = {
       request: (request) => unwrap(window.__native_request(request)),
-      signIn: { begin: async () => ({ redirectUri: "org.zimnotebook.app.ios:/callback" }), wait: () => new Promise(() => {}), cancel() {} },
+      // (the shell's own: a sign-in is begun, waited for, and can be cancelled, which ends the wait with this error)
+      signIn: (() => {
+        let stop = null;
+        return {
+          begin: async () => ({ redirectUri: "org.zimnotebook.app.ios:/callback" }),
+          wait: async (url) => {
+            await unwrap(window.__native_sheet(url));
+            return new Promise((_, reject) => (stop = reject));
+          },
+          cancel() {
+            stop?.(new Error("The sign-in was cancelled."));
+          },
+        };
+      })(),
       secrets: { get: (n) => unwrap(window.__native_secret_get(n)), set: (n, v) => unwrap(window.__native_secret_set(n, v)), remove: (n) => unwrap(window.__native_secret_remove(n)) },
       trust: { inspect: (o) => unwrap(window.__native_inspect(o)), pin: (o, f) => unwrap(window.__native_pin(o, f)), pinned: (o) => unwrap(window.__native_pinned(o)), unpin: (o) => unwrap(window.__native_unpin(o)) },
     };

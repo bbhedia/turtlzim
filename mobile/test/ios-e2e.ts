@@ -8,11 +8,10 @@
 //
 // Where CI has started a real account server (`scripts/ios-server.mjs`, told in `Documents/e2e/server.json`), it also tries what the app's own code (ZimNativePlugin) does for an account
 // against it, from the page's side, through the hooks that the shell gives the page: requests over plain http to the device's own address and over https to a server whose certificate no
-// system knows, trusting that certificate by its fingerprint, a certificate that is made again (refused before a byte is sent), a token kept in the keychain over a restart. A third
-// run, asked for by CI with a file (`return-test.json`), only listens for the app's own return address, to see how the system hands it over.
+// system knows, trusting that certificate by its fingerprint, a certificate that is made again (refused before a byte is sent), a token kept in the keychain over a restart, and the
+// system's sign-in sheet (it opens at the server's page, which loads in it, and is closed again; the person's part in it, signing in and allowing, is not something that CI can do).
 //
 // In a browser (`npm run test:e2e-local`) it runs the same way (with stand-in hooks and a stand-in for `server.json`) and leaves its result in `window.__e2e`.
-import { App } from "@capacitor/app";
 import { Capacitor } from "@capacitor/core";
 import { Directory, Encoding, Filesystem } from "@capacitor/filesystem";
 import type { AccountHooks } from "../../web/src/app/shell";
@@ -259,6 +258,7 @@ async function accountSteps(account: AccountHooks): Promise<void> {
       expectIncludes("a dot segment", (await refusal(get("https://example.org/api/%2e%2e/x"))).message, "not a request to the account server");
       expectIncludes("a name and password", (await refusal(get("https://ada:secret@example.org/api/me"))).message, "no name or password");
       expectIncludes("another kind of address", (await refusal(get("file:///etc/passwd"))).message, "not an address");
+      expectIncludes("a browser sent to plain http", (await refusal(account.signIn.wait("http://example.org/?app=authorize"))).message, "only sent to an https address");
     }, true);
     await step("the hooks for a certificate refuse what they should, and say so when nothing answers", async () => {
       const trust = account.trust;
@@ -421,6 +421,29 @@ async function serverSteps(account: AccountHooks, server: ServerConfig): Promise
       },
       true,
     );
+    await step(
+      "the system's sign-in sheet opens at the server's own page, which loads in it, and closes when the sign-in is cancelled",
+      async () => {
+        const hooks = account.signIn;
+        const state = base64url(crypto.getRandomValues(new Uint8Array(16)));
+        const { redirectUri } = await hooks.begin(state);
+        if (redirectUri !== RETURN_URI) throw new Error(`the return address was ${redirectUri}`);
+        const before = (await serverState()).seen.length;
+        const waiting = refusal(hooks.wait(`${server.http}/?app=authorize&redirect_uri=${encodeURIComponent(RETURN_URI)}&code_challenge=${"A".repeat(43)}&code_challenge_method=S256&state=${state}`));
+        // (the page of the server loads in the sheet and asks the server who is there: a browser, not the app, which is how it is known that the sheet opened)
+        let loaded: Seen | undefined;
+        for (let waited = 0; !loaded && waited < 20_000; waited += 500) {
+          await sleep(500);
+          loaded = (await serverState()).seen.slice(before).find((entry) => /Safari/.test(entry.userAgent ?? "") && entry.userAgent !== "ZimNotebook-iOS");
+        }
+        hooks.cancel();
+        const cancelled = await Promise.race([waiting, sleep(10_000).then((): never => { throw new Error("the wait for the sign-in did not end when it was cancelled"); })]);
+        expectIncludes("the wait", cancelled.message, "cancelled");
+        if (!loaded) throw new Error("the sheet did not load the server's page in twenty seconds");
+        if (loaded.cookie) throw new Error("the sheet went with a cookie: it was not a session of its own");
+      },
+      true,
+    );
     let rotated = "";
     await step(
       "when the server's certificate is made again, the app refuses it before anything is sent (the token with it), and says it changed",
@@ -488,37 +511,6 @@ async function serverSteps(account: AccountHooks, server: ServerConfig): Promise
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
-// how the system hands the app an address of its own scheme (the browser's return after a sign-in): tried in a run of its own, which CI asks for with a file and answers with `xcrun simctl openurl`
-
-async function returnSteps(): Promise<void> {
-  const seen: { via: string; url: string }[] = [];
-  let via = "the system";
-  void App.addListener("appUrlOpen", (event) => {
-    seen.push({ via, url: event.url });
-    void write("e2e/url-seen.json", JSON.stringify(seen));
-  });
-  await write("e2e/url-ready.json", "{}");
-  await step(
-    "an address of the app's own scheme that the system opens (xcrun simctl openurl) is handed to the app",
-    async () => {
-      await until("an address from the system", () => seen.length >= 1, 40_000);
-      const [first] = seen;
-      if (first?.url !== `${RETURN_URI}?code=from-the-system&state=ci`) throw new Error(`the app was handed ${first?.url}`);
-    },
-    true,
-  );
-  await step(
-    "a page that goes to the app's own address (as a browser's return does) has it handed to the app too",
-    async () => {
-      via = "the page";
-      window.location.href = `${RETURN_URI}?code=from-the-page&state=page`;
-      await until("an address from the page", () => seen.some((one) => one.via === "the page"), 20_000);
-    },
-    true,
-  );
-}
-
-// ---------------------------------------------------------------------------------------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   if (Capacitor.isNativePlatform()) {
@@ -533,13 +525,6 @@ async function main(): Promise<void> {
     await until("the app", () => window.__zim?.app.session && document.querySelector(".cm-content"), 120_000);
     await until("the sample page in the editor", () => pageText().length > 20);
   });
-  if (await exists("e2e/return-test.json")) {
-    phase = 3;
-    await report(false);
-    await returnSteps();
-    await report(true);
-    return;
-  }
   phase = pageText().includes(LINE) ? 2 : 1;
   await report(false);
   if (phase === 1) {
