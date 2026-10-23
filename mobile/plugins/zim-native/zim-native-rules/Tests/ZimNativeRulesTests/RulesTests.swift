@@ -78,6 +78,11 @@ final class RulesTests: XCTestCase {
         XCTAssertEqual(Rules.originKey(of: try Rules.checkOrigin("https://notes.example.org:8443")), "https://notes.example.org:8443")
         XCTAssertEqual(Rules.originKey(of: try Rules.checkOrigin("https://192.168.10.10:8443")), "https://192.168.10.10:8443")
         XCTAssertEqual(Rules.originKey(of: try Rules.checkOrigin("https://[::1]:8443")), "https://[::1]:8443")
+        // (an IPv6 address is in brackets once, whether Foundation gives its host with them or not)
+        XCTAssertEqual(Rules.originKey(host: "[::1]", port: 8443), "https://[::1]:8443")
+        XCTAssertEqual(Rules.originKey(host: "::1", port: 8443), "https://[::1]:8443")
+        XCTAssertEqual(Rules.bareHost("[::1]"), "::1")
+        for same in ["::1", "notes.example.org", "192.168.10.10", "", "[", "]", "[x"] { XCTAssertEqual(Rules.bareHost(same), same, same) }
         // and the address of a request has the same key as the origin that its server was trusted under
         XCTAssertEqual(Rules.originKey(of: URL(string: "https://notes.example.org:8443/api/sync/x?y=1")!), "https://notes.example.org:8443")
     }

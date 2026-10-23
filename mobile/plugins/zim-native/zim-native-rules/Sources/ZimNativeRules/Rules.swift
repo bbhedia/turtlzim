@@ -101,9 +101,15 @@ public enum Rules {
         return read
     }
 
+    /// A host without the brackets that an IPv6 address is written in (some versions of Foundation give it with them, some without: what is made of it, a key or a connection, must not depend on which).
+    public static func bareHost(_ host: String) -> String {
+        guard host.count >= 2, host.hasPrefix("["), host.hasSuffix("]") else { return host }
+        return String(host.dropFirst().dropLast())
+    }
+
     /// The key that what is trusted for a server is kept under: `https://host:port`, the port always there (the default one written out), the host in lower case and an IPv6 address in brackets.
     public static func originKey(host: String, port: Int?) -> String {
-        let name = host.lowercased()
+        let name = bareHost(host).lowercased()
         return "https://\(name.contains(":") ? "[\(name)]" : name):\(port ?? 443)"
     }
 

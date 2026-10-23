@@ -87,7 +87,7 @@ public class ZimNativePlugin: CAPPlugin, CAPBridgedPlugin {
     private func origin(_ call: CAPPluginCall) throws -> (key: String, host: String, port: Int) {
         let read = try Rules.checkOrigin(call.getString("origin"))
         let port = read.port ?? 443
-        return (Rules.originKey(of: read), read.host ?? "", port)
+        return (Rules.originKey(of: read), Rules.bareHost(read.host ?? ""), port)
     }
 
     /// What the server at this origin shows as its certificate, found out by a handshake and nothing else: no request is made, so nothing is sent to a server that was not trusted yet.
@@ -159,7 +159,7 @@ public class ZimNativePlugin: CAPPlugin, CAPBridgedPlugin {
 
     // MARK: - the browser
 
-    /// Open the person's browser at an address (https, or this device's own): where they sign in and allow the app. The browser sends them back to the app's own address (`org.zimnotebook.app:/callback`,
+    /// Open the person's browser at an address (https, or this device's own): where they sign in and allow the app. The browser sends them back to the app's own address (`org.zimnotebook.app.ios:/callback`,
     /// which the system hands to this app: the shell hears it as `appUrlOpen`).
     @objc func openBrowser(_ call: CAPPluginCall) {
         let url: URL
