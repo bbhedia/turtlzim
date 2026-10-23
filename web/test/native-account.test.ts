@@ -721,11 +721,18 @@ describe("a request that an app makes to the page it sends the person to", () =>
     const android = good();
     android.set("redirect_uri", "org.zimnotebook.app:/callback");
     expect(parseAppRequest(android)?.redirectUri).toBe("org.zimnotebook.app:/callback");
+    const iphone = good();
+    iphone.set("redirect_uri", "org.zimnotebook.app.ios:/callback");
+    expect(parseAppRequest(iphone)?.redirectUri).toBe("org.zimnotebook.app.ios:/callback");
     for (const [name, value] of [
       ["app", "other"],
       ["redirect_uri", "https://evil.example/callback"],
       ["redirect_uri", "http://127.0.0.1:80/callback"],
       ["redirect_uri", `${REDIRECT}?x=1`],
+      ["redirect_uri", "org.zimnotebook.app.ios:/callback?x=1"],
+      ["redirect_uri", "org.zimnotebook.app.ios://callback"],
+      ["redirect_uri", "org.zimnotebook.app.ios:/other"],
+      ["redirect_uri", "org.zimnotebook.app.android:/callback"],
       ["redirect_uri", ""],
       ["code_challenge", "short"],
       ["code_challenge", `${"A".repeat(42)}+`],
@@ -744,6 +751,7 @@ describe("a request that an app makes to the page it sends the person to", () =>
     }
     expect(appKind(REDIRECT)).toBe("desktop");
     expect(appKind("org.zimnotebook.app:/callback")).toBe("android");
+    expect(appKind("org.zimnotebook.app.ios:/callback")).toBe("ios");
     expect(appKind("http://localhost:49152/callback")).toBeNull();
   });
 

@@ -84,7 +84,7 @@ export class AccountUi {
     }
     const account = this.account;
     const kind = appKind(request.redirectUri);
-    const what = kind === "android" ? "The Zim Notebook app on an Android phone or tablet" : "The Zim Notebook program on a computer";
+    const what = kind === "android" ? "The Zim Notebook app on an Android phone or tablet" : kind === "ios" ? "The Zim Notebook app on an iPhone or iPad" : "The Zim Notebook program on a computer";
     let back: string | null = null;
     await showDialog({
       title: "Allow this app?",

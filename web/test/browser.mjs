@@ -8335,7 +8335,7 @@ try {
     }
   });
 
-  await scenario("an Android app's request is answered with the app's own address, which a browser may only go to when a link is pressed: the page goes there, and offers the link", async () => {
+  await scenario("an Android app's and an iPhone app's request is answered with the app's own address, which a browser may only go to when a link is pressed: the page goes there, says which app it is, and offers the link", async () => {
     const rig = await programRig();
     const { at } = rig;
     const { createHash, randomBytes } = await import("node:crypto");
@@ -8349,21 +8349,25 @@ try {
       await ready(page);
       const status = await page.evaluate(async () => (await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json", "x-requested-with": "zim" }, body: JSON.stringify({ email: "ada@example.org", password: "correct horse battery" }) })).status);
       assertEqual(status, 200, "signed in");
-      await page.goto(`${at}/?app=authorize&redirect_uri=${encodeURIComponent("org.zimnotebook.app:/callback")}&code_challenge=${challenge}&code_challenge_method=S256&state=${state}`);
-      await ready(page);
-      const consent = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Allow this app?" }) });
-      await consent.waitFor();
-      assert((await consent.innerText()).includes("Android phone or tablet"), "the page says which app asks");
-      await consent.getByRole("button", { name: "Allow" }).click();
-      const allowed = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Allowed" }) });
-      await allowed.waitFor();
-      const link = allowed.getByRole("link", { name: "Go back to the app" });
-      const href = await link.getAttribute("href");
-      const back = new URL(href);
-      assert(href.startsWith("org.zimnotebook.app:/callback?code="), `the link is the app's own address (${href})`);
-      assertEqual(back.searchParams.get("state"), state, "with the app's state");
-      if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, "program-allowed.png") });
-      // (a browser with no app for that address says so in its console, which is what it does here; it is not the page's failure)
+      for (const [redirect, words, shot] of [
+        ["org.zimnotebook.app:/callback", "Android phone or tablet", "program-allowed.png"],
+        ["org.zimnotebook.app.ios:/callback", "iPhone or iPad", "program-allowed-ios.png"],
+      ]) {
+        await page.goto(`${at}/?app=authorize&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256&state=${state}`);
+        await ready(page);
+        const consent = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Allow this app?" }) });
+        await consent.waitFor();
+        assert((await consent.innerText()).includes(words), `the page says which app asks (${words})`);
+        await consent.getByRole("button", { name: "Allow" }).click();
+        const allowed = page.locator("dialog.dialog", { has: page.getByRole("heading", { name: "Allowed" }) });
+        await allowed.waitFor();
+        const link = allowed.getByRole("link", { name: "Go back to the app" });
+        const href = await link.getAttribute("href");
+        const back = new URL(href);
+        assert(href.startsWith(`${redirect}?code=`), `the link is the app's own address (${href})`);
+        assertEqual(back.searchParams.get("state"), state, "with the app's state");
+        if (process.env.SCREENSHOTS) await page.screenshot({ path: join(process.env.SCREENSHOTS, shot) });
+      }
       problems = problems.filter((p) => !/org\.zimnotebook\.app|scheme does not have a registered handler|launch/i.test(p));
     } finally {
       await rig.close();

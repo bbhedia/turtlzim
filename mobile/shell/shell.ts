@@ -6,7 +6,7 @@ import type { PluginListenerHandle } from "@capacitor/core";
 import { Directory, Filesystem } from "@capacitor/filesystem";
 import { Share } from "@capacitor/share";
 import type { AccountHooks, CertificateInfo, NetRequest, NetResponse, ShellHooks, SignInHooks, SignInResult } from "../../web/src/app/shell";
-import { answerOf, REDIRECT_URI } from "./callback";
+import { answerOf, redirectFor } from "./callback";
 
 /** The version of this app and of the web build inside it, put in by scripts/prepare.mjs. */
 declare const __SHELL_VERSION__: string;
@@ -80,6 +80,8 @@ const ZimNative = registerPlugin<ZimNative>("ZimNative");
 /** How long the browser is waited for: long enough to sign in, read the page and perhaps make an account (a code is mailed). */
 const WAIT_MS = 5 * 60 * 1000;
 
+/** Where the browser is sent back to: the Android app's address, or the iPhone app's. */
+const REDIRECT_URI = redirectFor(Capacitor.getPlatform());
 let expectedState: string | null = null;
 let stopWaiting: ((reason: Error) => void) | null = null;
 
@@ -105,7 +107,7 @@ const signIn: SignInHooks = {
       const timer = setTimeout(() => end(() => reject(new Error("The browser did not come back in time."))), WAIT_MS);
       stopWaiting = (reason) => end(() => reject(reason));
       void App.addListener("appUrlOpen", (event) => {
-        const answer = answerOf(event.url, expectedState);
+        const answer = answerOf(event.url, expectedState, REDIRECT_URI);
         if (answer) end(() => resolve(answer));
       }).then((handle) => {
         listener = handle;

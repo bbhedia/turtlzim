@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 import { after, before, describe, it } from "node:test";
-import { ANDROID_REDIRECT, Apps, CLIENT_LABELS, clientOf, CODE_SECONDS } from "../src/apps.mjs";
+import { ANDROID_REDIRECT, Apps, CLIENT_LABELS, clientOf, CODE_SECONDS, IOS_REDIRECT } from "../src/apps.mjs";
 import { createApi } from "../src/api.mjs";
 import { OAuth } from "../src/oauth.mjs";
 import { confirmed, lastCode, make, PASSWORD, refused } from "./helpers.mjs";
@@ -16,12 +16,18 @@ const request = (redirect_uri, p) => ({ redirect_uri, code_challenge: p.challeng
 const codeOf = (redirect) => new URL(redirect).searchParams.get("code");
 
 describe("the return addresses of the apps", () => {
-  it("are the program's own port on the computer's own address, and the Android app's own scheme: nothing else", () => {
+  it("are the program's own port on the computer's own address, and the Android app's and the iPhone app's own schemes: nothing else", () => {
     assert.equal(clientOf(LOOPBACK), "desktop");
     assert.equal(clientOf("http://127.0.0.1:1024/callback"), "desktop");
     assert.equal(clientOf("http://127.0.0.1:65535/callback"), "desktop");
     assert.equal(clientOf(ANDROID_REDIRECT), "android");
+    assert.equal(clientOf(IOS_REDIRECT), "ios");
     for (const bad of [
+      "org.zimnotebook.app.ios:/callback?x=1",
+      "org.zimnotebook.app.ios://callback",
+      "org.zimnotebook.app.ios:/other",
+      "org.zimnotebook.app.ios.evil:/callback",
+      "ORG.zimnotebook.app.ios:/callback",
       "http://127.0.0.1:80/callback",
       "http://127.0.0.1:1023/callback",
       "http://127.0.0.1:65536/callback",
@@ -99,6 +105,24 @@ describe("signing an app in", () => {
     assert.ok(asked.redirect.startsWith(`${ANDROID_REDIRECT}?code=`));
     const given = apps.redeem({ code: codeOf(asked.redirect), code_verifier: p.verifier, redirect_uri: ANDROID_REDIRECT });
     assert.equal(parts.accounts.session(given.token)?.label, CLIENT_LABELS.android);
+  });
+
+  it("asks for the iPhone app's address the same way, and names it for what it is", async () => {
+    const parts = make();
+    const user = await confirmed(parts);
+    const apps = new Apps({ accounts: parts.accounts });
+    const p = pkce();
+    const asked = apps.authorize(user.id, request(IOS_REDIRECT, p));
+    assert.equal(asked.client, "ios");
+    assert.equal(asked.label, "Zim Notebook for iPhone");
+    assert.ok(asked.redirect.startsWith(`${IOS_REDIRECT}?code=`));
+    // (a code made for one kind of app is not good for another's address, and is used up by the try)
+    assert.throws(() => apps.redeem({ code: codeOf(asked.redirect), code_verifier: p.verifier, redirect_uri: ANDROID_REDIRECT }), (error) => error.extra?.code === "bad-grant");
+    assert.throws(() => apps.redeem({ code: codeOf(asked.redirect), code_verifier: p.verifier, redirect_uri: IOS_REDIRECT }), (error) => error.extra?.code === "bad-grant");
+    const second = pkce();
+    const given = apps.redeem({ code: codeOf(apps.authorize(user.id, request(IOS_REDIRECT, second)).redirect), code_verifier: second.verifier, redirect_uri: IOS_REDIRECT });
+    assert.equal(parts.accounts.session(given.token)?.label, CLIENT_LABELS.ios);
+    assert.deepEqual(apps.list(user.id).map((a) => a.label), ["Zim Notebook for iPhone"]);
   });
 
   it("refuses a request that is not valid, before a code is made", async () => {

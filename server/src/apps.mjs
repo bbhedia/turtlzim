@@ -15,10 +15,12 @@ import { transaction } from "./db.mjs";
 export const CODE_SECONDS = 120;
 /** Where the Android app receives the code (the reverse of the app's id, which is what RFC 8252 asks of an address of that kind). */
 export const ANDROID_REDIRECT = "org.zimnotebook.app:/callback";
+/** Where the iPhone app receives it: a scheme of its own, so that the list of what is connected names it for what it is (an address is all that tells one kind of app from another). */
+export const IOS_REDIRECT = "org.zimnotebook.app.ios:/callback";
 /** Where the program on a computer receives it: a port that it opened, on the computer's own address. */
 const LOOPBACK = /^http:\/\/127\.0\.0\.1:([1-9]\d{3,4})\/callback$/;
 /** What each kind of app is called in the list of what is connected (the app does not choose: nothing that a link could make up is shown as a name). */
-export const CLIENT_LABELS = { desktop: "Zim Notebook for computers", android: "Zim Notebook for Android" };
+export const CLIENT_LABELS = { desktop: "Zim Notebook for computers", android: "Zim Notebook for Android", ios: "Zim Notebook for iPhone" };
 
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 const refuse = (message, code) => new AccountError(message, 400, { code });
@@ -29,7 +31,8 @@ export function clientOf(redirectUri) {
   const loopback = LOOPBACK.exec(redirectUri);
   // (a port above the ones that only a privileged program may listen on)
   if (loopback) return Number(loopback[1]) >= 1024 && Number(loopback[1]) <= 65535 ? "desktop" : null;
-  return redirectUri === ANDROID_REDIRECT ? "android" : null;
+  if (redirectUri === ANDROID_REDIRECT) return "android";
+  return redirectUri === IOS_REDIRECT ? "ios" : null;
 }
 
 export class Apps {

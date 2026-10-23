@@ -2,7 +2,7 @@
 // the page that asks whether to allow the app, the app's manifest (the intent filter that Android hands the address by) and its id.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { answerOf, REDIRECT_URI } from "../../mobile/shell/callback";
+import { answerOf, IOS_REDIRECT_URI, REDIRECT_URI, redirectFor } from "../../mobile/shell/callback";
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 const state = "s".repeat(22);
@@ -43,3 +43,30 @@ describe("the browser's return to the Android app", () => {
     expect(JSON.parse(read("../../mobile/capacitor.config.json")).appId).toBe(REDIRECT_URI.split(":")[0]);
   });
 });
+
+describe("the browser's return to the iPhone app", () => {
+  it("is its own address, with the state that this sign-in gave, and is not the Android app's (each takes only its own)", () => {
+    expect(redirectFor("ios")).toBe(IOS_REDIRECT_URI);
+    expect(redirectFor("android")).toBe(REDIRECT_URI);
+    expect(redirectFor("web")).toBe(REDIRECT_URI);
+    expect(answerOf(`${IOS_REDIRECT_URI}?code=C0DE&state=${state}`, state, IOS_REDIRECT_URI)).toEqual({ code: "C0DE", state });
+    expect(answerOf(`${IOS_REDIRECT_URI}?error=access_denied&state=${state}`, state, IOS_REDIRECT_URI)).toEqual({ error: "access_denied", state });
+    // (the other app's address, another state, another path, nothing waited for: not taken)
+    expect(answerOf(`${REDIRECT_URI}?code=C0DE&state=${state}`, state, IOS_REDIRECT_URI)).toBeNull();
+    expect(answerOf(`${IOS_REDIRECT_URI}?code=C0DE&state=${state}`, state, REDIRECT_URI)).toBeNull();
+    expect(answerOf(`${IOS_REDIRECT_URI}?code=C0DE&state=other`, state, IOS_REDIRECT_URI)).toBeNull();
+    expect(answerOf(`org.zimnotebook.app.ios:/other?code=C0DE&state=${state}`, state, IOS_REDIRECT_URI)).toBeNull();
+    expect(answerOf(`${IOS_REDIRECT_URI}?code=C0DE&state=${state}`, null, IOS_REDIRECT_URI)).toBeNull();
+  });
+
+  it("is the address that the server, the page and the app's property list all know the app by", () => {
+    expect(IOS_REDIRECT_URI).toBe("org.zimnotebook.app.ios:/callback");
+    expect(read("../../server/src/apps.mjs")).toContain(`export const IOS_REDIRECT = "${IOS_REDIRECT_URI}";`);
+    expect(read("../src/account/app-request.ts")).toContain(`redirectUri === "${IOS_REDIRECT_URI}"`);
+    const plist = read("../../mobile/ios/App/App/Info.plist");
+    expect(plist).toMatch(new RegExp(`<key>CFBundleURLSchemes</key>\\s*<array>\\s*<string>${IOS_REDIRECT_URI.split(":")[0]!.replace(/\\./g, "\\\\.")}</string>`));
+    // (the scheme is the reverse of the app's id, with the platform after it: the server names an app by its address)
+    expect(IOS_REDIRECT_URI.split(":")[0]).toBe(`${JSON.parse(read("../../mobile/capacitor.config.json")).appId}.ios`);
+  });
+});
+

@@ -12,10 +12,11 @@ const STASH = "zim:app-request";
 /** How long a request that was left (the person went away in the middle of signing in) is still the one to go on with. */
 const KEEP_MS = 10 * 60 * 1000;
 
-/** What kind of app a return address is the address of, to say so on the page (the server decides what is allowed): a program on a computer, an Android app, or nothing it knows. */
-export function appKind(redirectUri: string): "desktop" | "android" | null {
+/** What kind of app a return address is the address of, to say so on the page (the server decides what is allowed): a program on a computer, an Android app, an iPhone app, or nothing it knows. */
+export function appKind(redirectUri: string): "desktop" | "android" | "ios" | null {
   if (/^http:\/\/127\.0\.0\.1:[1-9]\d{3,4}\/callback$/.test(redirectUri)) return "desktop";
-  return redirectUri === "org.zimnotebook.app:/callback" ? "android" : null;
+  if (redirectUri === "org.zimnotebook.app:/callback") return "android";
+  return redirectUri === "org.zimnotebook.app.ios:/callback" ? "ios" : null;
 }
 
 export const APP_PARAMS = ["app", "redirect_uri", "code_challenge", "code_challenge_method", "state"];
