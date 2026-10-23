@@ -17,9 +17,20 @@ const note = (kind, text) => {
 window.addEventListener("error", (e) => note("error", e.message + (e.filename ? " (" + e.filename + ":" + e.lineno + ")" : "")));
 window.addEventListener("unhandledrejection", (e) => note("rejection", (e.reason && e.reason.message) || e.reason));
 document.addEventListener("securitypolicyviolation", (e) => note("csp", e.violatedDirective + " " + e.blockedURI));
+const show = (a) => {
+  if (a instanceof Error) return a.name + ": " + a.message;
+  if (a && typeof a === "object") {
+    try {
+      return JSON.stringify(a);
+    } catch {
+      return String(a);
+    }
+  }
+  return String(a);
+};
 const original = console.error;
 console.error = (...args) => {
-  note("console.error", args.map(String).join(" "));
+  note("console.error", args.map(show).join(" "));
   original.apply(console, args);
 };
 `;

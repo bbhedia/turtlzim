@@ -67,7 +67,7 @@ Design, threat model, limits and what verifies each claim: `docs/zim-encrypted-n
 | Web networking | `reqwest` upgraded to its async API (already wasm32-native via `fetch` under the hood) — applies to both native and web so the core's public interface stays identical across targets. |
 | Editor / UI | CodeMirror 6 with live Zim-syntax formatting (shared web UI) |
 | Desktop shell | Tauri 2 (`desktop/`, `docs/zim-desktop-shell.md`): `web/dist` in the system WebView; installers for Linux (.deb, .rpm, .AppImage) and Windows (NSIS, MSI) built by `.github/workflows/desktop.yml` on every change of the web app. Not a GTK/Qt UI (the editor would be written again) |
-| Mobile shell | Capacitor/webview (built for Android: `mobile/`, `docs/zim-mobile-shell.md`; iOS needs a Mac); core via JNI (Android) + FFI (iOS), not yet: the shell runs the wasm core in its WebView |
+| Mobile shell | Capacitor/webview (Android: `mobile/`, `docs/zim-mobile-shell.md`; iPhone: `mobile/ios/`, built and tried in a simulator by the CI job `ios`, no account yet); core via JNI (Android) + FFI (iOS), not yet: the shell runs the wasm core in its WebView |
 | Sync server | Turtl `server` (Node + Postgres) |
 
 ---
@@ -148,6 +148,7 @@ scripts/serve.sh start --host :: --port 8443 --tls --name ADDRESS   # https for 
 cd mobile && npm install
 npm run apk                         # prepare www/ from web/dist (npm run build in web/ first), cap sync, gradle -> mobile/out/zim-notebook-debug.apk
 scripts/emulator.sh start|stop|shot # a headless Android 15 emulator (needs /dev/kvm) to try the app in a real WebView
+npm run test:e2e-local              # D4a: the app's test from the inside (mobile/test/ios-e2e.ts) in a browser (ZIM_BROWSER=webkit for WebKit); CI runs it in an iPhone simulator (job `ios`, mobile/scripts/ios-ci.sh)
 npm run test:device                # the app in the emulator's WebView (installs the APK; VAULT=1 adds an encrypted notebook)
 cd ../web && scripts/serve.sh restart --host :: --port 8443 --tls --name ADDRESS --download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk   # give the APK out beside the web app
 
@@ -259,6 +260,7 @@ docker compose up                   # Postgres + server (define compose file)
   connection that has a certificate trusted for it takes that fingerprint as the first of the chain and nothing else, in the handshake; `Look`, which takes anything, is for looking at what a server shows, is made in one place and never
   carries a request); what is trusted is kept by the plugin in `zim_pins`, a user-installed authority is still not accepted, and the failures are told by `AccountRules.describe` (a code only when the certificate was what was refused). Asked 2026-10-13 whether Flutter would be better for the native
   apps: no (the editor would be rewritten), the shell it is.
+  **The iPhone app** (D4a, `docs/zim-mobile-shell.md`): `mobile/ios` is Capacitor's generated project (iOS 17, the app's icon); the shell gives the page `account` only where the `ZimNative` plugin exists, and on an iPhone it does not yet (D4b is the Swift plugin: requests, keychain, pinning, the browser's return). A WKWebView can't be driven from outside, so the job `ios` (macOS runner, free for this public repository) builds for the simulator and runs a test **from the inside** (`mobile/test/ios-e2e.ts`, a build made with `ZIM_E2E=1`: typing, an encrypted notebook, lock/unlock, and all of it after the app was closed and started again; it writes its result in the app's Documents folder, which `mobile/scripts/ios-ci.sh` reads from the simulator and says as annotations); try its logic in a browser first (`npm run test:e2e-local`). No iPhone has been tried.
 - **Writing on a phone** (`docs/zim-editor-plan.md`, *Writing on a phone*): the formatting bar runs the commands the keys
   run (no second rule for anything), never takes the focus from the text (a press that did would put the keyboard
   away), and keeps nothing but whether it is wanted (`zim:formatbar`). On a touch screen a tap follows a link only while the
