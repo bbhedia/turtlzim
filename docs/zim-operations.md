@@ -121,6 +121,19 @@ What `cron` does not have is your environment: a server that it starts has no `Z
 
 No cron job was installed by this: it is a change to your machine, and yours to make.
 
+### The server that vanished with its terminal (2 November)
+
+The server was found not running again, with nothing in its log: its last line is an ordinary request (24 October, 18:34), and the process was gone. The cause is in the system's journal, not in the server's:
+`journalctl -g "systemd-oomd killed"` says that at 18:50 `systemd-oomd`, because the machine was short of memory (more than 50 % of the user's memory under pressure for 20 seconds, with several tools and test runs going at
+once on 7 GB), **killed a whole control group**, `tmux-spawn-….scope`, with its 27 processes. A server that is started from a terminal (or from the session of a tool, as this one had been, on 22 October) is in the terminal's
+group, and `setsid` and `nohup` do not change that: they protect it from the terminal's hang-up, not from a kill of the group. The same journal shows the same kind of kill on 13, 14 and 19 October (4 to 39 processes each time), and
+the 19th is the likely cause of the first disappearance, on 20 October.
+
+So `scripts/run.sh start` now puts the server in **a control group of its own** (`systemd-run --user --scope`, named `zim-server-<8 hexadecimal digits>` after its state folder, so that two servers do not meet and the tests never
+touch the live one) and asks oomd to leave it for last (`ManagedOOMPreference=avoid`, which sets `user.oomd_avoid` on the group). It says so when it starts (`systemctl --user status zim-server-….scope`). Where there is no user
+manager to ask (or no `systemd-run`) it starts as before. This does **not** keep it up if it is killed anyway, or if the machine restarts: that is what `ensure` is for, or a service of the system's own; neither is installed (the first is
+the cron line above, the second a user service with `Restart=always`: both are changes to your machine, and yours to make).
+
 ## Updating, and going back
 
 ```bash

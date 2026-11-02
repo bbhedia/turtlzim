@@ -73,6 +73,33 @@ addresses() {
     [ -n "$line" ] && tail -n "+$line" "$logfile" | head -n 12 | grep -vE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T' || true
 }
 
+# The server lives in a control group of its own. When the machine is short of memory, systemd-oomd kills a whole control group at once, and a server that is started from a terminal, or from the
+# session of a tool, is in that terminal's group: on 24 October the group of a tmux pane that had started it was killed with its 27 processes, the server among them, and nothing was written in
+# its log. In a scope of its own (named after the state folder, so that two servers do not meet: the tests start their own) it is only a candidate for what it uses, and `ManagedOOMPreference=avoid`
+# asks oomd to leave it for last. Without a user manager to ask (or without systemd-run) it is started as before. Fills `scope` with the command that puts what follows it in that group.
+scope=()
+scope_unit=""
+own_group() {
+    scope=()
+    scope_unit=""
+    command -v systemd-run >/dev/null 2>&1 || return 0
+    local runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    [ -S "$runtime/bus" ] || return 0
+    export XDG_RUNTIME_DIR="$runtime"
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$runtime/bus}"
+    local unit
+    unit="zim-server-$(printf '%s' "$state" | sha1sum | cut -c1-8)"
+    # (a scope of that name that is left without a server in it is not in the way)
+    systemctl --user stop "$unit.scope" >/dev/null 2>&1 || true
+    if systemd-run --user --scope --quiet --collect --unit="$unit-probe" -p ManagedOOMPreference=avoid true 2>/dev/null; then
+        scope=(systemd-run --user --scope --quiet --collect --unit="$unit" -p ManagedOOMPreference=avoid)
+        scope_unit="$unit"
+    elif systemd-run --user --scope --quiet --collect --unit="$unit-probe" true 2>/dev/null; then
+        scope=(systemd-run --user --scope --quiet --collect --unit="$unit")
+        scope_unit="$unit"
+    fi
+}
+
 start() {
     local pid
     if pid=$(running_pid); then
@@ -87,12 +114,14 @@ start() {
 
     local before
     before=$(stat -c %s "$logfile" 2>/dev/null || echo 0)
+    own_group
     # (9>&-: the server does not inherit the lock that this command may hold, which it would keep for as long as it lives)
-    setsid nohup "$node_bin" src/main.mjs "$@" --pid-file "$pidfile" >>"$logfile" 2>&1 </dev/null 9>&- &
+    setsid nohup "${scope[@]}" "$node_bin" src/main.mjs "$@" --pid-file "$pidfile" >>"$logfile" 2>&1 </dev/null 9>&- &
     local launched=$!
     for _ in $(seq 1 50); do
         if pid=$(running_pid); then
             echo "started (pid $pid), log: $logfile"
+            [ -z "$scope_unit" ] || echo "in a control group of its own, $scope_unit.scope: systemd-oomd, short of memory, kills a whole group at once"
             addresses
             return 0
         fi

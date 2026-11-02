@@ -2,6 +2,7 @@
 // listed and checked, a restore stops it, puts the copy back and starts it again (and a copy that is not whole is refused before anything is stopped), and the log is moved aside when it has grown.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -45,6 +46,72 @@ const addUser = (id, email) => {
 describe("scripts/run.sh", { skip: !existsSync(dist) && "web/dist is not built" }, () => {
   it("can be run as the documents say (scripts/run.sh ...): it is executable", () => {
     assert.ok((statSync(script).mode & 0o111) !== 0, "scripts/run.sh has lost its executable bit");
+  });
+
+  // (systemd-oomd, short of memory, kills a whole control group at once: a server that is started from a terminal, or from the session of a tool, is in that terminal's group, and on 24 October
+  // it went with a tmux pane's 27 processes, with nothing in its log. It has a scope of its own, named after its state folder, so that two servers do not meet and a test never touches the
+  // live one; where there is no user manager to ask it is started as before)
+  const userManager = existsSync(`/run/user/${process.getuid()}/bus`) && spawnSync("systemd-run", ["--version"]).status === 0;
+  const groupTests = { skip: !userManager && "there is no user manager of systemd to ask" };
+  const unitOf = (folder) => `zim-server-${createHash("sha1").update(join(folder, "zim-server")).digest("hex").slice(0, 8)}.scope`;
+  const inFolder = (folder, ...args) => {
+    const done = spawnSync("bash", [script, ...args], { env: { ...env, XDG_STATE_HOME: folder }, encoding: "utf8", timeout: 60_000 });
+    return { status: done.status, out: done.stdout + done.stderr };
+  };
+  const groupOf = (folder) => {
+    const pid = readFileSync(join(folder, "zim-server", "serve.pid"), "utf8").trim();
+    return /zim-server-[0-9a-f]{8}\.scope/.exec(readFileSync(`/proc/${pid}/cgroup`, "utf8"))?.[0];
+  };
+  const folders = () => [mkdtempSync(join(tmpdir(), "zim-group-a-")), mkdtempSync(join(tmpdir(), "zim-group-b-"))];
+  const clean = (list) => {
+    for (const folder of list) {
+      inFolder(folder, "stop");
+      rmSync(folder, { recursive: true, force: true });
+    }
+  };
+
+  it("starts the server in a control group of its own that systemd-oomd is asked to leave for last, named after its state folder: two servers do not meet", groupTests, () => {
+    const list = folders();
+    try {
+      for (const folder of list) {
+        const started = inFolder(folder, "start", "--host", "127.0.0.1", "--port", "0");
+        assert.equal(started.status, 0, started.out);
+        assert.match(started.out, /started \(pid \d+\)/);
+        assert.match(started.out, /in a control group of its own, zim-server-[0-9a-f]{8}\.scope/);
+      }
+      const [a, b] = list.map(groupOf);
+      assert.equal(a, unitOf(list[0]), "a scope named after its state folder");
+      assert.equal(b, unitOf(list[1]));
+      assert.notEqual(a, b, "two servers with two state folders are in two groups");
+      const asked = spawnSync("systemctl", ["--user", "show", "-p", "ManagedOOMPreference", "--value", a], { encoding: "utf8" });
+      assert.equal(asked.stdout.trim(), "avoid", "oomd is asked to leave it for last");
+      // (stopping one leaves the other; the scope goes with the server)
+      inFolder(list[0], "stop");
+      assert.equal(inFolder(list[1], "status").status, 0, "the other one still runs");
+      assert.notEqual(spawnSync("systemctl", ["--user", "is-active", "--quiet", a]).status, 0, "the scope is gone with its server");
+    } finally {
+      clean(list);
+    }
+  });
+
+  it("is not stopped by a scope of its name that was left behind with something else in it, and starts as before where there is no user manager to ask", groupTests, () => {
+    const [folder, other] = folders();
+    const stale = spawn("systemd-run", ["--user", "--scope", "--quiet", "--collect", `--unit=${unitOf(folder).replace(/\.scope$/, "")}`, "sleep", "300"], { stdio: "ignore" });
+    try {
+      for (let waited = 0; spawnSync("systemctl", ["--user", "is-active", "--quiet", unitOf(folder)]).status !== 0 && waited < 5000; waited += 100) spawnSync("sleep", ["0.1"]);
+      assert.equal(spawnSync("systemctl", ["--user", "is-active", "--quiet", unitOf(folder)]).status, 0, "the scope that is in the way is there");
+      const started = inFolder(folder, "start", "--host", "127.0.0.1", "--port", "0");
+      assert.equal(started.status, 0, started.out);
+      assert.equal(groupOf(folder), unitOf(folder), "the server is in the scope that was in the way, which was ended first");
+      // (no user manager to ask: its bus is not where the script looks)
+      const done = spawnSync("bash", [script, "start", "--host", "127.0.0.1", "--port", "0"], { env: { ...env, XDG_STATE_HOME: other, XDG_RUNTIME_DIR: join(other, "none") }, encoding: "utf8", timeout: 60_000 });
+      assert.equal(done.status, 0, done.stdout + done.stderr);
+      assert.doesNotMatch(done.stdout, /control group of its own/);
+      assert.equal(groupOf(other), undefined, "it is in the group that started it, as before");
+    } finally {
+      stale.kill();
+      clean([folder, other]);
+    }
   });
 
   it("says what it does when it is asked wrong, and that it is not running when it is not", () => {
