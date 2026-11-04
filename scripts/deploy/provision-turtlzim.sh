@@ -112,6 +112,17 @@ done
 
 if [ -z "$P" ] && [ "$(id -u)" -ne 0 ] && [ "$DRY" = 0 ] && [ "$MODE" != check ]; then die "this has to be run with sudo (or with --dry-run, which changes nothing)"; fi
 
+# Another setup of this shared machine (HubManager's) changes ufw and sshd too, and the numbers of ufw's rules move while one of them adds or deletes: only one at a time, by a lock that both take (`flock` on file
+# descriptor 9, the same file in both: serveur-partage-mise-en-place.lock). Not for --check nor --dry-run, which change nothing. Nothing that this script starts and leaves running keeps the descriptor.
+LOCK="$P/run/lock/serveur-partage-mise-en-place.lock"
+take_lock() {
+  [ "$DRY" = 0 ] || return 0
+  command -v flock >/dev/null 2>&1 || die "flock is missing (it is in util-linux)"
+  mkdir -p "$P/run/lock"
+  exec 9>"$LOCK"
+  flock -n 9 || die "another setup of this shared machine is going on (it holds $LOCK): wait until it is over, then run this again"
+}
+
 account_home() { if getent passwd "$ACCOUNT" >/dev/null 2>&1; then getent passwd "$ACCOUNT" | cut -d: -f6; else echo "$P/home/$ACCOUNT"; fi; }
 account_uid() { if getent passwd "$ACCOUNT" >/dev/null 2>&1; then id -u "$ACCOUNT"; else echo "<uid>"; fi; }
 # the account's own systemd, as the account: its runtime folder is where its user manager is
@@ -137,6 +148,7 @@ fi
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------------------
 if [ "$MODE" = remove ]; then
+  take_lock
   step "removing what is named turtlzim (the data and the account stay unless --purge-data and --purge-account say so)"
   if getent passwd "$ACCOUNT" >/dev/null 2>&1; then
     act "stop and disable the account's units" stop_units
@@ -146,10 +158,17 @@ if [ "$MODE" = remove ]; then
     done
   fi
   if command -v ufw >/dev/null 2>&1; then
-    # (the rules that carry our comment, by number, from the last: the numbers of the others do not change; no other rule is looked at)
-    for number in $(ufw status numbered 2>/dev/null | grep -E '# turtlzim:' | sed -E 's/^\[ *([0-9]+)\].*/\1/' | sort -rn); do
-      act "ufw: remove our rule number $number" ufw --force delete "$number"
-    done
+    # (only the rules that carry our comment, and no other is looked at. The list is read again before each deletion: a number that was read a moment ago may not be the same rule now.)
+    ours() { ufw status numbered 2>/dev/null | grep -E '# turtlzim:' | sed -E 's/^\[ *([0-9]+)\].*/\1/' || true; }
+    if [ "$DRY" = 1 ]; then
+      for number in $(ours); do say "[dry run] ufw: remove our rule number $number"; done
+    else
+      for _ in $(seq 1 20); do
+        number="$(ours | head -n 1)"
+        [ -n "$number" ] || break
+        act "ufw: remove our rule number $number" ufw --force delete "$number"
+      done
+    fi
   fi
   for d in "$OPT" "$LIB" "$ETC"; do
     case "$d" in
@@ -190,6 +209,11 @@ say "compare it with the key that was made for GitHub's secret BETA_SIGNING_KEY 
 missing=()
 for c in ssh-keygen tar curl sha256sum xz openssl systemctl loginctl runuser useradd getent id; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
 [ "${#missing[@]}" -eq 0 ] || die "these are missing on this machine, and this does not install packages: ${missing[*]}"
+take_lock
+if [ "$DRY" = 0 ]; then
+  pending="$(systemctl list-units --type=timer --state=active --no-legend '*-ufw-undo.timer' 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+  [ -z "${pending// /}" ] || die "another setup of this shared machine has a firewall rollback pending (${pending}): it would switch ufw off after this one. Confirm it or cancel it first (systemctl stop ...), then run this again"
+fi
 [ "$DRY" = 1 ] && say "(dry run: nothing below is done)"
 
 step "the account $ACCOUNT"
@@ -215,7 +239,7 @@ install_node() {
   gone() { rm -rf -- "$tmp"; die "$1: nothing was installed"; }
   curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/node.tar.xz" "$NODE_URL" || gone "Node could not be downloaded from $NODE_URL"
   echo "$NODE_SHA256  $tmp/node.tar.xz" | sha256sum -c --quiet - || gone "the Node that was downloaded is not the one whose SHA-256 is written in this file"
-  tar -xJf "$tmp/node.tar.xz" -C "$tmp" || gone "the Node that was downloaded could not be unpacked"
+  tar -xJf "$tmp/node.tar.xz" -C "$tmp" --no-same-owner || gone "the Node that was downloaded could not be unpacked"
   [ -x "$tmp/node-v$NODE_VERSION-linux-x64/bin/node" ] || gone "there is no node in what was unpacked"
   rm -rf -- "$LIB/node-v$NODE_VERSION"
   mv "$tmp/node-v$NODE_VERSION-linux-x64" "$LIB/node-v$NODE_VERSION"
@@ -270,8 +294,8 @@ done
 step "starting them"
 act "let the account's services run without a login (loginctl enable-linger)" loginctl enable-linger "$ACCOUNT"
 if [ "$DRY" = 0 ]; then
-  for _ in $(seq 1 30); do [ -d "$P/run/user/$(account_uid)" ] && break; sleep 1; done
-  [ -d "$P/run/user/$(account_uid)" ] || die "the account's systemd did not start (no /run/user/$(account_uid)): is `systemd-logind` running?"
+  for _ in $(seq 1 "${TURTLZIM_WAIT_SECONDS:-30}"); do [ -d "$P/run/user/$(account_uid)" ] && break; sleep 1; done
+  [ -d "$P/run/user/$(account_uid)" ] || die "the account's systemd did not start (no /run/user/$(account_uid)): is systemd-logind running?"
 fi
 act "reload the account's units" as_account systemctl --user daemon-reload
 act "enable the server and the timer" as_account systemctl --user enable turtlzim.service turtlzim-update.timer
@@ -290,7 +314,8 @@ if command -v ufw >/dev/null 2>&1; then
   if grep -q '^Status: active' <<<"$state"; then
     for p in "$PORT:https" "$REDIRECT_PORT:http that redirects to https"; do
       number="${p%%:*}"
-      if grep -qE "^$number/tcp[[:space:]]+ALLOW" <<<"$state"; then say "ufw already allows $number/tcp (not changed)"; else act "ufw: allow $number/tcp" ufw allow "$number/tcp" comment "turtlzim: ${p#*:}"; fi
+      # (any rule for that port, whatever its action: `ufw allow` would replace it in silence, its action and its comment)
+      if grep -qE "^$number(/tcp)?[[:space:]]" <<<"$state"; then say "ufw already has a rule for $number/tcp (not changed)"; else act "ufw: allow $number/tcp" ufw allow "$number/tcp" comment "turtlzim: ${p#*:}"; fi
     done
   elif grep -q '^Status: inactive' <<<"$state"; then
     say "ufw is not active: nothing added, and it is not switched on. The ports are $PORT/tcp and $REDIRECT_PORT/tcp."

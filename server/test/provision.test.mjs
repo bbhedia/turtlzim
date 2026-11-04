@@ -2,10 +2,10 @@
 // (TURTLZIM_PREFIX), and the commands that would change a machine (useradd, loginctl, systemctl, runuser, ufw, chown, curl) are stand-ins that say what they were asked and keep a little state. What is tried is
 // the script's own logic: what it refuses, what it does and in what way, that it can be run again, that it leaves alone what is not its, and that it can take its own things away and nothing else.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -20,8 +20,8 @@ const STUBS = {
   id: `case "$*" in "-u turtlzim") [ -f "$FAKE_STATE/user" ] && echo 1234 || exit 1 ;; "-nG turtlzim") cat "$FAKE_STATE/groups" 2>/dev/null || echo turtlzim ;; *) exec /usr/bin/id "$@" ;; esac`,
   useradd: `echo "useradd $*" >> "$FAKE_STATE/calls.log"; touch "$FAKE_STATE/user"; mkdir -p "$TURTLZIM_PREFIX/home/turtlzim"`,
   userdel: `echo "userdel $*" >> "$FAKE_STATE/calls.log"; rm -f "$FAKE_STATE/user"`,
-  loginctl: `echo "loginctl $*" >> "$FAKE_STATE/calls.log"; case "$1" in enable-linger) touch "$FAKE_STATE/linger"; mkdir -p "$TURTLZIM_PREFIX/run/user/1234" ;; disable-linger) rm -f "$FAKE_STATE/linger" ;; show-user) echo "Linger=$([ -f "$FAKE_STATE/linger" ] && echo yes || echo no)" ;; esac`,
-  systemctl: `echo "systemctl $*" >> "$FAKE_STATE/calls.log"; case "$*" in *is-active*) echo active ;; esac`,
+  loginctl: `echo "loginctl $*" >> "$FAKE_STATE/calls.log"; case "$1" in enable-linger) touch "$FAKE_STATE/linger"; if [ -z "\${FAKE_NO_RUNTIME:-}" ]; then mkdir -p "$TURTLZIM_PREFIX/run/user/1234"; fi ;; disable-linger) rm -f "$FAKE_STATE/linger" ;; show-user) echo "Linger=$([ -f "$FAKE_STATE/linger" ] && echo yes || echo no)" ;; esac`,
+  systemctl: `echo "systemctl $*" >> "$FAKE_STATE/calls.log"; case "$*" in *is-active*) echo active ;; *list-units*) [ -f "$FAKE_STATE/undo-timer" ] && echo "hubmanager-ufw-undo.timer loaded active waiting Rollback of the firewall" ;; esac; exit 0`,
   runuser: `echo "runuser $*" >> "$FAKE_STATE/calls.log"; shift 3; exec "$@"`,
   chown: `echo "chown $*" >> "$FAKE_STATE/calls.log"`,
   uname: `[ "$1" = -m ] && echo x86_64 || exec /usr/bin/uname "$@"`,
@@ -204,7 +204,7 @@ describe("the installation", () => {
     assert.equal(done.status, 0, done.stderr);
     const allows = m.calls().filter((call) => call.startsWith("ufw allow"));
     assert.deepEqual(allows, ["ufw allow 8244/tcp comment turtlzim: https"], "8281 was open already: not added, not changed");
-    assert.match(done.stdout, /ufw already allows 8281\/tcp \(not changed\)/);
+    assert.match(done.stdout, /ufw already has a rule for 8281\/tcp \(not changed\)/);
     const rules = m.rules();
     assert.equal(rules.length, 4);
     assert.ok(rules[0].startsWith("22/tcp") && rules[1].includes("# hubmanager: HTTPS staging") && rules[2].startsWith("8281/tcp"), "the others are as they were");
@@ -218,6 +218,62 @@ describe("the installation", () => {
     const done = m.install();
     assert.match(done.stdout, /ufw is not active: nothing added, and it is not switched on\. The ports are 8244\/tcp and 8281\/tcp/);
     assert.deepEqual(m.calls().filter((call) => call.startsWith("ufw allow") || call.startsWith("ufw enable")), []);
+  });
+});
+
+describe("a machine that it shares", () => {
+  it("does not go on while another setup of the machine holds the shared lock, and does not need it to look or to say what it would do", async () => {
+    const m = machine();
+    const lock = m.path("run/lock/serveur-partage-mise-en-place.lock");
+    mkdirSync(dirname(lock), { recursive: true });
+    // (a process that holds the lock, as the other setup does: it ends, and the lock with it, when it is killed)
+    const holder = spawn("bash", ["-c", `exec 9>"${lock}"; flock -n 9 && echo held; exec sleep 60`], { stdio: ["ignore", "pipe", "ignore"] });
+    try {
+      await new Promise((resolve) => holder.stdout.once("data", resolve));
+      const refused = m.install();
+      assert.notEqual(refused.status, 0);
+      assert.match(refused.stderr, /another setup of this shared machine is going on \(it holds .*serveur-partage-mise-en-place\.lock\)/);
+      assert.deepEqual(m.calls().filter((call) => /^(useradd|loginctl|ufw allow)/.test(call)), [], "nothing was done");
+      assert.equal(m.install(["--dry-run"]).status, 0, "a dry run changes nothing, so it does not have to wait");
+      assert.equal(m.run(["--check"]).status, 0);
+      assert.notEqual(m.run(["--remove"]).status, 0, "taking away needs the lock too: ufw's numbers move while the other one works");
+    } finally {
+      holder.kill("SIGKILL");
+    }
+    await new Promise((resolve) => holder.once("exit", resolve));
+    const done = m.install();
+    assert.equal(done.status, 0, done.stderr);
+  });
+
+  it("does not go on while another setup of the machine has a firewall rollback pending, which would switch ufw off after this one", () => {
+    const m = machine();
+    m.write(join(m.state, "undo-timer"), "");
+    const refused = m.install();
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /has a firewall rollback pending \(hubmanager-ufw-undo\.timer/);
+    assert.deepEqual(m.calls().filter((call) => /^(useradd|loginctl|ufw allow)/.test(call)), []);
+    assert.equal(m.install(["--dry-run"]).status, 0);
+    rmSync(join(m.state, "undo-timer"));
+    assert.equal(m.install().status, 0);
+  });
+
+  it("leaves alone a port that has a rule of any kind, since ufw would replace it in silence, its action and its comment", () => {
+    const m = machine();
+    m.write(join(m.state, "ufw.status"), "active");
+    m.write(join(m.state, "ufw.rules"), "8244/tcp                    LIMIT IN    Anywhere                   # another: rate limited\n");
+    const done = m.install();
+    assert.equal(done.status, 0, done.stderr);
+    assert.deepEqual(m.calls().filter((call) => call.startsWith("ufw allow")), ["ufw allow 8281/tcp comment turtlzim: http that redirects to https"]);
+    assert.match(done.stdout, /ufw already has a rule for 8244\/tcp \(not changed\)/);
+    assert.ok(m.rules()[0].includes("LIMIT IN") && m.rules()[0].includes("# another: rate limited"), "the rule that was there is as it was");
+  });
+
+  it("says what went wrong, and runs nothing that it should not, when the account's own systemd does not start", () => {
+    const m = machine();
+    const failed = m.install([], { FAKE_NO_RUNTIME: "1", TURTLZIM_WAIT_SECONDS: "1" });
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /the account's systemd did not start \(no \/run\/user\/1234\): is systemd-logind running\?/);
+    assert.doesNotMatch(failed.stderr, /command not found|not found/);
   });
 });
 
@@ -244,6 +300,11 @@ describe("looking, and taking away", () => {
     m.install();
     m.write(join(m.path("var/lib/turtlzim"), "zim.sqlite"), "the data");
     assert.equal(m.rules().length, 4);
+    const rehearsal = m.run(["--remove", "--dry-run"]);
+    assert.equal(rehearsal.status, 0, rehearsal.stderr);
+    assert.equal((rehearsal.stdout.match(/\[dry run\] ufw: remove our rule number/g) ?? []).length, 2, "it says each of our rules, and only ours");
+    assert.equal(m.rules().length, 4, "and takes none away");
+    assert.ok(existsSync(m.path("opt/turtlzim")));
     const done = m.run(["--remove"]);
     assert.equal(done.status, 0, `${done.stdout}\n${done.stderr}`);
     assert.equal(m.rules().length, 2);
