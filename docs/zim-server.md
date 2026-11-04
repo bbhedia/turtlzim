@@ -243,18 +243,35 @@ with it, so the authority's fingerprint says nothing of which certificate a serv
 ```bash
 cd web && npm run build                      # the files of the app (server/ serves web/dist)
 cd ../server && npm install                  # nodemailer
-ZIM_BASE_URL=https://localhost:8443 scripts/run.sh start --host :: --port 8443 --tls --name ADDRESS [--download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk]
+ZIM_BASE_URL=https://localhost:8443 scripts/run.sh start --host :: --port 8443 --tls --name ADDRESS [--redirect-port 8281] [--download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk]
 scripts/run.sh status | log | stop | restart
 scripts/run.sh check                         # does it answer, and does its database (exit 0), else why not (1; 3 if it is not running)
 scripts/run.sh ensure                        # E20c, for cron every minute: start it if it is down, restart it if it has not answered twice, say so; docs/zim-operations.md
 scripts/run.sh backup | backups | verify BACKUP | restore BACKUP   # E20a: copies of what it keeps, and the way back (docs/zim-operations.md)
 node scripts/load.mjs --users 20 [--storm 100]   # the server on a data folder of its own, driven by virtual people (what it costs: docs/zim-operations.md)
-npm test                                     # 205 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage, apps signed in, what the server says when it starts, backups and restore, the hashing limiter, scripts/run.sh
+npm test                                     # 228 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage, apps signed in, what the server says when it starts, backups and restore, the hashing limiter, scripts/run.sh, the plain-http port that redirects
 ```
 
 `ZIM_BASE_URL` is the address people **type**: the services send the browser back to it, and it decides `Secure` cookies. From your own computer to this
 server, use an SSH tunnel (`ssh -L 8443:127.0.0.1:8443 you@this-server`, then `https://localhost:8443`): Google accepts `localhost` as a redirect address,
 a bare IP it does not. The data (SQLite file, the key for codes, `outbox.jsonl`) is in `~/.local/state/zim-server` (`ZIM_SERVER_DATA`). **Backups, restoring, updating, the log and what to do when the data leaks: `docs/zim-operations.md`.**
+
+### A plain-http port that only sends people to https (E20f: `--redirect-port`, `server/src/redirect.mjs`)
+
+A person who types `http://address:8281` for a server that speaks https on 8244 gets a connection error. With `--tls --redirect-port 8281` the server also listens, over plain http, on that port, and the
+only thing it does there is send people to the https address: a `307` to `https://<the host that was typed>:<the server's https port><the path and the query>`. It is in the server and not in a proxy so that it behaves
+the same wherever the server runs (a computer on a network, a hoster's VPS), is tried with the rest, and leaves nothing more to install or to keep up on a machine that other applications share.
+
+- **It serves nothing.** Not the app, not the API, not the APK or the authority's certificate: every path is the redirect, so there is nothing on http to read or to attack.
+- **The redirect cannot be made to go anywhere else.** The host is the one in the request's `Host` header **only if the server's certificate is for it** (the `--name` list, and `localhost`, `127.0.0.1`, `::1`;
+  an address written another way is the same address). Another host gets `421`; a target that is not a path (`*`, an address with a host in it) gets `400`; bytes that are not ASCII are refused by Node's own parser before
+  the redirect sees them. The port is the server's own https port. The path and the query are written so that no byte of them can end a header line or leave the host (`server/test/redirect.test.mjs` tries 500 random targets).
+- **Nothing sensitive keeps travelling over http because the redirect made it work.** Only `GET` and `HEAD` are sent on. A `POST` or anything else gets `405` (`Allow: GET, HEAD`), so that an app or a script that was
+  given the http address fails at once instead of sending a password in clear one more time and being redirected.
+- **A browser keeps nothing of it.** The redirect is a temporary one with `Cache-Control: no-store` (the https port is the one thing in it that can change, and a browser that kept it would go on sending people to the
+  old port), the reply is `text/plain` with `nosniff` and no referrer, and the connection is ended. The log says the path and the status, and nothing of the query. Headers over 8 KB are refused (`431`).
+- The server does not start, and says why, if `--redirect-port` comes without `--tls`, is the port of the server itself, is not a number from 0 to 65535, or is taken. Port 0 is a free one (what the tests use).
+- What the server cannot do from the inside: a router that sends an outside port to this one is the owner's, and so is the firewall (`ufw allow 8281/tcp`).
 
 ### Mail
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Keeps the account server (src/main.mjs: the web app and /api/) running in the background, like web/scripts/serve.sh does for the static server.
 #
-#   scripts/run.sh start [--host ::] [--port 8443] [--tls --name ADDRESS] | stop | restart | status | log [-f]
+#   scripts/run.sh start [--host ::] [--port 8443] [--tls --name ADDRESS [--redirect-port 8281]] | stop | restart | status | log [-f]
 #   scripts/run.sh check                      does it answer, and does its database (exit 0), else why not (exit 1; 3 if it is not running)
 #   scripts/run.sh ensure                     for cron, every minute: start it if it is not running, restart it if it has not answered twice in a row, say so (watch.log, the output,
 #                                             and the command in ZIM_ALERT_COMMAND), give up after 3 restarts in 10 minutes; a server that `stop` stopped is left alone
