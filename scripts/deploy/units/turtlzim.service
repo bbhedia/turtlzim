@@ -1,0 +1,23 @@
+# The Turtlzim account server on a machine that updates itself by pull (docs/zim-delivery.md). A USER unit of the account `turtlzim` (no sudo, no login), put in its ~/.config/systemd/user/ by
+# provision-turtlzim.sh. What it runs is whatever /opt/turtlzim/current points at: the updater (turtlzim-update.service) points it at a new version and restarts this unit.
+# Its settings, and the server's own arguments (TURTLZIM_ARGS: the ports, the names the certificate is made for), are in /etc/turtlzim/env.
+[Unit]
+Description=Turtlzim account server
+# (nothing to start before the first version is installed)
+ConditionPathExists=/opt/turtlzim/current/server/src/main.mjs
+# (a version that does not come up is started again every few seconds until the updater puts the old one back, not given up on)
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=/etc/turtlzim/env
+WorkingDirectory=/opt/turtlzim/current/server
+ExecStart=/usr/local/lib/turtlzim/node/bin/node src/main.mjs $TURTLZIM_ARGS
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+# (this machine is shared with other applications)
+MemoryMax=512M
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

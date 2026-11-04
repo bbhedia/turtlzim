@@ -249,7 +249,7 @@ scripts/run.sh check                         # does it answer, and does its data
 scripts/run.sh ensure                        # E20c, for cron every minute: start it if it is down, restart it if it has not answered twice, say so; docs/zim-operations.md
 scripts/run.sh backup | backups | verify BACKUP | restore BACKUP   # E20a: copies of what it keeps, and the way back (docs/zim-operations.md)
 node scripts/load.mjs --users 20 [--storm 100]   # the server on a data folder of its own, driven by virtual people (what it costs: docs/zim-operations.md)
-npm test                                     # 228 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage, apps signed in, what the server says when it starts, backups and restore, the hashing limiter, scripts/run.sh, the plain-http port that redirects
+npm test                                     # 280 tests: accounts, OAuth against fake Google/GitHub, the HTTP layer, notebook storage, apps signed in, what the server says when it starts, backups and restore, the hashing limiter, scripts/run.sh, the plain-http port that redirects, and the delivery (docs/zim-delivery.md: the release, the updater, the provisioning script, the smoke test)
 ```
 
 `ZIM_BASE_URL` is the address people **type**: the services send the browser back to it, and it decides `Secure` cookies. From your own computer to this

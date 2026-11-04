@@ -147,6 +147,8 @@ The server brings its database up to date when it starts, **in one direction**: 
 
 One server process per data folder. Two on the same folder is not supported (it was never tried).
 
+A machine that updates itself by pull (the staging, `docs/zim-delivery.md`) follows these same rules, done by `scripts/deploy/turtlzim-update.mjs`: a verified backup first, the new version tried on a copy of it, the way back (the code, and the backup too if the old version refuses a database that the new one migrated). Going back by hand on such a machine: `docs/zim-delivery.md`, *Going back by hand*.
+
 ## The log
 
 `serve.log`: one line per request (the time, the address the request came from, the method, the path, the status) and what the server says when it starts and when something fails (a stack for an error that was not the person's). For `/api/` requests **the query is not logged** (a sign-in's return carries a code and a state), and the names of pages are in the *bodies* of the sync's requests, not its addresses (`/api/sync/notebooks/<id>/…`), so they are not in the log; the log does hold the addresses that people come from, which is personal data (the study in `docs/zim-cloud-feasibility.md` puts a retention period for the logs among what the privacy policy has to say: E19, not written yet). Behind a proxy it is the proxy's address (the log does not read the proxy's header; the limits do, with `ZIM_TRUST_PROXY`).

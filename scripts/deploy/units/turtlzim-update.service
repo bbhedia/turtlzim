@@ -1,0 +1,14 @@
+# One look at what is published, and what follows from it (scripts/deploy/turtlzim-update.mjs, docs/zim-delivery.md). Started by turtlzim-update.timer; a user unit of the account `turtlzim`.
+# Its exit status says how it went: 0 nothing to do or done, 1 it failed and the machine was put back, 3 what was found is not ours, 4 refused (nothing was changed), 5 a person is needed.
+# What it did last is in /opt/turtlzim/status.json, and what it said is in the journal.
+[Unit]
+Description=Turtlzim: look for a new version and install it
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/turtlzim/env
+ExecStart=/usr/local/lib/turtlzim/node/bin/node /usr/local/lib/turtlzim/turtlzim-update.mjs
+# (a download or a start that is slow is allowed its time, but not for ever)
+TimeoutStartSec=20min
+Nice=10
+NoNewPrivileges=yes

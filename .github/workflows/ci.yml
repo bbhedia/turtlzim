@@ -1,0 +1,95 @@
+# What has to be true before a change is taken: the web app type-checks, passes its tests and builds, and the account server passes its own (docs/zim-delivery.md). It runs on a pull request to master, and it is the first step of
+# the workflows that deliver (cd-beta.yml, cd-production.yml, which call it), so that all of them mean the same by "green". It is what the jobs `web` and `server` of desktop.yml do; that workflow, which packs the installers and tries the
+# iPhone app (and has to wait for a macOS machine and a Windows one), is NOT a condition of delivering the server: a delivery that waited for a runner that does not come would not be one.
+name: ci
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_call:
+
+# (a new push to a pull request ends the run of the one before it; a call from a delivery has a group of its own, so it never ends another)
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # (crates.io's download servers answer 500 now and then: cargo tries again, longer, before it gives up)
+  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: "120"
+
+jobs:
+  # The web app: the wasm of the Zim format and of the core, the editor, the service worker's list of files. web/dist is kept for the next job, and for the delivery, which ships it as it was built here.
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            core/turtl-core-rs -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      # (the core's SQLite is C, compiled for wasm32 by clang)
+      - run: sudo apt-get update && sudo apt-get install -y clang llvm
+      - name: the wasm of the format and of the core
+        working-directory: web
+        run: |
+          # (each step is tried three times: a download that fails for the network's sake is not the build's fault)
+          retry() { for attempt in 1 2 3; do "$@" && return 0; echo "attempt $attempt of $* failed"; sleep 20; done; return 1; }
+          retry npm ci
+          retry npm run wasm
+          retry npm run core
+      - name: typecheck, unit tests, build
+        working-directory: web
+        run: |
+          npm run typecheck
+          npm run build
+          npm test
+          npm run pwa:check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+
+  # The account server (server/): its tests, which include the ones of the delivery itself (the release that is made, the program that installs it on a machine, the script that puts a machine in place), on that same
+  # web/dist, since the server serves it. Node 24: the server uses its SQLite.
+  server:
+    needs: web
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: the server's tests
+        working-directory: server
+        shell: bash
+        run: |
+          set -o pipefail
+          npm ci
+          if ! npm test 2>&1 | tee test.log; then
+            # (a job's log is for whoever is signed in: what failed is put where the checks' annotations show it)
+            grep -E "^ℹ (tests|pass|fail) |^✖|^\s+✖|failureType|AssertionError|Error:" test.log | sed 's/%/%25/g' | head -n 12 | while IFS= read -r line; do echo "::error title=the server's tests::${line:0:900}"; done
+            exit 1
+          fi

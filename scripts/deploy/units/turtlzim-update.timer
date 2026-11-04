@@ -1,0 +1,11 @@
+# Every five minutes, a little apart from the minute (another application of this machine does the same: they do not both ask at once).
+[Unit]
+Description=Turtlzim: look for a new version every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

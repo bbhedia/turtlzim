@@ -1,0 +1,80 @@
+# The staging, delivered by pull (docs/zim-delivery.md). On every green push to master: the checks of a pull request (ci.yml), then the release that the staging machine takes (the server and the web app as they were built and
+# tested here, a manifest that says which commit that is, and its signature), put in the GitHub pre-release `beta`. NOTHING is sent to the machine: it comes and looks every five minutes
+# (scripts/deploy/turtlzim-update.mjs), checks the signature with the public key that was put on it, and installs what it finds, after a backup and a trial on a copy of its data, and with a way back.
+#
+# One secret, BETA_SIGNING_KEY (the private half of an ed25519 key made for this: docs/zim-delivery.md says how), in the environment "beta" of the repository. Until it is there this workflow stops at its publish step, saying so,
+# and publishes nothing.
+name: cd-beta
+
+on:
+  push:
+    branches: [master]
+    paths: ["web/**", "core/**", "server/**", "scripts/deploy/make-release.mjs", ".github/workflows/cd-beta.yml", ".github/workflows/ci.yml"]
+  workflow_dispatch:
+
+# One publication at a time, and one that has begun is finished: the three files of the release are replaced one after the other.
+concurrency:
+  group: cd-beta
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  publish:
+    needs: verify
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    # The environment holds the key that signs. In the repository's settings (Environments > beta > Deployment branches) limit it to the branch master: then no other branch's workflow can read it.
+    environment: beta
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # (the actions of this job are pinned to a commit: it is the job that holds the key that signs)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: web-dist
+          path: web/dist
+      - name: the archive, the manifest and its signature
+        env:
+          BETA_SIGNING_KEY: ${{ secrets.BETA_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BETA_SIGNING_KEY" ]; then
+            echo "::error title=cd-beta::The secret BETA_SIGNING_KEY is not set in the environment 'beta': nothing was published. docs/zim-delivery.md says how to make the key and where to put it."
+            exit 1
+          fi
+          key="$RUNNER_TEMP/beta-signing-key"
+          (umask 077; printf '%s\n' "$BETA_SIGNING_KEY" > "$key")
+          trap 'shred -u "$key" 2>/dev/null || rm -f "$key"' EXIT
+          node scripts/deploy/make-release.mjs --out release --commit "$GITHUB_SHA" --sign-key "$key" --install npm
+      - name: put it in the pre-release "beta"
+        run: |
+          set -euo pipefail
+          if ! gh release view beta > /dev/null 2>&1; then
+            gh release create beta --prerelease --target "$GITHUB_SHA" --title "Staging (rolling)" --notes "The version that the staging machine takes. Replaced on every green push to master."
+          fi
+          # The archive first, then the signature, then the manifest, which is what a machine reads first: for the second or two that this takes, a machine that looks finds a manifest
+          # and an archive that do not agree, refuses what it found, and looks again at its next look.
+          gh release upload beta release/turtlzim-beta.tar.gz --clobber
+          gh release upload beta release/turtlzim-beta.json.sig --clobber
+          gh release upload beta release/turtlzim-beta.json --clobber
+          # (the tag follows the commit that was published; the notes say which)
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/beta" -f sha="$GITHUB_SHA" -F force=true > /dev/null
+          gh release edit beta --notes "Commit $GITHUB_SHA ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA), built $(date -u +%Y-%m-%dT%H:%M:%SZ), run $GITHUB_RUN_ID. The version that the staging machine takes: replaced on every green push to master."
+          {
+            echo "### Published for the staging machine"
+            echo "- commit \`$GITHUB_SHA\`"
+            echo "- \`turtlzim-beta.tar.gz\`: $(stat -c %s release/turtlzim-beta.tar.gz) bytes, SHA-256 \`$(sha256sum release/turtlzim-beta.tar.gz | cut -d' ' -f1)\`"
+            echo "- signed (the machine checks it with the public key that it holds)"
+          } >> "$GITHUB_STEP_SUMMARY"
