@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Keeps the account server (src/main.mjs: the web app and /api/) running in the background, like web/scripts/serve.sh does for the static server.
 #
-#   scripts/run.sh start [--host ::] [--port 8443] [--tls --name ADDRESS [--redirect-port 8281]] | stop | restart | status | log [-f]
+#   scripts/run.sh start [--host ::] [--port 8144] [--tls --name ADDRESS [--redirect-port 8181]] | stop | restart | status | log [-f]
 #   scripts/run.sh check                      does it answer, and does its database (exit 0), else why not (exit 1; 3 if it is not running)
 #   scripts/run.sh ensure                     for cron, every minute: start it if it is not running, restart it if it has not answered twice in a row, say so (watch.log, the output,
 #                                             and the command in ZIM_ALERT_COMMAND), give up after 3 restarts in 10 minutes; a server that `stop` stopped is left alone
@@ -10,7 +10,7 @@
 #   scripts/run.sh verify BACKUP              is this copy whole?
 #   scripts/run.sh restore BACKUP             stop, put that copy back (what it replaces is kept in replaced-<date>/ of the data folder), start again
 #
-# Tell it where people reach it first: ZIM_BASE_URL=https://localhost:8443 (the sign-in services send the browser back there), and, to sign in with
+# Tell it where people reach it first: ZIM_BASE_URL=https://localhost:8144 (the sign-in services send the browser back there), and, to sign in with
 # Google or GitHub, put the apps' ids and secrets in ~/.local/state/zim-server/oauth.json (docs/zim-server.md). Without SMTP settings, the codes
 # that would be mailed are written to ~/.local/state/zim-server/outbox.jsonl. Needs web/dist (`npm run build` in web/). The log is moved aside
 # (serve.log.1 to .3) at a start when it is over 5 MiB (ZIM_LOG_MAX_BYTES). Backups and keeping it up: docs/zim-operations.md.

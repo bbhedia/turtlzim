@@ -243,7 +243,7 @@ with it, so the authority's fingerprint says nothing of which certificate a serv
 ```bash
 cd web && npm run build                      # the files of the app (server/ serves web/dist)
 cd ../server && npm install                  # nodemailer
-ZIM_BASE_URL=https://localhost:8443 scripts/run.sh start --host :: --port 8443 --tls --name ADDRESS [--redirect-port 8281] [--download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk]
+ZIM_BASE_URL=https://localhost:8144 scripts/run.sh start --host :: --port 8144 --tls --name ADDRESS [--redirect-port 8181] [--download /zim-notebook.apk=../mobile/out/zim-notebook-debug.apk]
 scripts/run.sh status | log | stop | restart
 scripts/run.sh check                         # does it answer, and does its database (exit 0), else why not (1; 3 if it is not running)
 scripts/run.sh ensure                        # E20c, for cron every minute: start it if it is down, restart it if it has not answered twice, say so; docs/zim-operations.md
@@ -253,7 +253,7 @@ npm test                                     # 284 tests: accounts, OAuth agains
 ```
 
 `ZIM_BASE_URL` is the address people **type**: the services send the browser back to it, and it decides `Secure` cookies. From your own computer to this
-server, use an SSH tunnel (`ssh -L 8443:127.0.0.1:8443 you@this-server`, then `https://localhost:8443`): Google accepts `localhost` as a redirect address,
+server, use an SSH tunnel (`ssh -L 8144:127.0.0.1:8144 you@this-server`, then `https://localhost:8144`): Google accepts `localhost` as a redirect address,
 a bare IP it does not. The data (SQLite file, the key for codes, `outbox.jsonl`) is in `~/.local/state/zim-server` (`ZIM_SERVER_DATA`). **Backups, restoring, updating, the log and what to do when the data leaks: `docs/zim-operations.md`.**
 
 ### A plain-http port that only sends people to https (E20f: `--redirect-port`, `server/src/redirect.mjs`)
@@ -281,9 +281,9 @@ Sending e-mail from a home or VPS address without SPF/DKIM lands in spam; use a 
 
 ### Register the sign-in apps (you do this once; the secrets stay in this folder)
 
-Callback address for each: `<ZIM_BASE_URL>/api/oauth/<provider>/callback`, e.g. `https://localhost:8443/api/oauth/github/callback`.
+Callback address for each: `<ZIM_BASE_URL>/api/oauth/<provider>/callback`, e.g. `https://localhost:8144/api/oauth/github/callback`.
 
-- **GitHub**: Settings → Developer settings → OAuth Apps → *New OAuth App*. Homepage `https://localhost:8443`, callback as above. Copy the Client ID, generate a Client secret. (GitHub allows one callback per app: make another app for another address.)
+- **GitHub**: Settings → Developer settings → OAuth Apps → *New OAuth App*. Homepage `https://localhost:8144`, callback as above. Copy the Client ID, generate a Client secret. (GitHub allows one callback per app: make another app for another address.)
 - **Google**: Google Cloud console → *APIs & Services* → *OAuth consent screen* (External, testing is enough for a handful of people you add as test users) → *Credentials* → *Create OAuth client ID* → Web application, *Authorised redirect URI* = the callback above. Scopes asked: `openid email profile`.
 
 Then `~/.local/state/zim-server/oauth.json` (mode 600), or the environment (`ZIM_GITHUB_CLIENT_ID`/`ZIM_GITHUB_CLIENT_SECRET`, `ZIM_GOOGLE_…`):

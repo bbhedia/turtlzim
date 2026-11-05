@@ -2,11 +2,13 @@
 
 How a change gets from the working tree to the machines that run it, and what verifies each step. One developer, Git trunk-based on `master`, three environments:
 
-| environment | where | what triggers it |
-|---|---|---|
-| **dev** | the developer's computer (the working tree; a durable instance of the account server serves it, for looking at the interface) | by hand |
-| **staging** (beta) | a test machine on the local network (`alchemyserver`), shared with other applications | a green push to `master`, **pulled** by the machine |
-| **production** | not chosen yet: Railway, or an alternative in the EU | a tag `vX.Y.Z` |
+| environment | where | ports: https, then http that only redirects | what triggers it |
+|---|---|---|---|
+| **dev** | the developer's computer (the working tree; a durable instance of the account server serves it, for looking at the interface) | **8144**, **8181** | by hand |
+| **staging** (beta) | a test machine on the local network (`alchemyserver`), shared with other applications | **8244**, **8281** | a green push to `master`, **pulled** by the machine |
+| **production** | not chosen yet: Railway, or an alternative in the EU | with the host | a tag `vX.Y.Z` |
+
+The ports are fixed on purpose: the origin of the web app includes its port, and a browser keeps local notebooks and the vault per origin, so a port that changes is a place that changes (and the native apps pin the certificate again and sign in again). The second port of each is the plain-http one that only redirects to https (`--redirect-port`, `docs/zim-server.md`). On the developer's computer other projects have ports of their own (8081 to 8084, and some on the loopback: `ss -ltn` says which are taken): none of them is used here (8081 in particular is taken). There is no beta of this project on the developer's computer: staging is `alchemyserver`.
 
 What is delivered is the account server and the web app it serves. The installers (Linux, Windows), the APK and the iPhone app are *published*, not deployed: `desktop.yml` makes them on every change of `web/`, `core/` or `desktop/`, and a draft release on a tag `v*`.
 

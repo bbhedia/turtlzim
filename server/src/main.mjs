@@ -1,8 +1,8 @@
 // The process: the web app's files and the account API, in one server (the static server of web/scripts/serve.mjs with the API hooked in).
 //
-//   node src/main.mjs [--host 127.0.0.1] [--port 8080] [--tls [--name ADDRESS]... [--redirect-port 8081]] [--download /address=file] [--dir ../web/dist] [--pid-file FILE]
+//   node src/main.mjs [--host 127.0.0.1] [--port 8080] [--tls [--name ADDRESS]... [--redirect-port 8181]] [--download /address=file] [--dir ../web/dist] [--pid-file FILE]
 //
-// Where it is reached (`ZIM_BASE_URL`, e.g. https://localhost:8443) has to be the address that people type: the sign-in services send the browser back to it.
+// Where it is reached (`ZIM_BASE_URL`, e.g. https://localhost:8144) has to be the address that people type: the sign-in services send the browser back to it.
 // With --tls, --redirect-port opens a plain-http port that serves nothing but a redirect to the https address (src/redirect.mjs).
 import { readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
