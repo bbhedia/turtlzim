@@ -473,7 +473,7 @@ describe.skipIf(!hasOpenssl)("https", () => {
   it("takes only names: an address or a host name, nothing that openssl's settings would read as something else", () => {
     expect(certificateName("Notes.Example.org")).toBe("DNS:notes.example.org");
     expect(certificateName(" 203.0.113.7 ")).toBe("IP:203.0.113.7");
-    expect(certificateName("2A05:6E02::1")).toBe("IP:2a05:6e02::1");
+    expect(certificateName("2001:DB8::1")).toBe("IP:2001:db8::1");
     expect(certificateName("my-host")).toBe("DNS:my-host");
     for (const bad of ["", "two words", "a;b", "x,DNS:evil.test", "1.2.3.4/8", "999.1.1.1", "fe80::1%eth0", "-leading.test", "trailing-.test", "double..dot", "under_score.test", "a=b", "\n", "*.test"]) {
       expect(() => certificateName(bad), JSON.stringify(bad)).toThrow(/not an address or a host name/);

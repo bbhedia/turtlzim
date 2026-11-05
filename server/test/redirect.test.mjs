@@ -37,7 +37,7 @@ describe("the host that a request names", () => {
       [" localhost ", "localhost"],
       ["[::1]:8281", "::1"],
       ["[0:0:0:0:0:0:0:1]", "::1"],
-      ["[2A05:6E02:104D:1710:7A8C:B5FF:FE63:A198]:8281", "2a05:6e02:104d:1710:7a8c:b5ff:fe63:a198"],
+      ["[2001:DB8:ABCD:1234:5678:9ABC:DEF0:1234]:8281", "2001:db8:abcd:1234:5678:9abc:def0:1234"],
     ]) {
       assert.equal(hostOf(header), host, header);
     }
