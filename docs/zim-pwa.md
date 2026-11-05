@@ -137,7 +137,7 @@ id twice on the machine this was built on; across machines it was not tried (the
 ## Trusting the certificate that `--tls` makes
 
 ```bash
-scripts/serve.sh restart --host :: --port 8443 --tls --name 130.180.221.123 --name 192.168.10.10
+scripts/serve.sh restart --host :: --port 8443 --tls --name 203.0.113.7 --name 192.168.10.10
 #                                                      ^ every address or host name that visitors type
 ```
 

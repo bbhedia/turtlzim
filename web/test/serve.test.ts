@@ -404,22 +404,22 @@ describe.skipIf(!hasOpenssl)("https", () => {
   });
 
   it("names the addresses and host names it is given, and not the machine's own unless asked, so that the name visitors use is in it", () => {
-    const made = selfSignedCertificate(join(outside, "tls-names"), ["130.180.221.123", "Notes.Example.org"]);
-    expect([...made.names].sort()).toEqual(["127.0.0.1", "130.180.221.123", "::1", "localhost", "notes.example.org"]);
+    const made = selfSignedCertificate(join(outside, "tls-names"), ["203.0.113.7", "Notes.Example.org"]);
+    expect([...made.names].sort()).toEqual(["127.0.0.1", "203.0.113.7", "::1", "localhost", "notes.example.org"]);
     const parsed = new X509Certificate(made.cert);
-    expect(parsed.subjectAltName).toContain("IP Address:130.180.221.123");
+    expect(parsed.subjectAltName).toContain("IP Address:203.0.113.7");
     expect(parsed.subjectAltName).toContain("DNS:notes.example.org");
     for (const addresses of Object.values(networkInterfaces())) {
-      for (const a of addresses ?? []) if (a.family === "IPv4" && !a.internal && a.address !== "130.180.221.123") expect(parsed.subjectAltName).not.toContain(`IP Address:${a.address}`);
+      for (const a of addresses ?? []) if (a.family === "IPv4" && !a.internal && a.address !== "203.0.113.7") expect(parsed.subjectAltName).not.toContain(`IP Address:${a.address}`);
     }
     // another set of names is another certificate, and the same names are the same one
     const directory = join(outside, "tls-names");
-    expect(selfSignedCertificate(directory, ["notes.example.org", "130.180.221.123"]).cert.equals(made.cert)).toBe(true);
-    expect(selfSignedCertificate(directory, ["130.180.221.123"]).cert.equals(made.cert)).toBe(false);
+    expect(selfSignedCertificate(directory, ["notes.example.org", "203.0.113.7"]).cert.equals(made.cert)).toBe(true);
+    expect(selfSignedCertificate(directory, ["203.0.113.7"]).cert.equals(made.cert)).toBe(false);
   });
 
   it("is a server's certificate and not an authority's: it can sign nothing", () => {
-    const made = selfSignedCertificate(join(outside, "tls-server"), ["130.180.221.123"]);
+    const made = selfSignedCertificate(join(outside, "tls-server"), ["203.0.113.7"]);
     expect(new X509Certificate(made.cert).ca).toBe(false);
     const text = execFileSync("openssl", ["x509", "-noout", "-text"], { input: made.cert, encoding: "utf8" });
     expect(text).toContain("CA:FALSE");
@@ -429,20 +429,20 @@ describe.skipIf(!hasOpenssl)("https", () => {
 
   it("is signed by an authority that can vouch for these names and no others, and that has no key any more", () => {
     const directory = join(outside, "tls-authority");
-    const made = selfSignedCertificate(directory, ["130.180.221.123", "notes.example.org"]);
+    const made = selfSignedCertificate(directory, ["203.0.113.7", "notes.example.org"]);
     // nothing is left of the authority's key, or of what was used to sign with it
     expect(readdirSync(directory).sort()).toEqual(["ca.pem", "cert.pem", "key.pem", "names.txt"]);
     const text = execFileSync("openssl", ["x509", "-in", join(directory, "ca.pem"), "-noout", "-text"], { encoding: "utf8" });
     expect(text).toContain("CA:TRUE, pathlen:0");
     expect(text).toMatch(/X509v3 Name Constraints: critical/);
-    expect(text).toContain("IP:130.180.221.123/255.255.255.255");
+    expect(text).toContain("IP:203.0.113.7/255.255.255.255");
     expect(text).toContain("DNS:notes.example.org");
     expect(text).not.toContain("Digital Signature");
     // the server's certificate checks out against it for each of its names, and for no other
     const verify = (...args: string[]) => spawnSync("openssl", ["verify", "-CAfile", join(directory, "ca.pem"), ...args, join(directory, "cert.pem")], { encoding: "utf8" });
-    for (const ip of ["130.180.221.123", "127.0.0.1"]) expect(verify("-verify_ip", ip).status, ip).toBe(0);
+    for (const ip of ["203.0.113.7", "127.0.0.1"]) expect(verify("-verify_ip", ip).status, ip).toBe(0);
     for (const host of ["notes.example.org", "localhost"]) expect(verify("-verify_hostname", host).status, host).toBe(0);
-    for (const ip of ["1.2.3.4", "130.180.221.124"]) expect(verify("-verify_ip", ip).status, ip).not.toBe(0);
+    for (const ip of ["1.2.3.4", "203.0.113.8"]) expect(verify("-verify_ip", ip).status, ip).not.toBe(0);
     expect(verify("-verify_hostname", "evil.example.com").status).not.toBe(0);
     // what it says to check is the authority's fingerprint
     expect(made.fingerprint).toBe(new X509Certificate(readFileSync(join(directory, "ca.pem"))).fingerprint256);
@@ -472,7 +472,7 @@ describe.skipIf(!hasOpenssl)("https", () => {
 
   it("takes only names: an address or a host name, nothing that openssl's settings would read as something else", () => {
     expect(certificateName("Notes.Example.org")).toBe("DNS:notes.example.org");
-    expect(certificateName(" 130.180.221.123 ")).toBe("IP:130.180.221.123");
+    expect(certificateName(" 203.0.113.7 ")).toBe("IP:203.0.113.7");
     expect(certificateName("2A05:6E02::1")).toBe("IP:2a05:6e02::1");
     expect(certificateName("my-host")).toBe("DNS:my-host");
     for (const bad of ["", "two words", "a;b", "x,DNS:evil.test", "1.2.3.4/8", "999.1.1.1", "fe80::1%eth0", "-leading.test", "trailing-.test", "double..dot", "under_score.test", "a=b", "\n", "*.test"]) {
@@ -482,7 +482,7 @@ describe.skipIf(!hasOpenssl)("https", () => {
   });
 
   it("gives out the authority's certificate at /ca.pem, for a computer to be asked to trust, and nothing else of its own: never a key", async () => {
-    const made = selfSignedCertificate(join(outside, "tls-ca-route"), ["130.180.221.123"]);
+    const made = selfSignedCertificate(join(outside, "tls-ca-route"), ["203.0.113.7"]);
     const server = createStaticServer({ dir: site, tls: { key: made.key, cert: made.cert }, authority: made.authority });
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -558,7 +558,7 @@ describe.skipIf(!hasOpenssl)("https", () => {
 
   it("is given names on the command line, and says them and the fingerprint of the authority to check; names without --tls, or bad ones, are refused", async () => {
     const state = join(outside, "state-names");
-    const child = spawn(process.execPath, [script(), "--dir", site, "--port", "0", "--tls", "--name", "130.180.221.123", "--name", "notes.example.org"], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, XDG_STATE_HOME: state } });
+    const child = spawn(process.execPath, [script(), "--dir", site, "--port", "0", "--tls", "--name", "203.0.113.7", "--name", "notes.example.org"], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, XDG_STATE_HOME: state } });
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.stderr.on("data", (chunk) => (output += chunk));
@@ -573,7 +573,7 @@ describe.skipIf(!hasOpenssl)("https", () => {
     });
     try {
       const made = new X509Certificate(readFileSync(join(state, "zim-web", "tls", "ca.pem")));
-      expect(output).toContain("130.180.221.123");
+      expect(output).toContain("203.0.113.7");
       expect(output).toContain("notes.example.org");
       expect(output).toContain(`Its SHA-256: ${made.fingerprint256}`);
       expect(output).toContain(join(state, "zim-web", "tls", "ca.pem"));
@@ -585,7 +585,7 @@ describe.skipIf(!hasOpenssl)("https", () => {
     }
     // (a server that wrongly starts would run for ever: it is given a few seconds, and then ended)
     const run = (...args: string[]) => spawnSync(process.execPath, [script(), ...args], { encoding: "utf8", timeout: 8000, killSignal: "SIGKILL" });
-    expect(run("--dir", site, "--name", "130.180.221.123").stderr).toContain("--name goes with --tls");
+    expect(run("--dir", site, "--name", "203.0.113.7").stderr).toContain("--name goes with --tls");
     expect(run("--dir", site, "--tls", "--name", "two words").stderr).toContain("is not an address or a host name");
   });
 

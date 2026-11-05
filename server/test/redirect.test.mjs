@@ -24,7 +24,7 @@ after(() => {
   folders.forEach((folder) => rmSync(folder, { recursive: true, force: true }));
 });
 
-const NAMES = ["localhost", "127.0.0.1", "::1", "130.180.221.123", "192.168.10.11"];
+const NAMES = ["localhost", "127.0.0.1", "::1", "203.0.113.7", "192.168.10.11"];
 const go = (host, url = "/", port = 8244, names = NAMES) => redirectFor({ host, url, names, port });
 
 describe("the host that a request names", () => {
@@ -58,7 +58,7 @@ describe("the host that a request names", () => {
 describe("where a request is sent on", () => {
   it("is the host that the person typed, the server's https port, and the path and the query as they were asked", () => {
     assert.deepEqual(go("192.168.10.11:8281"), { status: 307, location: "https://192.168.10.11:8244/" });
-    assert.deepEqual(go("130.180.221.123:8281", "/api/me?x=1&y=%20"), { status: 307, location: "https://130.180.221.123:8244/api/me?x=1&y=%20" });
+    assert.deepEqual(go("203.0.113.7:8281", "/api/me?x=1&y=%20"), { status: 307, location: "https://203.0.113.7:8244/api/me?x=1&y=%20" });
     assert.deepEqual(go("LocalHost", "/#/Home"), { status: 307, location: "https://localhost:8244/#/Home" });
     assert.deepEqual(go("[::1]:8281"), { status: 307, location: "https://[::1]:8244/" });
     // (the address in another form is the same host)
@@ -70,7 +70,7 @@ describe("where a request is sent on", () => {
 
   it("is nowhere when the certificate is not for the host, whatever else the request says", () => {
     for (const host of [
-      "evil.example", "evil.example:8281", "192.168.10.12", "130.180.221.124", undefined, "", "localhost.evil.example", "xlocalhost", "192.168.10.11.evil.example", "[::2]", "localhost@evil.example",
+      "evil.example", "evil.example:8281", "192.168.10.12", "203.0.113.8", undefined, "", "localhost.evil.example", "xlocalhost", "192.168.10.11.evil.example", "[::2]", "localhost@evil.example",
       "evil.example#localhost", "evil.example, localhost",
     ]) {
       assert.deepEqual(go(host, "/?next=https://localhost/"), { status: 421 }, String(host));
